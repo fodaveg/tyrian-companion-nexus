@@ -1,0 +1,31 @@
+[package]
+name = "tyrian_companion_nexus"
+version = "0.1.0"
+edition = "2021"
+authors = ["fodaveg"]
+description = "Nexus addon that paints Tyrian Companion's in-game alerts inside Guild Wars 2"
+repository = "https://github.com/fodaveg/tyrian-companion-nexus"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tyrian_companion_nexus_core = { path = "../core" }
+
+# Windows-only, on purpose: `nexus`'s own dependency on the `windows` crate gates most of
+# its types behind `cfg(windows)`, so it cannot compile for this repository's Linux host at
+# all, and gating it here the same way is what lets `cargo build`/`cargo test` run bare, on
+# this host, without a `--target` — see `src/lib.rs`'s matching `#[cfg(windows)]` fences.
+[target.'cfg(windows)'.dependencies]
+# `nexus` is not published on crates.io under this name (that name is squatted by an
+# unrelated, abandoned 2016 crate, verified against the crates.io API before writing this).
+# Zerthox's Raidcore Nexus bindings live only in the git repo, so this pins the `0.12.0`
+# tag, matching the version `docs/SPEC-puente-ingame.md` names, by commit rather than by
+# branch.
+nexus = { git = "https://github.com/Zerthox/nexus-rs", tag = "0.12.0", features = ["log", "log_filter"] }
+# The `log` facade crate itself: `nexus`'s own "log" feature only wires its internal
+# `log::Log` backend to Nexus's log window, it does not re-export the `log::info!` etc.
+# macros this addon calls.
+log = "0.4"

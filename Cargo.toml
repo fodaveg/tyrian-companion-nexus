@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["core", "addon"]
+
+# Deliberately no `[workspace.dependencies]` shared version pins here: `core` has exactly
+# two dependencies (`serde`, `serde_json`) and `addon` has exactly two more (`nexus`, `log`),
+# and none of the four are shared, so a workspace-level table would only add indirection.
