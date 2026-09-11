@@ -32,8 +32,12 @@ pub struct SharedState {
     port: AtomicU16,
     /// Whether a client is currently connected to the plugin, for the panel's status line.
     connected: AtomicBool,
-    /// Highest `seq` acted on so far, or [`NO_SEQ`] if none yet. A per-process counter from
-    /// the plugin, used only to drop a duplicate, never to detect gaps or request replay.
+    /// Highest `seq` acted on so far, or [`NO_SEQ`] if none yet. A per-connection counter
+    /// from the plugin, used only to drop a duplicate within that connection, never to
+    /// detect gaps or request replay; reset to [`NO_SEQ`] via [`SharedState::reset_seq`]
+    /// at the start of every new connection, since the plugin restarts its own counter at
+    /// 1 on every relaunch and dedup across connections would silently drop everything
+    /// after a plugin restart.
     last_seq: AtomicU64,
     /// Set once this addon has shown the "update the addon" message, so it shows it exactly
     /// once for the lifetime of the load, not once per oversized-version line.
@@ -89,6 +93,15 @@ impl SharedState {
         }
     }
 
+    /// Forgets the highest `seq` accepted so far, so the next call to [`SharedState::accept_seq`]
+    /// treats the connection as fresh. Call this once per new connection, before serving any
+    /// lines from it: the plugin restarts its own `seq` counter at 1 every time it relaunches,
+    /// and without this an addon that outlives a plugin restart would discard every alert up to
+    /// the previous high-water mark.
+    pub fn reset_seq(&self) {
+        self.last_seq.store(NO_SEQ, Ordering::Relaxed);
+    }
+
     pub fn push_history(&self, alert: &Alert) {
         let mut history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if history.len() == HISTORY_CAPACITY {
@@ -141,6 +154,15 @@ mod tests {
         assert!(!state.accept_seq(Some(5)));
         assert!(!state.accept_seq(Some(3)));
         assert!(state.accept_seq(Some(6)));
+    }
+
+    #[test]
+    fn reset_seq_lets_a_previously_accepted_sequence_through_again() {
+        let state = SharedState::new();
+        assert!(state.accept_seq(Some(40)));
+        assert!(!state.accept_seq(Some(1)));
+        state.reset_seq();
+        assert!(state.accept_seq(Some(1)));
     }
 
     #[test]

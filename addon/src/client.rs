@@ -71,6 +71,10 @@ fn run(stop: &AtomicBool, client_version: &str) {
             Ok(stream) => {
                 backoff.record_success();
                 state::shared().set_connected(true);
+                // The plugin restarts its own `seq` counter at 1 on every relaunch, so the
+                // dedup window has to start over here too, or a plugin restart would leave
+                // every alert below the old high-water mark discarded in silence.
+                state::shared().reset_seq();
                 log::info!("connected to the Tyrian Companion plugin on 127.0.0.1:{port}");
                 serve(stream, client_version, stop);
                 state::shared().set_connected(false);
