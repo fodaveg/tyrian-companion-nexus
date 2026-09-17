@@ -1,0 +1,15 @@
+# Nexus carga el addon con LoadLibrary, y Wine resuelve sus dependencias desde el directorio
+# de Gw2-64.exe. Enlazado dinámicamente, la DLL pedía libstdc++-6.dll, libgcc_s_seh-1.dll y
+# libwinpthread-1.dll, que no están ahí: Nexus la descartaba con
+# «Failed LoadLibrary ... Error Code 126 : Module not found» y el addon no aparecía en el
+# juego. La runtime de C++ entra por arcdps-imgui-sys, que nexus arrastra y que compila
+# ImGui en C++ con mingw, aunque este addon no toque ImGui. Enlazarlas dentro de la DLL es
+# lo que la hace instalable en una máquina cualquiera, sin copiar DLL sueltas a mano.
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+  "-C", "link-arg=-static-libgcc",
+  "-C", "link-arg=-static-libstdc++",
+  "-C", "link-arg=-Wl,-Bstatic",
+  "-C", "link-arg=-lwinpthread",
+  "-C", "link-arg=-Wl,-Bdynamic",
+]

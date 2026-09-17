@@ -70,6 +70,43 @@ You need:
   workspace's root picks up `mingw64-gcc-c++`'s `x86_64-w64-mingw32-g++` the normal way once
   it is installed.
 
+#### Why the build statically links the mingw runtime
+
+`.cargo/config.toml` and `addon/build.rs` exist for one reason: a DLL linked the default way
+imports `libstdc++-6.dll`, `libgcc_s_seh-1.dll` and `libwinpthread-1.dll`, and none of those
+ship with Windows or with Wine. Nexus resolves an addon's dependencies from the directory of
+`Gw2-64.exe`, not from `addons/`, so it finds none of them, drops the addon with
+
+```
+[Loader] [WARNING] Failed LoadLibrary on "TyrianCompanion.dll". Incompatible.
+                   Error Code 126 : Module not found.
+```
+
+and the addon never appears in game. The C++ runtime is not this addon's doing: it arrives
+through `arcdps-imgui-sys`, which `nexus` depends on unconditionally and which compiles ImGui
+as C++, even though nothing here calls ImGui.
+
+`.cargo/config.toml` covers libgcc and winpthread with `-static-libgcc` and an explicit
+`-Wl,-Bstatic -lwinpthread`. It cannot cover libstdc++ the same way: `-static-libstdc++` is a
+driver option that only governs the `-lstdc++` the driver adds by itself, and this one is
+emitted by `arcdps-imgui-sys` in the middle of the link line, ahead of every `-C link-arg`.
+So `addon/build.rs` copies the toolchain's `libstdc++.a` into a directory of its own and puts
+it on the library search path, where `ld` reaches it before the toolchain's directory (the
+only one holding both `libstdc++.a` and `libstdc++.dll.a`). The comments in both files carry
+the detail.
+
+To check that a build is still clean, read the DLL's import table and make sure none of the
+three appear:
+
+```sh
+python3 -c "
+import pefile
+pe = pefile.PE('target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll', fast_load=True)
+pe.parse_data_directories()
+print(sorted({d.dll.decode().lower() for d in pe.DIRECTORY_ENTRY_IMPORT}))
+"
+```
+
 `nexus` itself is not published on crates.io under that name — a different, unrelated,
 abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git dependency at tag
 `0.12.0` from [`Zerthox/nexus-rs`](https://github.com/Zerthox/nexus-rs), matching the version
