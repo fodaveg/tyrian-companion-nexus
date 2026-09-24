@@ -2,6 +2,8 @@
 resolver = "2"
 members = ["core", "addon"]
 
-# Deliberately no `[workspace.dependencies]` shared version pins here: `core` has exactly
-# two dependencies (`serde`, `serde_json`) and `addon` has exactly two more (`nexus`, `log`),
-# and none of the four are shared, so a workspace-level table would only add indirection.
+# Deliberately no `[workspace.dependencies]` shared version pins here: `core` has three
+# dependencies (`serde`, `serde_json`, `log`) and `addon` adds `nexus` and `windows` (the latter
+# only for the `WndProc` callback's types, at the version `nexus` already pulls in); the one
+# shared crate, `log`, is pinned to the same `0.4` in both, so a workspace-level table would
+# only add indirection.

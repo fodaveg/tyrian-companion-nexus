@@ -1,11 +1,15 @@
 [package]
 name = "tyrian_companion_nexus_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["fodaveg"]
-description = "Platform-independent logic for the Tyrian Companion Nexus addon: the wire protocol, the line framer, the reconnect backoff table, settings persistence, and shared state. No `nexus` or `windows` dependency, so this builds and tests on any host."
+description = "Platform-independent logic for the Tyrian Companion Nexus addon: the v2 wire protocol, the client loop, the game-context reading, the line framer, the reconnect backoff table, settings persistence, and shared state. No `nexus` or `windows` dependency, so this builds and tests on any host."
 publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The client loop lives here now and has to log its connection events. The `log` facade is
+# already in the addon's graph (Nexus's logger backs it there); here, with no logger installed,
+# as in `cargo test`, every call is a no-op.
+log = "0.4"

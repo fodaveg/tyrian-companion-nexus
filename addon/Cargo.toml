@@ -1,9 +1,9 @@
 [package]
 name = "tyrian_companion_nexus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["fodaveg"]
-description = "Nexus addon that paints Tyrian Companion's in-game alerts inside Guild Wars 2"
+description = "Nexus addon that paints Tyrian Companion's in-game alerts inside Guild Wars 2 and reports the game context to the plugin"
 repository = "https://github.com/fodaveg/tyrian-companion-nexus"
 license = "MIT"
 publish = false
@@ -29,3 +29,6 @@ nexus = { git = "https://github.com/Zerthox/nexus-rs", tag = "0.12.0", features 
 # `log::Log` backend to Nexus's log window, it does not re-export the `log::info!` etc.
 # macros this addon calls.
 log = "0.4"
+# Only for the types of the `WndProc` callback (`HWND`, `WPARAM`, `LPARAM`), which `nexus` does
+# not re-export. Same version `nexus` already depends on, so this adds no crate to the build.
+windows = { version = "0.62.2", features = ["Win32_Foundation"] }

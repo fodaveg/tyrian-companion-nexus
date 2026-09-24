@@ -423,17 +423,19 @@ dependencies = [
 
 [[package]]
 name = "tyrian_companion_nexus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "nexus",
  "tyrian_companion_nexus_core",
+ "windows",
 ]
 
 [[package]]
 name = "tyrian_companion_nexus_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "log",
  "serde",
  "serde_json",
 ]
