@@ -474,6 +474,18 @@ fn without_a_usable_token_it_does_not_connect_and_says_so_once() {
 }
 
 #[test]
+fn a_gw2_api_key_in_the_token_setting_is_never_sent_in_a_hello() {
+    // It passes the plugin's format (72 printable characters), so only the addon can hold it back.
+    let api_key = "0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F90A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9";
+    let plugin = FakePlugin::start();
+    let (state, host, handle) = start_client(&plugin, api_key);
+    assert_eq!(host.wait_for_alerts(1), vec![TOKEN_MISSING_MESSAGE]);
+    assert_eq!(state.status(), Status::MissingToken);
+    assert!(plugin.try_accept(Duration::from_millis(1000)).is_none(), "the API key went out in a hello");
+    handle.stop();
+}
+
+#[test]
 fn the_fake_plugin_validator_catches_what_the_plugin_rejects() {
     // Controls for the validator above: if it accepted these, the scenarios would prove nothing.
     let instance = "q8Hq3n2t0dQyYf0nJ1p0Aw";

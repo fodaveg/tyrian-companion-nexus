@@ -20,3 +20,4 @@ pub mod instance;
 pub mod protocol;
 pub mod settings;
 pub mod state;
+pub mod token;

@@ -60,9 +60,14 @@ const CLIENT_NAME: &str = "nexus";
 /// Shown once when the plugin speaks a newer version than this addon does.
 pub const UPDATE_ADDON_MESSAGE: &str = "Tyrian Companion: update the Nexus addon to see new alerts";
 
-/// Shown once when the plugin refuses the token, until the user saves a new one.
-pub const TOKEN_REJECTED_MESSAGE: &str =
-    "Tyrian Companion: wrong token. Copy it again from Obsidian and paste it in Nexus options";
+/// Shown once when the plugin refuses the token, until the user saves a new one. Says what to do,
+/// not only what happened: the bare "rejected" of 0.2.0 left the player guessing.
+pub const TOKEN_REJECTED_MESSAGE: &str = "Tyrian Companion: the plugin rejected the token. In Obsidian: Tyrian \
+     Companion settings > \"Copy token\" (\"Copiar token\"), then paste it in Nexus options";
+
+/// Status line of the options panel after an `auth_rejected`, with the same instructions.
+pub const TOKEN_REJECTED_STATUS: &str = "Status: the plugin rejected the token. In Obsidian: Tyrian Companion \
+     settings > \"Copy token\" (\"Copiar token\"), then paste it here and save";
 
 /// Shown once per load when no usable token has been saved yet.
 pub const TOKEN_MISSING_MESSAGE: &str =
@@ -70,12 +75,13 @@ pub const TOKEN_MISSING_MESSAGE: &str =
 
 const BASE64URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/// `true` if `token` is a secret the plugin would accept at all: 32 to 128 printable ASCII
-/// characters, no spaces. Anything else is "no token": the plugin rejects every `hello` without a
-/// usable secret, so the client does not even connect with one.
+/// `true` if `token` is a secret the plugin would accept at all (32 to 128 printable ASCII
+/// characters, no spaces) and is not a Guild Wars 2 API key. Anything else is "no token": the
+/// plugin rejects every `hello` without a usable secret, so the client does not even connect with
+/// one, and an API key must never leave in a `hello` even though its shape passes the plugin's
+/// format. See [`crate::token`].
 pub fn is_usable_token(token: &str) -> bool {
-    (TOKEN_MIN_CHARS..=TOKEN_MAX_CHARS).contains(&token.len())
-        && token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    crate::token::is_plugin_format(token) && !crate::token::is_gw2_api_key(token)
 }
 
 /// Canonical base64url without padding, the encoding the plugin uses for its ids.
@@ -685,6 +691,14 @@ mod tests {
         assert!(!is_usable_token(&format!("{} {}", "a".repeat(20), "b".repeat(20))));
         assert!(!is_usable_token(&format!("{}é", "a".repeat(40))));
         assert!(!is_usable_token(""));
+    }
+
+    #[test]
+    fn a_gw2_api_key_is_never_a_usable_token() {
+        // 72 printable ASCII characters without spaces: the plugin's format alone would let it by.
+        let api_key = "0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F90A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9";
+        assert!(!is_usable_token(api_key));
+        assert!(!is_usable_token(&api_key.to_lowercase()));
     }
 
     #[test]

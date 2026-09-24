@@ -37,7 +37,7 @@ use nexus::AddonFlags;
 #[cfg(windows)]
 use tyrian_companion_nexus_core::client::{ClientConfig, ClientHandle};
 #[cfg(windows)]
-use tyrian_companion_nexus_core::{instance, settings, state};
+use tyrian_companion_nexus_core::{instance, settings, state, token};
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 
@@ -82,15 +82,25 @@ nexus::export! {
 fn load() {
     log::info!("Tyrian Companion addon v{CLIENT_VERSION} loading");
 
-    let settings = match nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
+    let loaded = match nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
         Ok(dir) => settings::load(&dir),
         Err(error) => {
             log::warn!("could not resolve the addon's own directory ({error}); using default settings");
-            settings::Settings::default()
+            settings::Loaded { settings: settings::Settings::default(), discarded_api_key: false }
         }
     };
+    let settings = loaded.settings;
     state::shared().apply_settings(settings.port, &settings.token);
-    render::init_pending(&settings);
+    let notice = if loaded.discarded_api_key {
+        // This alert already says why the token is empty and what to do; the generic "paste the
+        // token" one the client would show next only repeats it, so it is spent here.
+        state::shared().warn_about_missing_token_once();
+        nexus::alert::send_alert(token::DISCARDED_API_KEY_MESSAGE);
+        Some(token::GW2_API_KEY_MESSAGE)
+    } else {
+        None
+    };
+    render::init_pending(&settings, notice);
 
     register_render(
         RenderType::OptionsRender,

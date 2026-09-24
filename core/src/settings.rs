@@ -6,7 +6,8 @@
 //! The token sits there in clear, like any addon setting (the SPEC's risk 3: a local process
 //! that reads it can impersonate the addon). What this module does promise is that it never
 //! prints it: `Settings`'s `Debug` redacts the value, so a stray `{:?}` in a log line cannot leak
-//! it.
+//! it. And it never keeps a Guild Wars 2 API key there: 0.2.0 saved one that had been pasted into
+//! the token field, so [`load`] drops it from an older file and rewrites the file without it.
 //!
 //! This module never touches the network or a `nexus` API call itself, so it can be tested
 //! against a plain temp directory instead of a running game.
@@ -43,15 +44,41 @@ impl Default for Settings {
 
 const FILE_NAME: &str = "settings.json";
 
+/// What [`load`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loaded {
+    pub settings: Settings,
+    /// The file held a Guild Wars 2 API key as the token. It is not in `settings`, and `load`
+    /// has already tried to rewrite the file without it; the caller tells the user why the token
+    /// is gone.
+    pub discarded_api_key: bool,
+}
+
 /// Loads settings from `dir/settings.json`. A missing file, an unreadable one, or one that
 /// does not parse all fall back to [`Settings::default`] rather than failing addon load: a
 /// broken settings file should not be the reason alerts stop appearing.
-pub fn load(dir: &Path) -> Settings {
+///
+/// A token with the shape of a Guild Wars 2 API key is dropped: it comes back empty, and the file
+/// is rewritten at once so the key does not stay on disk. If that rewrite fails the key is still
+/// not used; the failure is logged without the value.
+pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(FILE_NAME);
     let Ok(contents) = fs::read_to_string(&path) else {
-        return Settings::default();
+        return Loaded { settings: Settings::default(), discarded_api_key: false };
     };
-    serde_json::from_str(&contents).unwrap_or_default()
+    let mut settings: Settings = serde_json::from_str(&contents).unwrap_or_default();
+    if !crate::token::is_gw2_api_key(settings.token.trim()) {
+        return Loaded { settings, discarded_api_key: false };
+    }
+    settings.token.clear();
+    match save(dir, &settings) {
+        Ok(()) => log::warn!("the saved token was a Guild Wars 2 API key; removed it from settings.json"),
+        Err(error) => log::error!(
+            "the saved token was a Guild Wars 2 API key; it is not used, but settings.json could not be rewritten \
+             without it: {error}"
+        ),
+    }
+    Loaded { settings, discarded_api_key: true }
 }
 
 /// Writes settings to `dir/settings.json`, creating `dir` if needed. Returns `Err` on any I/O
@@ -78,7 +105,7 @@ mod tests {
     #[test]
     fn missing_file_falls_back_to_default() {
         let dir = temp_dir("missing");
-        assert_eq!(load(&dir), Settings::default());
+        assert_eq!(load(&dir).settings, Settings::default());
     }
 
     #[test]
@@ -86,7 +113,7 @@ mod tests {
         let dir = temp_dir("roundtrip");
         let settings = Settings { port: 54321, token: "a".repeat(43) };
         save(&dir, &settings).expect("save succeeds");
-        assert_eq!(load(&dir), settings);
+        assert_eq!(load(&dir), Loaded { settings, discarded_api_key: false });
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -95,7 +122,7 @@ mod tests {
         let dir = temp_dir("v1");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE_NAME), r#"{ "port": 50001 }"#).unwrap();
-        assert_eq!(load(&dir), Settings { port: 50001, token: String::new() });
+        assert_eq!(load(&dir).settings, Settings { port: 50001, token: String::new() });
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -104,7 +131,24 @@ mod tests {
         let dir = temp_dir("garbage");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE_NAME), "not json at all").unwrap();
-        assert_eq!(load(&dir), Settings::default());
+        assert_eq!(load(&dir).settings, Settings::default());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_saved_api_key_is_discarded_on_load_and_removed_from_disk() {
+        // What 0.2.0 wrote when the API key was pasted into the token field, whitespace included.
+        let api_key = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f90a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let dir = temp_dir("apikey");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(FILE_NAME), format!(r#"{{ "port": 50002, "token": " {api_key}\n" }}"#)).unwrap();
+
+        let loaded = load(&dir);
+        assert_eq!(loaded, Loaded { settings: Settings { port: 50002, token: String::new() }, discarded_api_key: true });
+
+        let on_disk = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert!(!on_disk.to_lowercase().contains(api_key), "the key stayed on disk: {on_disk}");
+        assert_eq!(load(&dir), Loaded { settings: loaded.settings, discarded_api_key: false }, "the port survives");
         let _ = fs::remove_dir_all(&dir);
     }
 
