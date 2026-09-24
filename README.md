@@ -10,6 +10,11 @@ Version 0.2.0 speaks v2 only. The plugin answers a v1 addon (0.1.x) with
 `version_unsupported`, and this addon answers a v1 plugin the same way in reverse, so both
 sides have to be updated together.
 
+Version 0.2.1 refuses to save a Guild Wars 2 API key pasted into the token field, and anything
+else outside the token's format, with a message that says where to copy the right value; an API
+key saved by 0.2.0 is removed from `settings.json` on load and never sent. After a rejected
+token the status line says what to do.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
@@ -155,7 +160,13 @@ to `<GW2>/addons/tyrian_companion_nexus/settings.json`:
   The field never shows the token, and the addon never writes it to its log. It does sit in
   clear in `settings.json`, like any addon setting, so anything that can read your files can
   read it. If the plugin rejects it (you rotated it in Obsidian, or pasted something else),
-  the addon shows "wrong token" once and stops trying until you paste a new one and save.
+  the addon says so once, with the steps above, and stops trying until you paste a new one and
+  save.
+
+  Save trims spaces and newlines around the value and refuses two things, with a message under
+  the field: your Guild Wars 2 API key (`XXXXXXXX-XXXX-…`, 72 characters), which is not the
+  token and is never saved or sent, and anything that is not 32 to 128 characters without
+  spaces. An API key already in `settings.json` from 0.2.0 is removed from the file on load.
 - **Port.** **It has to match the port configured in the plugin's own settings inside
   Obsidian** — the default on both sides is `47823`.
 
@@ -190,9 +201,12 @@ covers what does not need a running game:
 - `core/tests/client_v2.rs`: the real client loop against a fake plugin on a real loopback
   socket that validates every line the way the plugin does, through a full session (context,
   heartbeat, deduplicated alerts, `bye`), an Obsidian restart, a rejected token, an
-  unsupported version, a retryable error, the game closing, and a missing token;
-- the `\n` framer, the backoff table, settings persistence, and the token never showing up in
-  `Debug` output.
+  unsupported version, a retryable error, the game closing, a missing token, and an API key in
+  the token setting that never goes out in a `hello`;
+- what Save accepts as the token (`core/src/token.rs`): an API key refused in either case, a
+  43-character token accepted, surrounding whitespace trimmed, too short or too long refused;
+- the `\n` framer, the backoff table, settings persistence (an API key saved by 0.2.0 dropped
+  and removed from disk on load), and the token never showing up in `Debug` output.
 
 It does not, and cannot, cover the actual Nexus load/unload cycle, what `NexusLink` and the
 Mumble Link really contain in each game state, the `WndProc` callback, or the ImGui panel —

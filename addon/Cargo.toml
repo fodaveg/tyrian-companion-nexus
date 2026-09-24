@@ -1,6 +1,6 @@
 [package]
 name = "tyrian_companion_nexus"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["fodaveg"]
 description = "Nexus addon that paints Tyrian Companion's in-game alerts inside Guild Wars 2 and reports the game context to the plugin"

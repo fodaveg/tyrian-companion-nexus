@@ -1,6 +1,6 @@
 [package]
 name = "tyrian_companion_nexus_core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["fodaveg"]
 description = "Platform-independent logic for the Tyrian Companion Nexus addon: the v2 wire protocol, the client loop, the game-context reading, the line framer, the reconnect backoff table, settings persistence, and shared state. No `nexus` or `windows` dependency, so this builds and tests on any host."
