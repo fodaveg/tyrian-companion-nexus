@@ -2,37 +2,63 @@
 
 A [Nexus](https://raidcore.gg/) addon for Guild Wars 2 that paints, inside the game, the
 loot and price alerts the [Tyrian Companion](https://github.com/fodaveg/tyrian-companion)
-Obsidian plugin emits. It is the M3 milestone of `docs/SPEC-puente-ingame.md` in that repo,
-which is the contract this addon implements and the source of truth if the two disagree.
+Obsidian plugin emits, and tells the plugin what the game is doing so it can mark play
+sessions on its own. It implements protocol **v2** of `docs/SPEC-puente-ingame.md` in that
+repo, which is the contract and the source of truth if the two disagree.
+
+Version 0.2.0 speaks v2 only. The plugin answers a v1 addon (0.1.x) with
+`version_unsupported`, and this addon answers a v1 plugin the same way in reverse, so both
+sides have to be updated together.
 
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
-configurable in both places and they have to match), sends one line of its own on connect,
-and after that only ever reads. Every alert line it receives becomes one native Nexus alert
-(`GUI_SendAlert`), painting the plugin's own `content` string verbatim, plus an optional
-small panel in Nexus's Options window with connection status, the port setting, and the last
-few alerts (for context; the native alert is what actually notifies you and works without
-this panel).
+configurable in both places and they have to match) and authenticates with a token copied
+from the plugin (see "Settings"). Once the plugin accepts it:
 
-It does not read Mumble Link or NexusLink, does not call the Guild Wars 2 API, and does not
-send anything to the game or to the plugin beyond that one line at connect time. That is a
-structural property, not a style choice: it is what keeps this addon inside the "utility
-that helps players without affecting others" branch of ArenaNet's third-party program policy.
+- every alert line becomes one native Nexus alert (`GUI_SendAlert`), painting the plugin's
+  own `content` string verbatim, once per `(server, seq)`, so a reconnection never repeats an
+  alert and an Obsidian restart never hides one;
+- it reports the game context whenever it changes: the state (`gameplay`, `loading` or
+  `character_select`), the map id (866 is Mad King's Labyrinth) and the character's name;
+- it sends a heartbeat whenever it has been silent for the interval the plugin asks for
+  (5 s), and a `bye` when it leaves: `game_exit` only when the game window receives
+  `WM_CLOSE` or `WM_DESTROY`, `addon_unload` otherwise.
+
+The Options window gets a small panel with the connection status, the port and token
+settings, and the last few alerts (for context; the native alert is what actually notifies
+you and works without this panel).
+
+Where the context comes from: `NexusLink::is_gameplay`, and the map id and character name in
+the Mumble Link Nexus shares with every addon (`DL_MUMBLE_LINK`). Neither tells a loading
+screen from character select, so after gameplay ends the addon reports `loading` for up to a
+minute and `character_select` after that, with no map and no character; before the first
+character loads it reports `character_select`. That minute is an assumption the in-game test
+has to confirm (`LOADING_WINDOW` in `core/src/game_context.rs`).
+
+It reads nothing else. No positions, camera, combat, account or loot: the audited sources do
+not carry a loot feed or a reliable AFK signal, and the protocol has no field for them. It
+does not read process memory, does not call the Guild Wars 2 API, and does not send any input
+to the game. That is a structural property, not a style choice: it is what keeps this addon
+inside the "utility that helps players without affecting others" branch of ArenaNet's
+third-party program policy. What the plugin does with the context happens outside the game.
 
 ## Layout
 
 This is a two-crate Cargo workspace, and that split is deliberate:
 
-- **`core/`** (`tyrian_companion_nexus_core`): the wire protocol (parsing an alert line, the
-  512-byte cap, the "unsupported version" and "malformed line" rules), the `\n` line framer,
+- **`core/`** (`tyrian_companion_nexus_core`): the v2 wire protocol (building `hello`,
+  `context`, `heartbeat` and `bye` exactly as the plugin validates them, reading `welcome`,
+  `alert` and `error`), the client loop itself (`client.rs`: connect, authenticate, report,
+  reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
   the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
-  shared in-memory state. No dependency on `nexus` or `windows`. This is what `cargo test`
-  exercises, and it builds and tests on any host, this repository's Linux dev machine
-  included.
+  shared in-memory state. No dependency on `nexus` or `windows`: the loop reaches the game
+  only through a `Host` trait. This is what `cargo test` exercises, and it builds and tests on
+  any host, this repository's Linux dev machine included.
 - **`addon/`** (`tyrian_companion_nexus`, a `cdylib`): the actual Nexus addon — the
-  `nexus::export!` entry point, the background TCP client thread, and the optional ImGui
-  options panel. Its `nexus` dependency (and everything under it, transitively including the
+  `nexus::export!` entry point, the `Host` that paints alerts and reads `NexusLink` and the
+  Mumble Link, the `WndProc` callback that notices the game closing, and the ImGui options
+  panel. Its `nexus` dependency (and everything under it, transitively including the
   `windows` crate) is fenced behind `[target.'cfg(windows)'.dependencies]` in its
   `Cargo.toml`, with matching `#[cfg(windows)]` on the Rust side in `addon/src/lib.rs`. That
   fence exists because `windows` gates most of its own types behind `cfg(windows)` and
@@ -114,26 +140,61 @@ abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git depende
 
 ## Settings
 
-The port lives in `<GW2>/addons/tyrian_companion_nexus/settings.json` and in Nexus's Options
-window, under this addon's own section. **It has to match the port configured in the
-plugin's own settings inside Obsidian** — the default on both sides is `47823`. Changing it
-in the options panel takes effect on the addon's next (re)connection attempt; it does not
-tear down a connection that is already up.
+Two settings, both in Nexus's Options window under this addon's own section, and both saved
+to `<GW2>/addons/tyrian_companion_nexus/settings.json`:
+
+- **Token.** The plugin only talks to addons that know its secret. To paste it:
+  1. In Obsidian, open Tyrian Companion's settings and, in the "Addon token" row, press
+     **Copy token**. The first press generates the token and keeps it in Obsidian's secret
+     storage; later presses copy the same one.
+  2. In the game, open Nexus's Options, find Tyrian Companion, and press **Paste** next to
+     the Token field (or click the field and press Ctrl+V).
+  3. Press **Save**. The status line turns to "connected" within a few seconds if Obsidian
+     is open with the plugin enabled.
+
+  The field never shows the token, and the addon never writes it to its log. It does sit in
+  clear in `settings.json`, like any addon setting, so anything that can read your files can
+  read it. If the plugin rejects it (you rotated it in Obsidian, or pasted something else),
+  the addon shows "wrong token" once and stops trying until you paste a new one and save.
+- **Port.** **It has to match the port configured in the plugin's own settings inside
+  Obsidian** — the default on both sides is `47823`.
+
+Changes take effect on the addon's next connection attempt, right away if the plugin had
+rejected the previous token; they do not tear down a connection that is already up.
 
 ## Reconnecting
 
 The addon does not need the plugin, or the game, to start first. If there is no server
 listening yet — the common case right when the game launches, since the plugin lives inside
 Obsidian and the player is free to start either one first — the addon just keeps retrying,
-forever, on the backoff table above, without surfacing that as an error.
+forever, on the backoff table above, without surfacing that as an error. A connection that
+drops is retried the same way, well inside the ten minutes the plugin waits before it closes
+the session, so a short hiccup continues the same session instead of starting a new one.
+Only two answers stop the retries until the settings change: a rejected token
+(`auth_rejected`) and a protocol version the plugin no longer speaks (`version_unsupported`,
+which also shows "update the Nexus addon").
 
 ## Tests
 
 `cargo test` (from the repository root, or `cargo test -p tyrian_companion_nexus_core`)
-covers what does not need a running game or a running plugin: parsing a well-formed alert
-line, every malformed/oversized/wrong-version case the spec calls out, the `\n` framer
-against chunks split at arbitrary byte boundaries, the backoff table's saturation and reset,
-and settings persistence. It does not, and cannot, cover the actual Nexus load/unload cycle,
-the real TCP client thread, or the ImGui panel — those need a running game (see "What this
-addon does" above for why that is out of scope here anyway) and are exercised by hand: build
-the DLL, drop it into `<GW2>/addons/`, launch the game, and check Nexus's own log window.
+covers what does not need a running game:
+
+- every line the addon sends, byte for byte against the SPEC's own example lines, and every
+  rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the
+  character-name and map-id bounds);
+- every line the plugin sends: `welcome`, `alert`, each `error` code, and the tolerance rules
+  (unknown `type` ignored, known `type` with keys missing or extra discarded, a higher `v`
+  asking for an update);
+- reading map and character out of a Mumble Link laid out as the game writes it, and the
+  gameplay / loading / character-select rule;
+- `core/tests/client_v2.rs`: the real client loop against a fake plugin on a real loopback
+  socket that validates every line the way the plugin does, through a full session (context,
+  heartbeat, deduplicated alerts, `bye`), an Obsidian restart, a rejected token, an
+  unsupported version, a retryable error, the game closing, and a missing token;
+- the `\n` framer, the backoff table, settings persistence, and the token never showing up in
+  `Debug` output.
+
+It does not, and cannot, cover the actual Nexus load/unload cycle, what `NexusLink` and the
+Mumble Link really contain in each game state, the `WndProc` callback, or the ImGui panel —
+those need a running game and are exercised by hand: build the DLL, drop it into
+`<GW2>/addons/`, launch the game, and check Nexus's own log window for `Loaded addon`.
