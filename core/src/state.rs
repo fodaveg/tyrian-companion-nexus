@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use crate::obsidian_launch::ObsidianLaunchOutcome;
 use crate::protocol::{Alert, AlertKind, DEFAULT_PORT};
 
 /// What the client is doing right now, for the panel's status line.
@@ -74,6 +75,13 @@ pub struct SharedState {
     warned_about_version: AtomicBool,
     warned_about_missing_token: AtomicBool,
     history: Mutex<VecDeque<HistoryEntry>>,
+    /// The `open_obsidian_on_start` setting (`core::obsidian_launch`). Read by the client loop
+    /// before its first connection attempt; written from settings load and from the Options
+    /// panel's checkbox.
+    open_obsidian_on_start: AtomicBool,
+    /// What happened, if anything, when this load tried to open Obsidian automatically. `None`
+    /// until the client loop's first connection attempt has run.
+    obsidian_launch_outcome: Mutex<Option<ObsidianLaunchOutcome>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -97,6 +105,8 @@ impl SharedState {
             warned_about_version: AtomicBool::new(false),
             warned_about_missing_token: AtomicBool::new(false),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAPACITY)),
+            open_obsidian_on_start: AtomicBool::new(true),
+            obsidian_launch_outcome: Mutex::new(None),
         }
     }
 
@@ -109,12 +119,35 @@ impl SharedState {
         lock(&self.token).clone()
     }
 
-    /// Replaces the port and the token together and marks the settings as changed, which lifts
-    /// a stop caused by `auth_rejected` or `version_unsupported`.
-    pub fn apply_settings(&self, port: u16, token: &str) {
+    /// Replaces the port, the token and the `open_obsidian_on_start` setting together and marks
+    /// the settings as changed, which lifts a stop caused by `auth_rejected` or
+    /// `version_unsupported`.
+    pub fn apply_settings(&self, port: u16, token: &str, open_obsidian_on_start: bool) {
         self.port.store(port, Ordering::Relaxed);
         *lock(&self.token) = token.to_string();
+        self.open_obsidian_on_start.store(open_obsidian_on_start, Ordering::Relaxed);
         self.settings_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn open_obsidian_on_start(&self) -> bool {
+        self.open_obsidian_on_start.load(Ordering::Relaxed)
+    }
+
+    /// Sets the `open_obsidian_on_start` setting on its own, without bumping the settings
+    /// generation: unlike the port and the token, toggling this has nothing to do with the
+    /// `auth_rejected`/`version_unsupported` halt the generation exists for, and bumping it
+    /// there would wake up a client the plugin has explicitly told to stop retrying.
+    pub fn set_open_obsidian_on_start(&self, value: bool) {
+        self.open_obsidian_on_start.store(value, Ordering::Relaxed);
+    }
+
+    /// What the addon's attempt to open Obsidian this load did, if it has run yet.
+    pub fn obsidian_launch_outcome(&self) -> Option<ObsidianLaunchOutcome> {
+        *lock(&self.obsidian_launch_outcome)
+    }
+
+    pub fn set_obsidian_launch_outcome(&self, outcome: ObsidianLaunchOutcome) {
+        *lock(&self.obsidian_launch_outcome) = Some(outcome);
     }
 
     pub fn settings_generation(&self) -> u64 {
@@ -234,10 +267,33 @@ mod tests {
     fn saving_settings_bumps_the_generation() {
         let state = SharedState::new();
         let before = state.settings_generation();
-        state.apply_settings(50000, "t");
+        state.apply_settings(50000, "t", false);
         assert_eq!(state.port(), 50000);
         assert_eq!(state.token(), "t");
+        assert!(!state.open_obsidian_on_start());
         assert_eq!(state.settings_generation(), before + 1);
+    }
+
+    #[test]
+    fn open_obsidian_on_start_defaults_to_true() {
+        assert!(SharedState::new().open_obsidian_on_start());
+    }
+
+    #[test]
+    fn toggling_open_obsidian_on_start_does_not_bump_the_generation() {
+        let state = SharedState::new();
+        let before = state.settings_generation();
+        state.set_open_obsidian_on_start(false);
+        assert!(!state.open_obsidian_on_start());
+        assert_eq!(state.settings_generation(), before);
+    }
+
+    #[test]
+    fn the_obsidian_launch_outcome_starts_unset_and_records_what_is_set() {
+        let state = SharedState::new();
+        assert_eq!(state.obsidian_launch_outcome(), None);
+        state.set_obsidian_launch_outcome(ObsidianLaunchOutcome::NoHandler);
+        assert_eq!(state.obsidian_launch_outcome(), Some(ObsidianLaunchOutcome::NoHandler));
     }
 
     #[test]

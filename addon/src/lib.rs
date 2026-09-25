@@ -26,6 +26,8 @@
 #[cfg(windows)]
 mod client;
 #[cfg(windows)]
+mod obsidian_launch;
+#[cfg(windows)]
 mod render;
 
 #[cfg(windows)]
@@ -90,7 +92,7 @@ fn load() {
         }
     };
     let settings = loaded.settings;
-    state::shared().apply_settings(settings.port, &settings.token);
+    state::shared().apply_settings(settings.port, &settings.token, settings.open_obsidian_on_start);
     let notice = if loaded.discarded_api_key {
         // This alert already says why the token is empty and what to do; the generic "paste the
         // token" one the client would show next only repeats it, so it is spent here.

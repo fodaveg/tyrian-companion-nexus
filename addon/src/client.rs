@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nexus::data_link::{read_nexus_link, read_resource};
 use tyrian_companion_nexus_core::client::{GameReading, Host};
 use tyrian_companion_nexus_core::game_context::{MumbleSnapshot, MUMBLE_LINK_BYTES};
+use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
+
+use crate::obsidian_launch;
 
 /// Nexus's data link for the Mumble Link (`nexus::data_link::mumble::MUMBLE_LINK`,
 /// which is behind the `mumble` feature this addon does not enable; see `game_context.rs`).
@@ -53,5 +56,9 @@ impl Host for NexusHost {
 
     fn game_exiting(&self) -> bool {
         GAME_EXITING.load(Ordering::Relaxed)
+    }
+
+    fn open_obsidian(&self) -> ObsidianLaunchOutcome {
+        obsidian_launch::open_obsidian()
     }
 }

@@ -17,6 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 use nexus::imgui::{StyleColor, TreeNodeFlags, Ui};
 
+use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
 use tyrian_companion_nexus_core::settings::{self, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
@@ -58,6 +59,21 @@ fn status_line(status: Status) -> ([f32; 4], &'static str) {
         Status::TokenRejected => (RED, TOKEN_REJECTED_STATUS),
         Status::UpdateRequired => (RED, "Status: the plugin needs a newer version of this addon"),
         Status::GameExiting => (GREY, "Status: the game is closing"),
+    }
+}
+
+/// What the panel shows about this load's one attempt to open Obsidian automatically (see
+/// `tyrian_companion_nexus_core::obsidian_launch`). Native alerts are reserved for the plugin's
+/// own content; this is housekeeping the player did not ask to be interrupted for.
+fn obsidian_launch_line(outcome: ObsidianLaunchOutcome) -> ([f32; 4], String) {
+    match outcome {
+        ObsidianLaunchOutcome::Launched => {
+            (GREEN, "Obsidian: launched automatically (the first connection attempt found nobody listening)".to_string())
+        }
+        ObsidianLaunchOutcome::NoHandler => {
+            (ORANGE, "Obsidian: not launched — no obsidian:// handler is registered in Windows".to_string())
+        }
+        ObsidianLaunchOutcome::Error(code) => (RED, format!("Obsidian: could not launch it (error code {code})")),
     }
 }
 
@@ -103,9 +119,10 @@ pub fn options_render(ui: &Ui) {
                 Ok(token) => {
                     pending.token = token.clone();
                     pending.notice = None;
-                    shared.apply_settings(port, &token);
+                    let open_obsidian_on_start = shared.open_obsidian_on_start();
+                    shared.apply_settings(port, &token, open_obsidian_on_start);
                     if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-                        if let Err(error) = settings::save(&dir, &Settings { port, token }) {
+                        if let Err(error) = settings::save(&dir, &Settings { port, token, open_obsidian_on_start }) {
                             log::error!("failed to save settings: {error}");
                         }
                     }
@@ -128,6 +145,28 @@ pub fn options_render(ui: &Ui) {
         "In Obsidian, open Tyrian Companion's settings and press \"Copy token\", then paste it here \
          and save. The port must match the plugin's. Changes apply on the next connection attempt.",
     );
+
+    ui.separator();
+    {
+        // Applied right away, unlike port/token: a checkbox has nothing to validate, so there is
+        // no reason to make it wait for "Save". It is read from and written straight to shared
+        // state, never through `pending`, so a token edited but not yet saved is never read back
+        // out when this box is the only thing that changed.
+        let mut open_on_start = shared.open_obsidian_on_start();
+        if ui.checkbox("Open Obsidian automatically when the game starts", &mut open_on_start) {
+            shared.set_open_obsidian_on_start(open_on_start);
+            if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
+                let settings = Settings { port: shared.port(), token: shared.token(), open_obsidian_on_start: open_on_start };
+                if let Err(error) = settings::save(&dir, &settings) {
+                    log::error!("failed to save settings: {error}");
+                }
+            }
+        }
+        if let Some(outcome) = shared.obsidian_launch_outcome() {
+            let (color, text) = obsidian_launch_line(outcome);
+            text_colored_wrapped(ui, color, &text);
+        }
+    }
 
     ui.separator();
     if ui.collapsing_header("Recent alerts", TreeNodeFlags::empty()) {

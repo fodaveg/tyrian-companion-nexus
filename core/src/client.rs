@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use crate::backoff::Backoff;
 use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
+use crate::obsidian_launch::{should_launch, FirstConnectOutcome, ObsidianLaunchOutcome};
 use crate::protocol::{
     build_bye_line, build_context_line, build_heartbeat_line, build_hello_line, is_usable_token, parse_server_line,
     ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE, TOKEN_REJECTED_MESSAGE,
@@ -80,6 +81,10 @@ pub trait Host: Send + 'static {
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
+    /// Tries to open or focus Obsidian. Called at most once per load, only when
+    /// [`obsidian_launch::should_launch`](crate::obsidian_launch::should_launch) says so (see
+    /// [`run`]'s own doc). Must not block on the child process it starts.
+    fn open_obsidian(&self) -> ObsidianLaunchOutcome;
 }
 
 /// What does not change for the life of the process.
@@ -189,12 +194,20 @@ where
 }
 
 /// The client loop. Returns only once `stop` is set.
+///
+/// Also decides, at most once per call (i.e. once per addon load — `spawn` calls this once),
+/// whether to open Obsidian: right after this loop's very first `connect()`, whatever the
+/// setting or the result, `obsidian_launch::should_launch` sees that attempt's outcome and never
+/// gets asked again for the rest of this call. See `obsidian_launch`'s own doc for why a TCP
+/// connect failure — and only that — is treated as "Obsidian is closed".
 pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &AtomicBool) {
     let mut backoff = Backoff::new();
     let mut tracker = ContextTracker::new();
     // Settings generation at which the plugin said "do not come back" (`auth_rejected`,
     // `version_unsupported`). Cleared as soon as the user saves the settings again.
     let mut halted_at: Option<u64> = None;
+    // Whether the first-connect-of-this-load decision has already run, whatever it decided.
+    let mut obsidian_launch_decided = false;
 
     while !stop.load(Ordering::Relaxed) {
         if host.game_exiting() {
@@ -232,7 +245,16 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
 
         state.set_status(Status::WaitingForPlugin);
         let port = state.port();
-        let end = match connect(port) {
+        let connect_result = connect(port);
+        if !obsidian_launch_decided {
+            obsidian_launch_decided = true;
+            let first_connect =
+                if connect_result.is_ok() { FirstConnectOutcome::Connected } else { FirstConnectOutcome::NoListener };
+            if should_launch(state.open_obsidian_on_start(), false, first_connect) {
+                state.set_obsidian_launch_outcome(host.open_obsidian());
+            }
+        }
+        let end = match connect_result {
             Ok(stream) => serve(stream, &hello, state, host, &mut tracker, stop),
             Err(_) => ConnectionEnd::default(),
         };

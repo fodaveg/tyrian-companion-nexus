@@ -27,18 +27,34 @@ pub struct Settings {
     /// `#[serde(default)]` keeps a v1 `settings.json` (port only) loading.
     #[serde(default)]
     pub token: String,
+    /// Whether this addon should try to open Obsidian on its own first failed connection
+    /// attempt each load (`core::obsidian_launch`; David, 24 sep 2026: "si empiezo a jugar y
+    /// está cerrado, que se abra"). `#[serde(default = "default_open_obsidian_on_start")]` keeps
+    /// a `settings.json` from before this field existed loading as `true`, the same default a
+    /// fresh install gets.
+    #[serde(default = "default_open_obsidian_on_start")]
+    pub open_obsidian_on_start: bool,
+}
+
+fn default_open_obsidian_on_start() -> bool {
+    true
 }
 
 impl fmt::Debug for Settings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let token = if self.token.is_empty() { "<empty>" } else { "<redacted>" };
-        formatter.debug_struct("Settings").field("port", &self.port).field("token", &token).finish()
+        formatter
+            .debug_struct("Settings")
+            .field("port", &self.port)
+            .field("token", &token)
+            .field("open_obsidian_on_start", &self.open_obsidian_on_start)
+            .finish()
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, token: String::new() }
+        Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true }
     }
 }
 
@@ -111,7 +127,7 @@ mod tests {
     #[test]
     fn round_trips_through_save_and_load() {
         let dir = temp_dir("roundtrip");
-        let settings = Settings { port: 54321, token: "a".repeat(43) };
+        let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false };
         save(&dir, &settings).expect("save succeeds");
         assert_eq!(load(&dir), Loaded { settings, discarded_api_key: false });
         let _ = fs::remove_dir_all(&dir);
@@ -122,7 +138,19 @@ mod tests {
         let dir = temp_dir("v1");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE_NAME), r#"{ "port": 50001 }"#).unwrap();
-        assert_eq!(load(&dir).settings, Settings { port: 50001, token: String::new() });
+        assert_eq!(load(&dir).settings, Settings { port: 50001, ..Settings::default() });
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_open_obsidian_on_start_existed_loads_it_as_true() {
+        // A pre-0.3.0 settings.json (port and token only, this addon's own v1/v2 shape) must
+        // load with the same default a fresh install gets: David's decision (24 sep 2026) is
+        // "si empiezo a jugar y está cerrado, que se abra", on by default.
+        let dir = temp_dir("pre-open-obsidian-flag");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(FILE_NAME), format!(r#"{{ "port": 50003, "token": "{}" }}"#, "a".repeat(40))).unwrap();
+        assert!(load(&dir).settings.open_obsidian_on_start);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -144,7 +172,10 @@ mod tests {
         fs::write(dir.join(FILE_NAME), format!(r#"{{ "port": 50002, "token": " {api_key}\n" }}"#)).unwrap();
 
         let loaded = load(&dir);
-        assert_eq!(loaded, Loaded { settings: Settings { port: 50002, token: String::new() }, discarded_api_key: true });
+        assert_eq!(
+            loaded,
+            Loaded { settings: Settings { port: 50002, ..Settings::default() }, discarded_api_key: true }
+        );
 
         let on_disk = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert!(!on_disk.to_lowercase().contains(api_key), "the key stayed on disk: {on_disk}");
@@ -155,7 +186,7 @@ mod tests {
     #[test]
     fn debug_output_never_contains_the_token() {
         let secret = "SuperSecretTokenValue-0123456789abcdefghij";
-        let printed = format!("{:?}", Settings { port: 1, token: secret.into() });
+        let printed = format!("{:?}", Settings { port: 1, token: secret.into(), ..Settings::default() });
         assert!(!printed.contains(secret), "{printed}");
         assert!(printed.contains("<redacted>"));
     }

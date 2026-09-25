@@ -143,10 +143,54 @@ abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git depende
 `0.12.0` from [`Zerthox/nexus-rs`](https://github.com/Zerthox/nexus-rs), matching the version
 `docs/SPEC-puente-ingame.md` names.
 
+## Automatic Obsidian launch
+
+If Obsidian is closed when the game starts, this addon opens it: David, 24 sep 2026, "si
+empiezo a jugar y está cerrado, que se abra" (`docs/SPEC-puente-ingame.md` in the plugin repo).
+
+**When it fires.** At most once per addon load, right after the very first connection attempt
+to the plugin's bridge. If that attempt's TCP `connect()` is refused or times out — nobody
+listening, the ordinary case when the game starts before Obsidian does — the addon takes that as
+"Obsidian is closed" and launches it. A successful connect, even if the plugin then answers
+`auth_rejected` or `version_unsupported`, means somebody was listening, so nothing is launched
+either way; later reconnection retries never trigger a second launch. The decision itself
+(`core::obsidian_launch::should_launch`) is plain Rust with no OS call, covered by `cargo test`
+on Linux.
+
+**Setting.** `open_obsidian_on_start`, a checkbox in this addon's Options panel, on by default —
+including for a `settings.json` saved before this setting existed. With it off, nothing is ever
+launched. The Options panel also shows a line with the outcome of this load's one attempt
+(launched / no handler / error with its code), never a native alert: the SPEC's alerts are for
+the plugin's own content.
+
+**Mechanism.** Two paths, gated behind `#[cfg(windows)]` like the rest of this addon:
+
+- **Under Wine/Proton** (this repository's only tested platform, David's own machine: Fedora +
+  GE-Proton): launches `%SystemRoot%\system32\winebrowser.exe` with `obsidian://open` as its one
+  argument. `winebrowser.exe` ships in every Wine/Proton prefix and forwards that argument to the
+  host's `xdg-open`, which is what actually opens or focuses the Fedora Obsidian flatpak — no
+  registry key is written in the prefix. Measured in
+  [H18.27](https://github.com/fodaveg/tyrian-companion/blob/main/docs/audit/sonda-h18-27-abrir-obsidian-desde-proton.md)
+  (path B there). Wine/Proton is detected by the `wine_get_version` export Wine's own
+  `ntdll.dll` carries and a real Windows one never does — no prefix access needed for the check
+  itself.
+- **Native Windows** (no Wine): only if `HKEY_CLASSES_ROOT\obsidian` exists — Obsidian's own
+  Windows installer registers it — `ShellExecuteW` opens `obsidian://open` the normal way. If
+  the key is missing, nothing is launched, on purpose: otherwise Windows would pop its own "how
+  do you want to open this?" dialog on top of the game. **Not verified**: this repository has no
+  real Windows machine to test this path on; it is implemented against the documented Win32
+  behavior only.
+
+Neither path waits for the process it starts: both return as soon as the OS has accepted the
+launch request, so this never blocks the game's thread.
+
 ## Settings
 
-Two settings, both in Nexus's Options window under this addon's own section, and both saved
-to `<GW2>/addons/tyrian_companion_nexus/settings.json`:
+Three settings, all in Nexus's Options window under this addon's own section, and all saved
+to `<GW2>/addons/tyrian_companion_nexus/settings.json`. `open_obsidian_on_start` (see "Automatic
+Obsidian launch" above) is the odd one out: its checkbox applies and saves right away, since
+there is nothing to validate, unlike the port and the token below, which only take effect after
+**Save**:
 
 - **Token.** The plugin only talks to addons that know its secret. To paste it:
   1. In Obsidian, open Tyrian Companion's settings and, in the "Addon token" row, press

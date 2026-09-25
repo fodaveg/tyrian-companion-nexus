@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 use tyrian_companion_nexus_core::client::{spawn, ClientConfig, ClientHandle, GameReading, Host};
 use tyrian_companion_nexus_core::game_context::MumbleSnapshot;
 use tyrian_companion_nexus_core::instance::new_instance_id;
+use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
 use tyrian_companion_nexus_core::protocol::{
     is_canonical_instance, TOKEN_MISSING_MESSAGE, TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE,
 };
@@ -261,6 +262,8 @@ struct TestHost {
     alerts: Arc<Mutex<Vec<String>>>,
     reading: Arc<Mutex<GameReading>>,
     exiting: Arc<AtomicBool>,
+    /// How many times `open_obsidian` was called, and what this fake host answers with.
+    obsidian_launch_calls: Arc<AtomicUsize>,
 }
 
 impl Host for TestHost {
@@ -273,11 +276,19 @@ impl Host for TestHost {
     fn game_exiting(&self) -> bool {
         self.exiting.load(Ordering::Relaxed)
     }
+    fn open_obsidian(&self) -> ObsidianLaunchOutcome {
+        self.obsidian_launch_calls.fetch_add(1, Ordering::Relaxed);
+        ObsidianLaunchOutcome::Launched
+    }
 }
 
 impl TestHost {
     fn alerts(&self) -> Vec<String> {
         self.alerts.lock().unwrap().clone()
+    }
+
+    fn obsidian_launch_calls(&self) -> usize {
+        self.obsidian_launch_calls.load(Ordering::Relaxed)
     }
 
     fn set_in_game(&self, map_id: u32, character: &str) {
@@ -302,12 +313,28 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 fn start_client(plugin: &FakePlugin, token: &str) -> (Arc<SharedState>, TestHost, ClientHandle) {
+    start_client_on_port(plugin.port(), token, true)
+}
+
+/// Like [`start_client`], but against a raw port (no [`FakePlugin`] necessarily listening on it)
+/// and with the `open_obsidian_on_start` setting the caller wants, for the tests that need to
+/// control whether the first `connect()` succeeds or is refused.
+fn start_client_on_port(port: u16, token: &str, open_obsidian_on_start: bool) -> (Arc<SharedState>, TestHost, ClientHandle) {
     let state = Arc::new(SharedState::new());
-    state.apply_settings(plugin.port(), token);
+    state.apply_settings(port, token, open_obsidian_on_start);
     let host = TestHost::default();
     let config = ClientConfig { client_version: "0.2.0".into(), instance: new_instance_id() };
     let handle = spawn(Arc::clone(&state), host.clone(), config).expect("spawn the client thread");
     (state, host, handle)
+}
+
+/// A loopback port with nobody listening on it: binding then dropping the listener frees the
+/// port back to the OS, so a `connect()` to it comes back refused almost at once, the same
+/// signal H18.27 measured for "Obsidian is closed" (see `docs/audit/sonda-h18-27-...` in the
+/// `tyrian-companion` repo).
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.local_addr().unwrap().port()
 }
 
 // --- Scenarios ---
@@ -403,7 +430,7 @@ fn a_rejected_token_stops_retrying_until_the_settings_change() {
     assert!(plugin.try_accept(Duration::from_millis(1500)).is_none(), "no retry with the same token");
 
     // The user pastes the right token and saves: the client comes back at once.
-    state.apply_settings(plugin.port(), TOKEN);
+    state.apply_settings(plugin.port(), TOKEN, true);
     let mut connection = plugin.accept();
     connection.authenticate(SERVER_A, NONCE_1, 5000);
     connection.expect_sequenced();
@@ -459,6 +486,61 @@ fn a_closing_game_says_game_exit_and_does_not_reconnect() {
     connection.assert_closed();
     wait_until(|| state.status() == Status::GameExiting);
     assert!(plugin.try_accept(Duration::from_millis(1000)).is_none(), "no reconnection while the game closes");
+    handle.stop();
+}
+
+// --- Opening Obsidian on the first connection attempt (docs/SPEC-puente-ingame.md, H18.27) ---
+
+#[test]
+fn a_refused_first_connection_launches_obsidian_exactly_once() {
+    let port = closed_port();
+    let (state, host, handle) = start_client_on_port(port, TOKEN, true);
+
+    wait_until(|| host.obsidian_launch_calls() >= 1);
+    assert_eq!(state.obsidian_launch_outcome(), Some(ObsidianLaunchOutcome::Launched));
+    // The backoff table starts at 250 ms: waiting past a couple more retries still must not
+    // launch a second time for this load.
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(host.obsidian_launch_calls(), 1, "must not relaunch on a later retry");
+    handle.stop();
+}
+
+#[test]
+fn a_successful_first_connection_does_not_launch_obsidian() {
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, TOKEN);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 5000);
+    connection.expect_sequenced();
+    assert_eq!(host.obsidian_launch_calls(), 0);
+    handle.stop();
+}
+
+#[test]
+fn the_setting_off_does_not_launch_even_when_nobody_is_listening() {
+    let port = closed_port();
+    let (_state, host, handle) = start_client_on_port(port, TOKEN, false);
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(host.obsidian_launch_calls(), 0);
+    handle.stop();
+}
+
+#[test]
+fn an_auth_rejection_does_not_launch_obsidian() {
+    // auth_rejected only ever arrives after a successful TCP connect (the plugin has to read
+    // and validate the hello first), so the first-connect outcome is `Connected`, not
+    // `NoListener`, and the launch never fires — same rule as a successful connection, exercised
+    // through the path that actually produces an authentication error.
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, OTHER_TOKEN);
+
+    let mut connection = plugin.accept();
+    connection.read_frame().unwrap();
+    connection.send(r#"{"v":2,"type":"error","code":"auth_rejected"}"#);
+    drop(connection);
+
+    host.wait_for_alerts(1);
+    assert_eq!(host.obsidian_launch_calls(), 0);
     handle.stop();
 }
 

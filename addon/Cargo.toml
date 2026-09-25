@@ -29,6 +29,20 @@ nexus = { git = "https://github.com/Zerthox/nexus-rs", tag = "0.12.0", features 
 # `log::Log` backend to Nexus's log window, it does not re-export the `log::info!` etc.
 # macros this addon calls.
 log = "0.4"
-# Only for the types of the `WndProc` callback (`HWND`, `WPARAM`, `LPARAM`), which `nexus` does
-# not re-export. Same version `nexus` already depends on, so this adds no crate to the build.
-windows = { version = "0.62.2", features = ["Win32_Foundation"] }
+# `Win32_Foundation` is for the types of the `WndProc` callback (`HWND`, `WPARAM`, `LPARAM`),
+# which `nexus` does not re-export. Same version `nexus` already depends on, so this adds no
+# crate to the build. The rest (`Win32_Security`, `Win32_System_LibraryLoader`,
+# `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`,
+# `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`) are for `obsidian_launch.rs`: detecting
+# Wine/Proton, launching `winebrowser.exe` (`CreateProcessW`), and `ShellExecuteW` plus the
+# `HKEY_CLASSES_ROOT\obsidian` check for native Windows.
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
