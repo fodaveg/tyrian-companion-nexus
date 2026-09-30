@@ -22,6 +22,7 @@ use tyrian_companion_nexus_core::instance::new_instance_id;
 use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
 use tyrian_companion_nexus_core::protocol::{
     is_canonical_instance, TOKEN_MISSING_MESSAGE, TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE,
+    UPDATE_PLUGIN_MESSAGE,
 };
 use tyrian_companion_nexus_core::state::{SharedState, Status};
 
@@ -85,7 +86,7 @@ fn exact_keys(record: &Map<String, Value>, keys: &[&str]) -> bool {
 fn validate_hello(frame: &str, token: &str) -> Result<Map<String, Value>, &'static str> {
     let record = decode_frame(frame)?;
     match record.get("v") {
-        Some(Value::Number(number)) if number.as_u64() != Some(2) => return Err("version_unsupported"),
+        Some(Value::Number(number)) if number.as_u64() != Some(3) => return Err("version_unsupported"),
         Some(Value::Number(_)) => {}
         _ => return Err("frame_schema"),
     }
@@ -113,11 +114,12 @@ fn validate_hello(frame: &str, token: &str) -> Result<Map<String, Value>, &'stat
 /// `parseIngameSequenced`.
 fn validate_sequenced(frame: &str, nonce: &str, seq: u64) -> Result<Map<String, Value>, &'static str> {
     let record = decode_frame(frame)?;
-    if record.get("v").and_then(Value::as_u64) != Some(2) {
+    if record.get("v").and_then(Value::as_u64) != Some(3) {
         return Err("frame_schema");
     }
     let keys: &[&str] = match record.get("type").and_then(Value::as_str) {
         Some("context") => &["v", "type", "nonce", "seq", "state", "mapId", "character"],
+        Some("alert_ack") => &["v", "type", "nonce", "seq", "alertSeq"],
         Some("heartbeat") => &["v", "type", "nonce", "seq"],
         Some("bye") => &["v", "type", "nonce", "seq", "reason"],
         _ => return Err("unexpected_message"),
@@ -133,6 +135,7 @@ fn validate_sequenced(frame: &str, nonce: &str, seq: u64) -> Result<Map<String, 
     }
     match record["type"].as_str() {
         Some("bye") if !matches!(record["reason"].as_str(), Some("game_exit" | "addon_unload")) => Err("frame_schema"),
+        Some("alert_ack") if !record["alertSeq"].is_u64() => Err("frame_schema"),
         Some("context") => {
             let state_ok = matches!(record["state"].as_str(), Some("gameplay" | "loading" | "character_select"));
             let map_ok = record["mapId"].is_null() || record["mapId"].as_u64().is_some_and(|id| (1..=2_147_483_647).contains(&id));
@@ -220,7 +223,7 @@ impl Connection {
         let hello = validate_hello(&frame, TOKEN).unwrap_or_else(|code| panic!("plugin would answer {code} to {frame}"));
         self.nonce = nonce.to_string();
         self.next_seq = 0;
-        self.send(&format!(r#"{{"v":2,"type":"welcome","server":"{server}","nonce":"{nonce}","heartbeatIntervalMs":{heartbeat_ms}}}"#));
+        self.send(&format!(r#"{{"v":3,"type":"welcome","server":"{server}","nonce":"{nonce}","heartbeatIntervalMs":{heartbeat_ms}}}"#));
         hello
     }
 
@@ -246,8 +249,21 @@ impl Connection {
 
     fn send_alert(&mut self, seq: u64, content: &str) {
         self.send(&format!(
+            r#"{{"v":3,"type":"alert","seq":{seq},"kind":"valuable_loot","name":"Mystic Coin","quantity":3,"totalCopper":123456,"content":"{content}"}}"#
+        ));
+    }
+
+    /// An alert as a plugin that still speaks v2 lines would write it (the addon reads both).
+    fn send_v2_alert(&mut self, seq: u64, content: &str) {
+        self.send(&format!(
             r#"{{"v":2,"type":"alert","seq":{seq},"kind":"valuable_loot","name":"Mystic Coin","quantity":3,"totalCopper":123456,"content":"{content}"}}"#
         ));
+    }
+
+    /// Reads the next non-heartbeat line and checks it is the `alert_ack` for `alert_seq`.
+    fn expect_ack(&mut self, alert_seq: u64) {
+        let ack = self.expect_non_heartbeat();
+        assert_eq!((&ack["type"], &ack["alertSeq"]), (&Value::from("alert_ack"), &Value::from(alert_seq)), "{ack:?}");
     }
 
     fn assert_closed(&mut self) {
@@ -348,6 +364,7 @@ fn a_full_session_follows_the_spec_walkthrough() {
     let hello = connection.authenticate(SERVER_A, NONCE_1, 300);
     assert_eq!(hello["client"], "nexus");
     assert_eq!(hello["clientVersion"], "0.2.0");
+    assert_eq!(hello["v"], 3, "the hello announces protocol v3");
 
     // Right after the welcome: the context, whole. Nothing is in game yet.
     let first = connection.expect_sequenced();
@@ -374,12 +391,60 @@ fn a_full_session_follows_the_spec_walkthrough() {
     assert_eq!(host.wait_for_alerts(2), vec![ALERT_CONTENT.to_string(), "second".to_string()]);
     assert_eq!(state.history_snapshot().len(), 2);
 
+    // Each painted alert is confirmed once; the duplicate and the malformed one are not.
+    connection.expect_ack(1);
+    connection.expect_ack(2);
+
     // Unloading the addon: `bye addon_unload` on the same sequence, then the socket closes.
     handle.stop();
     let last = connection.expect_non_heartbeat();
     assert_eq!((&last["type"], &last["reason"]), (&Value::from("bye"), &Value::from("addon_unload")));
     connection.assert_closed();
     assert_eq!(state.status(), Status::WaitingForPlugin);
+}
+
+#[test]
+fn every_painted_alert_is_acked_once_on_the_shared_sequence() {
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, TOKEN);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 60_000);
+    assert_eq!(connection.expect_sequenced()["type"], "context"); // seq 0
+
+    connection.send_alert(17, "first");
+    connection.send_alert(17, "duplicate of the first");
+    // No `seq`: painted, but there is no `alertSeq` to name, so no ack.
+    connection.send(r#"{"v":3,"type":"alert","kind":"always_alert","name":"Rare Skin","quantity":1,"totalCopper":null,"content":"no seq"}"#);
+    connection.send_v2_alert(18, "second, from a v2 line");
+    assert_eq!(host.wait_for_alerts(3), vec!["first", "no seq", "second, from a v2 line"]);
+
+    // The fake plugin checks nonce, exact keys and consecutive `seq` (1 and 2 after the context).
+    let first = connection.expect_non_heartbeat();
+    assert_eq!(first["seq"], 1);
+    assert_eq!(first["alertSeq"], 17);
+    let second = connection.expect_non_heartbeat();
+    assert_eq!(second["seq"], 2);
+    assert_eq!(second["alertSeq"], 18);
+    handle.stop();
+    let bye = connection.expect_non_heartbeat();
+    assert_eq!((&bye["type"], &bye["seq"]), (&Value::from("bye"), &Value::from(3)), "no third ack in between");
+}
+
+#[test]
+fn an_ack_interleaves_with_context_changes_without_a_gap_in_seq() {
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, TOKEN);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 60_000);
+    connection.expect_sequenced(); // context, seq 0
+
+    connection.send_alert(1, "one");
+    connection.expect_ack(1); // seq 1
+    host.set_in_game(866, "Astra Uno");
+    assert_eq!(connection.expect_non_heartbeat()["type"], "context"); // seq 2
+    connection.send_alert(2, "two");
+    connection.expect_ack(2); // seq 3
+    handle.stop();
 }
 
 #[test]
@@ -440,18 +505,44 @@ fn a_rejected_token_stops_retrying_until_the_settings_change() {
 }
 
 #[test]
-fn an_unsupported_version_asks_for_an_update_and_does_not_retry() {
+fn an_unsupported_version_from_a_newer_plugin_asks_for_an_addon_update_and_does_not_retry() {
     let plugin = FakePlugin::start();
     let (state, host, handle) = start_client(&plugin, TOKEN);
 
     let mut connection = plugin.accept();
     connection.read_frame().unwrap();
-    connection.send(r#"{"v":2,"type":"error","code":"version_unsupported"}"#);
+    connection.send(r#"{"v":3,"type":"error","code":"version_unsupported"}"#);
     drop(connection);
 
     assert_eq!(host.wait_for_alerts(1), vec![UPDATE_ADDON_MESSAGE]);
     wait_until(|| state.status() == Status::UpdateRequired);
     assert!(plugin.try_accept(Duration::from_millis(1500)).is_none(), "no retry");
+    handle.stop();
+}
+
+#[test]
+fn an_unsupported_version_from_a_v2_plugin_asks_to_update_the_plugin_and_does_not_retry() {
+    let plugin = FakePlugin::start();
+    let (state, host, handle) = start_client(&plugin, TOKEN);
+
+    // A v2 plugin refuses the v3 hello and stamps its answer with its own `v`.
+    let mut connection = plugin.accept();
+    let hello = connection.read_frame().unwrap();
+    assert!(hello.starts_with(r#"{"v":3,"type":"hello""#), "{hello}");
+    connection.send(r#"{"v":2,"type":"error","code":"version_unsupported"}"#);
+    drop(connection);
+
+    assert_eq!(host.wait_for_alerts(1), vec![UPDATE_PLUGIN_MESSAGE]);
+    assert_eq!(UPDATE_PLUGIN_MESSAGE, "Tyrian Companion: update Tyrian Companion in Obsidian");
+    wait_until(|| state.status() == Status::UpdateRequired);
+    assert!(plugin.try_accept(Duration::from_millis(1500)).is_none(), "no retry until the settings change");
+
+    // Saving the settings lifts the halt, and it can be told once again.
+    state.apply_settings(plugin.port(), TOKEN, true);
+    let mut again = plugin.try_accept(Duration::from_secs(3)).expect("retried after the settings changed");
+    again.authenticate(SERVER_A, NONCE_1, 5000);
+    again.expect_sequenced();
+    assert_eq!(host.alerts().len(), 1, "told once per load");
     handle.stop();
 }
 
@@ -571,16 +662,23 @@ fn a_gw2_api_key_in_the_token_setting_is_never_sent_in_a_hello() {
 fn the_fake_plugin_validator_catches_what_the_plugin_rejects() {
     // Controls for the validator above: if it accepted these, the scenarios would prove nothing.
     let instance = "q8Hq3n2t0dQyYf0nJ1p0Aw";
-    let hello = |extra: &str| format!(r#"{{"v":2,"type":"hello","client":"nexus","clientVersion":"0.2.0","instance":"{instance}","token":"{TOKEN}"{extra}}}"#);
+    let hello = |extra: &str| format!(r#"{{"v":3,"type":"hello","client":"nexus","clientVersion":"0.2.0","instance":"{instance}","token":"{TOKEN}"{extra}}}"#);
     assert!(validate_hello(&hello(""), TOKEN).is_ok());
     assert_eq!(validate_hello(&hello(r#","x":1"#), TOKEN).unwrap_err(), "frame_schema");
-    assert_eq!(validate_hello(&hello(r#","v":2"#), TOKEN).unwrap_err(), "frame_json");
+    assert_eq!(validate_hello(&hello(r#","v":3"#), TOKEN).unwrap_err(), "frame_json");
     assert_eq!(validate_hello(&hello(""), OTHER_TOKEN).unwrap_err(), "auth_rejected");
     assert_eq!(validate_hello(r#"{"v":1,"client":"nexus","clientVersion":"0.1.0"}"#, TOKEN).unwrap_err(), "version_unsupported");
-    let context = r#"{"v":2,"type":"context","nonce":"N","seq":0,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#;
+    let context = r#"{"v":3,"type":"context","nonce":"N","seq":0,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#;
     assert!(validate_sequenced(context, "N", 0).is_ok());
     assert_eq!(validate_sequenced(context, "M", 0).unwrap_err(), "nonce_mismatch");
     assert_eq!(validate_sequenced(context, "N", 1).unwrap_err(), "sequence_mismatch");
-    let spaced = r#"{"v":2,"type":"context","nonce":"N","seq":0,"state":"gameplay","mapId":866,"character":" Astra"}"#;
+    let spaced = r#"{"v":3,"type":"context","nonce":"N","seq":0,"state":"gameplay","mapId":866,"character":" Astra"}"#;
     assert_eq!(validate_sequenced(spaced, "N", 0).unwrap_err(), "frame_schema");
+    let ack = r#"{"v":3,"type":"alert_ack","nonce":"N","seq":4,"alertSeq":17}"#;
+    assert!(validate_sequenced(ack, "N", 4).is_ok());
+    assert_eq!(validate_sequenced(ack, "N", 5).unwrap_err(), "sequence_mismatch");
+    let ack_with_extra = r#"{"v":3,"type":"alert_ack","nonce":"N","seq":4,"alertSeq":17,"server":"S"}"#;
+    assert_eq!(validate_sequenced(ack_with_extra, "N", 4).unwrap_err(), "frame_schema");
+    let ack_at_v2 = ack.replace(r#""v":3"#, r#""v":2"#);
+    assert_eq!(validate_sequenced(&ack_at_v2, "N", 4).unwrap_err(), "frame_schema");
 }

@@ -226,8 +226,14 @@ forever, on the backoff table above, without surfacing that as an error. A conne
 drops is retried the same way, well inside the ten minutes the plugin waits before it closes
 the session, so a short hiccup continues the same session instead of starting a new one.
 Only two answers stop the retries until the settings change: a rejected token
-(`auth_rejected`) and a protocol version the plugin no longer speaks (`version_unsupported`,
-which also shows "update the Nexus addon").
+(`auth_rejected`) and a protocol version the plugin does not speak (`version_unsupported`).
+It shows "update the Nexus addon" when the plugin's `v` is 3 or more, and "update Tyrian
+Companion in Obsidian" when it is below 3 (a plugin that predates v3).
+
+Protocol v3 (unreleased) is v2 plus one message from the addon: right after painting an alert it
+sends `{"v":3,"type":"alert_ack","nonce":…,"seq":…,"alertSeq":…}` on the same `seq` sequence as
+`context`, `heartbeat` and `bye`, once per `(server, alertSeq)`. The `hello` goes out with `"v":3`;
+the plugin's `welcome`, `alert` and `error` lines are read at v2 or v3.
 
 ## Tests
 

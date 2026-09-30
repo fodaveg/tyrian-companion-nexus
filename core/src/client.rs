@@ -1,4 +1,4 @@
-//! The client of the plugin's loopback bridge, protocol v2: connect, authenticate with the
+//! The client of the plugin's loopback bridge, protocol v3: connect, authenticate with the
 //! token, report the game context, paint alerts, keep the connection alive, say goodbye, and
 //! reconnect on the SPEC's backoff when the plugin is not there.
 //!
@@ -13,7 +13,9 @@
 //! 2. the plugin's `welcome` (`server`, `nonce`, `heartbeatIntervalMs`), which resets the backoff;
 //! 3. a `context` straight away, and again every time state, map or character changes;
 //! 4. a `heartbeat` whenever nothing has been sent for `heartbeatIntervalMs`;
-//! 5. `alert` lines in between, shown once per `(server, seq)`;
+//! 5. `alert` lines in between, shown once per `(server, seq)`, each confirmed with an `alert_ack`
+//!    right after it is painted (one per `(server, alertSeq)`; a duplicate is not confirmed
+//!    again, and neither is an alert without a `seq`);
 //! 6. a `bye` on the way out: `game_exit` only when the game window is closing, `addon_unload`
 //!    otherwise.
 //!
@@ -38,9 +40,9 @@ use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
 use crate::obsidian_launch::{should_launch, FirstConnectOutcome, ObsidianLaunchOutcome};
 use crate::protocol::{
-    build_bye_line, build_context_line, build_heartbeat_line, build_hello_line, is_usable_token, parse_server_line,
-    ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE, TOKEN_REJECTED_MESSAGE,
-    UPDATE_ADDON_MESSAGE,
+    build_alert_ack_line, build_bye_line, build_context_line, build_heartbeat_line, build_hello_line, is_usable_token,
+    parse_server_line, ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE,
+    TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE, UPDATE_PLUGIN_MESSAGE,
 };
 use crate::state::{SharedState, Status};
 
@@ -150,6 +152,15 @@ impl Session {
             return Some(line);
         }
         None
+    }
+
+    /// The `alert_ack` line for the alert numbered `alert_seq`, on the session's own sequence. Call
+    /// it only for an alert that was just painted and only once per `(server, alertSeq)`; the
+    /// heartbeat clock restarts, as with any line sent.
+    pub fn ack_alert(&mut self, alert_seq: u64, now: Instant) -> Option<String> {
+        let line = build_alert_ack_line(&self.nonce, self.next_seq, alert_seq)?;
+        self.take_seq(now);
+        Some(line)
     }
 
     /// The `bye` line. Nothing is sent after it.
@@ -276,11 +287,15 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
                 halted_at = Some(generation);
                 continue;
             }
-            Some(ErrorCode::VersionUnsupported) => {
-                log::warn!("the plugin speaks another protocol version (version_unsupported)");
+            Some(ref code @ (ErrorCode::VersionUnsupported | ErrorCode::PluginTooOld)) => {
+                let plugin_is_old = *code == ErrorCode::PluginTooOld;
+                log::warn!(
+                    "the plugin speaks another protocol version (version_unsupported, {})",
+                    if plugin_is_old { "plugin too old" } else { "addon too old" }
+                );
                 state.set_status(Status::UpdateRequired);
                 if state.warn_about_version_once() {
-                    host.show_alert(UPDATE_ADDON_MESSAGE);
+                    host.show_alert(if plugin_is_old { UPDATE_PLUGIN_MESSAGE } else { UPDATE_ADDON_MESSAGE });
                 }
                 halted_at = Some(generation);
                 continue;
@@ -352,9 +367,17 @@ fn serve(
         match stream.read(&mut buffer) {
             Ok(0) => return end,
             Ok(read) => {
+                let mut outgoing = Vec::new();
                 for line in framer.push(&buffer[..read]) {
-                    if let Some(error) = handle_line(line, &mut session, state, host) {
+                    if let Some(error) = handle_line(line, &mut session, state, host, &mut outgoing) {
                         end.error = Some(error);
+                        return end;
+                    }
+                }
+                // The acks go out before the next context or heartbeat, in the order they took
+                // their `seq`.
+                for line in outgoing {
+                    if stream.write_all(line.as_bytes()).is_err() {
                         return end;
                     }
                 }
@@ -385,8 +408,15 @@ fn serve(
 }
 
 /// Acts on one framed line from the plugin. Returns the `error` code if the line was one: the
-/// plugin closes the connection right after sending it.
-fn handle_line(line: FramedLine, session: &mut Option<Session>, state: &SharedState, host: &dyn Host) -> Option<ErrorCode> {
+/// plugin closes the connection right after sending it. Lines the addon owes the plugin in answer
+/// (an `alert_ack` per painted alert) are pushed onto `outgoing`, already numbered.
+fn handle_line(
+    line: FramedLine,
+    session: &mut Option<Session>,
+    state: &SharedState,
+    host: &dyn Host,
+    outgoing: &mut Vec<String>,
+) -> Option<ErrorCode> {
     let FramedLine::Complete(line) = line else {
         // Over the framer's memory cap: the 512-byte wire cap would have discarded it anyway.
         return None;
@@ -402,11 +432,16 @@ fn handle_line(line: FramedLine, session: &mut Option<Session>, state: &SharedSt
             }
         }
         ServerLine::Alert(alert) => {
-            let Some(session) = session.as_ref() else { return None };
+            let Some(session) = session.as_mut() else { return None };
             if state.accept_alert(session.server(), alert.seq) {
                 // The one required delivery: paint `content` exactly as the plugin composed it.
                 host.show_alert(&alert.content);
                 state.push_history(&alert);
+                // Confirm it now that it is painted. A duplicate never gets here, and an alert
+                // without a `seq` has nothing to name in `alertSeq`.
+                if let Some(line) = alert.seq.and_then(|seq| session.ack_alert(seq, Instant::now())) {
+                    outgoing.push(line);
+                }
             }
         }
         ServerLine::Error(code) => return Some(code),
@@ -465,9 +500,28 @@ mod tests {
         assert!(second.contains(r#""seq":1"#) && second.contains(r#""mapId":50"#), "{second}");
         assert_eq!(session.next_outgoing(start + Duration::from_millis(5999), &gameplay(50)), None);
         let heartbeat = session.next_outgoing(start + Duration::from_secs(6), &gameplay(50)).unwrap();
-        assert_eq!(heartbeat, "{\"v\":2,\"type\":\"heartbeat\",\"nonce\":\"Zk3m1Qw9Lr0aT7yUc2Vb5g\",\"seq\":2}\n");
+        assert_eq!(heartbeat, "{\"v\":3,\"type\":\"heartbeat\",\"nonce\":\"Zk3m1Qw9Lr0aT7yUc2Vb5g\",\"seq\":2}\n");
         let bye = session.bye(ByeReason::AddonUnload, start + Duration::from_secs(7)).unwrap();
         assert!(bye.contains(r#""seq":3"#) && bye.contains("addon_unload"), "{bye}");
+    }
+
+    #[test]
+    fn an_ack_between_a_context_and_a_heartbeat_keeps_the_sequence_consecutive() {
+        let start = Instant::now();
+        let mut session = Session::new(welcome(5000), start);
+        session.next_outgoing(start, &gameplay(50)).unwrap(); // seq 0
+        let ack = session.ack_alert(17, start + Duration::from_secs(1)).unwrap(); // seq 1
+        assert_eq!(ack, "{\"v\":3,\"type\":\"alert_ack\",\"nonce\":\"Zk3m1Qw9Lr0aT7yUc2Vb5g\",\"seq\":1,\"alertSeq\":17}\n");
+        let context = session.next_outgoing(start + Duration::from_secs(2), &gameplay(866)).unwrap(); // seq 2
+        assert!(context.contains(r#""seq":2"#), "{context}");
+        let second_ack = session.ack_alert(18, start + Duration::from_secs(3)).unwrap(); // seq 3
+        assert!(second_ack.contains(r#""seq":3"#) && second_ack.contains(r#""alertSeq":18"#), "{second_ack}");
+        // The ack restarted the heartbeat clock: 4 s after it there is still nothing to send.
+        assert_eq!(session.next_outgoing(start + Duration::from_secs(7), &gameplay(866)), None);
+        let heartbeat = session.next_outgoing(start + Duration::from_secs(8), &gameplay(866)).unwrap(); // seq 4
+        assert!(heartbeat.contains(r#""seq":4"#), "{heartbeat}");
+        let bye = session.bye(ByeReason::GameExit, start + Duration::from_secs(9)).unwrap();
+        assert!(bye.contains(r#""seq":5"#), "{bye}");
     }
 
     #[test]

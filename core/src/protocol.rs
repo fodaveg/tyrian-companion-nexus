@@ -1,4 +1,5 @@
-//! The wire contract fixed by `docs/SPEC-puente-ingame.md` in `tyrian-companion`, version 2.
+//! The wire contract fixed by `docs/SPEC-puente-ingame.md` in `tyrian-companion`, version 3: v2
+//! plus the addon's `alert_ack` (the plugin's own lines are still read at v2 or v3).
 //!
 //! v2 is bidirectional and authenticated. The addon opens with a `hello` that carries the
 //! per-installation token the user copies from the plugin's settings; the plugin answers with a
@@ -23,8 +24,12 @@ use serde_json::{Map, Value};
 /// Default port the plugin listens on. Matches the spec and the plugin's own default.
 pub const DEFAULT_PORT: u16 = 47823;
 
-/// The only protocol version this addon speaks.
-pub const PROTOCOL_VERSION: u64 = 2;
+/// The protocol version this addon speaks and stamps on every line it sends: v3 is v2 plus the
+/// `alert_ack` line (see [`build_alert_ack_line`]).
+pub const PROTOCOL_VERSION: u64 = 3;
+
+/// The oldest version of the plugin's own lines (`welcome`, `alert`, `error`) this addon reads.
+pub const MIN_SERVER_VERSION: u64 = 2;
 
 /// Wire cap on one line, terminator excluded, in either direction (spec: "512 bytes como máximo
 /// por línea, sin contar el terminador, en las dos direcciones").
@@ -59,6 +64,10 @@ const CLIENT_NAME: &str = "nexus";
 
 /// Shown once when the plugin speaks a newer version than this addon does.
 pub const UPDATE_ADDON_MESSAGE: &str = "Tyrian Companion: update the Nexus addon to see new alerts";
+
+/// Shown once when the plugin answers `version_unsupported` with a `v` below this addon's: the
+/// plugin is the old side, so the update to ask for is the plugin's.
+pub const UPDATE_PLUGIN_MESSAGE: &str = "Tyrian Companion: update Tyrian Companion in Obsidian";
 
 /// Shown once when the plugin refuses the token, until the user saves a new one. Says what to do,
 /// not only what happened: the bare "rejected" of 0.2.0 left the player guessing.
@@ -312,6 +321,25 @@ pub fn build_bye_line(nonce: &str, seq: u64, reason: ByeReason) -> Option<String
     finish_line(serde_json::to_string(&line).ok()?)
 }
 
+#[derive(Serialize)]
+struct AlertAckLine<'a> {
+    v: u64,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    nonce: &'a str,
+    seq: u64,
+    #[serde(rename = "alertSeq")]
+    alert_seq: u64,
+}
+
+/// Builds an `alert_ack` line, `\n` included: the addon's confirmation that it has just painted
+/// the plugin's alert number `alert_seq`. It takes a place in the same `seq` sequence as
+/// `context`, `heartbeat` and `bye`, so the caller passes the next one.
+pub fn build_alert_ack_line(nonce: &str, seq: u64, alert_seq: u64) -> Option<String> {
+    let line = AlertAckLine { v: PROTOCOL_VERSION, kind: "alert_ack", nonce, seq, alert_seq };
+    finish_line(serde_json::to_string(&line).ok()?)
+}
+
 /// The plugin's answer to an accepted `hello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
@@ -390,8 +418,12 @@ pub struct Alert {
 pub enum ErrorCode {
     /// The token is wrong: tell the user, and do not retry until the settings change.
     AuthRejected,
-    /// The plugin speaks another version: ask for an update, and do not retry.
+    /// The plugin speaks another version and said so with a `v` of 3 or more: the addon is the
+    /// one behind. Ask for an addon update, and do not retry.
     VersionUnsupported,
+    /// `version_unsupported` sent with a `v` below 3: an old plugin that does not know v3. Ask
+    /// for a plugin update, and do not retry.
+    PluginTooOld,
     /// A deadline or the plugin's capacity: nothing wrong on this side, retry with backoff.
     HelloTimeout,
     LivenessTimeout,
@@ -421,7 +453,7 @@ impl ErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
             Self::AuthRejected => "auth_rejected",
-            Self::VersionUnsupported => "version_unsupported",
+            Self::VersionUnsupported | Self::PluginTooOld => "version_unsupported",
             Self::HelloTimeout => "hello_timeout",
             Self::LivenessTimeout => "liveness_timeout",
             Self::Capacity => "capacity",
@@ -432,7 +464,7 @@ impl ErrorCode {
     /// `false` for the two codes after which the spec forbids reconnecting until the user changes
     /// the addon's settings.
     pub fn retries(&self) -> bool {
-        !matches!(self, Self::AuthRejected | Self::VersionUnsupported)
+        !matches!(self, Self::AuthRejected | Self::VersionUnsupported | Self::PluginTooOld)
     }
 }
 
@@ -489,7 +521,7 @@ pub fn parse_server_line(line: &str) -> ServerLine {
     if version > PROTOCOL_VERSION {
         return ServerLine::UnsupportedVersion;
     }
-    if version != PROTOCOL_VERSION {
+    if version < MIN_SERVER_VERSION {
         return ServerLine::Discard;
     }
     let Some(kind) = record.get("type").and_then(Value::as_str) else {
@@ -498,7 +530,7 @@ pub fn parse_server_line(line: &str) -> ServerLine {
     let parsed = match kind {
         "welcome" => parse_welcome(&record).map(ServerLine::Welcome),
         "alert" => parse_alert(&record).map(ServerLine::Alert),
-        "error" => parse_error(&record).map(ServerLine::Error),
+        "error" => parse_error(&record, version).map(ServerLine::Error),
         _ => return ServerLine::Ignored,
     };
     parsed.unwrap_or(ServerLine::Discard)
@@ -538,11 +570,16 @@ fn parse_alert(record: &Map<String, Value>) -> Option<Alert> {
     })
 }
 
-fn parse_error(record: &Map<String, Value>) -> Option<ErrorCode> {
+fn parse_error(record: &Map<String, Value>, version: u64) -> Option<ErrorCode> {
     if !has_exact_keys(record, ERROR_KEYS) {
         return None;
     }
-    Some(ErrorCode::from_wire(record.get("code")?.as_str()?))
+    let code = ErrorCode::from_wire(record.get("code")?.as_str()?);
+    // The plugin stamps `version_unsupported` with its own `v`: below ours, it is the old side.
+    if code == ErrorCode::VersionUnsupported && version < PROTOCOL_VERSION {
+        return Some(ErrorCode::PluginTooOld);
+    }
+    Some(code)
 }
 
 #[cfg(test)]
@@ -569,7 +606,7 @@ mod tests {
     fn hello_matches_the_spec_example() {
         assert_eq!(
             without_terminator(build_hello_line("0.2.0", SPEC_INSTANCE, "<token>")),
-            r#"{"v":2,"type":"hello","client":"nexus","clientVersion":"0.2.0","instance":"q8Hq3n2t0dQyYf0nJ1p0Aw","token":"<token>"}"#,
+            r#"{"v":3,"type":"hello","client":"nexus","clientVersion":"0.2.0","instance":"q8Hq3n2t0dQyYf0nJ1p0Aw","token":"<token>"}"#,
         );
     }
 
@@ -578,7 +615,7 @@ mod tests {
         let line = build_context_line(SPEC_NONCE, 0, &context(GameState::Gameplay, Some(LABYRINTH_MAP_ID), Some("Astra Uno")));
         assert_eq!(
             without_terminator(line),
-            r#"{"v":2,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":0,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#,
+            r#"{"v":3,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":0,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#,
         );
     }
 
@@ -586,7 +623,7 @@ mod tests {
     fn heartbeat_matches_the_spec_example() {
         assert_eq!(
             without_terminator(build_heartbeat_line(SPEC_NONCE, 5)),
-            r#"{"v":2,"type":"heartbeat","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":5}"#,
+            r#"{"v":3,"type":"heartbeat","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":5}"#,
         );
     }
 
@@ -594,11 +631,11 @@ mod tests {
     fn bye_matches_the_spec_example() {
         assert_eq!(
             without_terminator(build_bye_line(SPEC_NONCE, 9, ByeReason::GameExit)),
-            r#"{"v":2,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":9,"reason":"game_exit"}"#,
+            r#"{"v":3,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":9,"reason":"game_exit"}"#,
         );
         assert_eq!(
             without_terminator(build_bye_line(SPEC_NONCE, 3, ByeReason::AddonUnload)),
-            r#"{"v":2,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":3,"reason":"addon_unload"}"#,
+            r#"{"v":3,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":3,"reason":"addon_unload"}"#,
         );
     }
 
@@ -616,12 +653,12 @@ mod tests {
             build_bye_line(n, 5, ByeReason::GameExit),
         ];
         let expected = [
-            r#"{"v":2,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":0,"state":"character_select","mapId":null,"character":null}"#,
-            r#"{"v":2,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":1,"state":"loading","mapId":50,"character":"Astra Uno"}"#,
-            r#"{"v":2,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":2,"state":"gameplay","mapId":50,"character":"Astra Uno"}"#,
-            r#"{"v":2,"type":"heartbeat","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":3}"#,
-            r#"{"v":2,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":4,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#,
-            r#"{"v":2,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":5,"reason":"game_exit"}"#,
+            r#"{"v":3,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":0,"state":"character_select","mapId":null,"character":null}"#,
+            r#"{"v":3,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":1,"state":"loading","mapId":50,"character":"Astra Uno"}"#,
+            r#"{"v":3,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":2,"state":"gameplay","mapId":50,"character":"Astra Uno"}"#,
+            r#"{"v":3,"type":"heartbeat","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":3}"#,
+            r#"{"v":3,"type":"context","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":4,"state":"gameplay","mapId":866,"character":"Astra Uno"}"#,
+            r#"{"v":3,"type":"bye","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":5,"reason":"game_exit"}"#,
         ];
         for (line, expected) in built.into_iter().zip(expected) {
             assert_eq!(without_terminator(line), expected);
@@ -769,7 +806,9 @@ mod tests {
             ("brand_new", ErrorCode::Unknown("brand_new".into()), true),
         ];
         for (wire, expected, retries) in expectations {
-            let line = format!(r#"{{"v":2,"type":"error","code":"{wire}"}}"#);
+            // `version_unsupported` at v2 means an old plugin (`PluginTooOld`); at v3 the addon is behind.
+            let v = if wire == "version_unsupported" { 3 } else { 2 };
+            let line = format!(r#"{{"v":{v},"type":"error","code":"{wire}"}}"#);
             assert_eq!(parse_server_line(&line), ServerLine::Error(expected.clone()), "{wire}");
             assert_eq!(expected.retries(), retries, "{wire}");
             assert_eq!(expected.as_str(), wire);
@@ -805,7 +844,48 @@ mod tests {
 
     #[test]
     fn a_higher_version_asks_for_an_update_and_nothing_else() {
-        assert_eq!(parse_server_line(r#"{"v":3,"type":"alert"}"#), ServerLine::UnsupportedVersion);
+        assert_eq!(parse_server_line(r#"{"v":4,"type":"alert"}"#), ServerLine::UnsupportedVersion);
+        assert_eq!(
+            parse_server_line(r#"{"v":4,"type":"error","code":"version_unsupported"}"#),
+            ServerLine::UnsupportedVersion
+        );
+    }
+
+    #[test]
+    fn the_plugins_lines_are_read_at_v2_and_at_v3() {
+        for v in [2, 3] {
+            let welcome = format!(
+                r#"{{"v":{v},"type":"welcome","server":"Pq0v4c3Wm9Xs1Ya7Tb2NeQ","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","heartbeatIntervalMs":5000}}"#
+            );
+            assert!(matches!(parse_server_line(&welcome), ServerLine::Welcome(_)), "welcome v{v}");
+            let alert = format!(
+                r#"{{"v":{v},"type":"alert","seq":17,"kind":"valuable_loot","name":"X","quantity":1,"totalCopper":null,"content":"X"}}"#
+            );
+            assert!(matches!(parse_server_line(&alert), ServerLine::Alert(_)), "alert v{v}");
+        }
+    }
+
+    #[test]
+    fn version_unsupported_from_an_old_plugin_is_told_apart_from_an_old_addon() {
+        let old_plugin = parse_server_line(r#"{"v":2,"type":"error","code":"version_unsupported"}"#);
+        assert_eq!(old_plugin, ServerLine::Error(ErrorCode::PluginTooOld));
+        let old_addon = parse_server_line(r#"{"v":3,"type":"error","code":"version_unsupported"}"#);
+        assert_eq!(old_addon, ServerLine::Error(ErrorCode::VersionUnsupported));
+        assert!(!ErrorCode::PluginTooOld.retries());
+        assert_eq!(ErrorCode::PluginTooOld.as_str(), "version_unsupported");
+        // Only `version_unsupported` cares about the plugin's `v`.
+        assert_eq!(
+            parse_server_line(r#"{"v":2,"type":"error","code":"capacity"}"#),
+            ServerLine::Error(ErrorCode::Capacity)
+        );
+    }
+
+    #[test]
+    fn alert_ack_matches_the_v3_design() {
+        assert_eq!(
+            without_terminator(build_alert_ack_line(SPEC_NONCE, 7, 17)),
+            r#"{"v":3,"type":"alert_ack","nonce":"Zk3m1Qw9Lr0aT7yUc2Vb5g","seq":7,"alertSeq":17}"#,
+        );
     }
 
     #[test]
