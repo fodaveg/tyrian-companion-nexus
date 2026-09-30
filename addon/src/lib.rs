@@ -2,7 +2,7 @@
 //!
 //! Paints, inside Guild Wars 2, the alerts the Tyrian Companion Obsidian plugin emits, and
 //! reports the game context (state, map, character) the plugin uses to mark play sessions.
-//! `docs/SPEC-puente-ingame.md` in the `tyrian-companion` repo, protocol v2, is the contract this
+//! `docs/SPEC-puente-ingame.md` in the `tyrian-companion` repo, protocol v3, is the contract this
 //! addon implements.
 //!
 //! What this addon is, structurally, and why: an authenticated client of one loopback TCP port.

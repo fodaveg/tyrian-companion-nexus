@@ -3,7 +3,7 @@
 A [Nexus](https://raidcore.gg/) addon for Guild Wars 2 that paints, inside the game, the
 loot and price alerts the [Tyrian Companion](https://github.com/fodaveg/tyrian-companion)
 Obsidian plugin emits, and tells the plugin what the game is doing so it can mark play
-sessions on its own. It implements protocol **v2** of `docs/SPEC-puente-ingame.md` in that
+sessions on its own. It implements protocol **v3** of `docs/SPEC-puente-ingame.md` in that
 repo, which is the contract and the source of truth if the two disagree.
 
 Version 0.2.0 speaks v2 only. The plugin answers a v1 addon (0.1.x) with
@@ -14,6 +14,12 @@ Version 0.2.1 refuses to save a Guild Wars 2 API key pasted into the token field
 else outside the token's format, with a message that says where to copy the right value; an API
 key saved by 0.2.0 is removed from `settings.json` on load and never sent. After a rejected
 token the status line says what to do.
+
+Version 0.3.0 speaks protocol v3: after painting an alert it sends the plugin an `alert_ack`,
+and the alert's trail in Tyrian Companion moves to "Recibido en el juego". It needs Tyrian
+Companion 0.2.12 or later; with an earlier plugin the addon gets `version_unsupported` and
+asks you to update Tyrian Companion in Obsidian. It also opens Obsidian when the game starts
+with Obsidian closed (see "Automatic Obsidian launch" below).
 
 ## What it does, and does not do
 
@@ -52,7 +58,7 @@ third-party program policy. What the plugin does with the context happens outsid
 
 This is a two-crate Cargo workspace, and that split is deliberate:
 
-- **`core/`** (`tyrian_companion_nexus_core`): the v2 wire protocol (building `hello`,
+- **`core/`** (`tyrian_companion_nexus_core`): the v3 wire protocol (building `hello`,
   `context`, `heartbeat` and `bye` exactly as the plugin validates them, reading `welcome`,
   `alert` and `error`), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
@@ -230,7 +236,7 @@ Only two answers stop the retries until the settings change: a rejected token
 It shows "update the Nexus addon" when the plugin's `v` is 3 or more, and "update Tyrian
 Companion in Obsidian" when it is below 3 (a plugin that predates v3).
 
-Protocol v3 (unreleased) is v2 plus one message from the addon: right after painting an alert it
+Protocol v3 is v2 plus one message from the addon: right after painting an alert it
 sends `{"v":3,"type":"alert_ack","nonce":…,"seq":…,"alertSeq":…}` on the same `seq` sequence as
 `context`, `heartbeat` and `bye`, once per `(server, alertSeq)`. The `hello` goes out with `"v":3`;
 the plugin's `welcome`, `alert` and `error` lines are read at v2 or v3.
