@@ -19,7 +19,10 @@ Version 0.3.0 speaks protocol v3: after painting an alert it sends the plugin an
 and the alert's trail in Tyrian Companion moves to "Recibido en el juego". It needs Tyrian
 Companion 0.2.12 or later; with an earlier plugin the addon gets `version_unsupported` and
 asks you to update Tyrian Companion in Obsidian. It also opens Obsidian when the game starts
-with Obsidian closed (see "Automatic Obsidian launch" below).
+with Obsidian closed (see "Automatic app launch" below).
+
+Version 0.3.1 lets you choose whether that automatic launch opens Obsidian or Hebra, which
+also hosts Tyrian Companion; Obsidian stays the default.
 
 ## What it does, and does not do
 
@@ -149,39 +152,52 @@ abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git depende
 `0.12.0` from [`Zerthox/nexus-rs`](https://github.com/Zerthox/nexus-rs), matching the version
 `docs/SPEC-puente-ingame.md` names.
 
-## Automatic Obsidian launch
+## Automatic app launch
 
-If Obsidian is closed when the game starts, this addon opens it: David, 24 sep 2026, "si
-empiezo a jugar y está cerrado, que se abra" (`docs/SPEC-puente-ingame.md` in the plugin repo).
+If the app that runs the plugin is closed when the game starts, this addon opens it: David, 24
+sep 2026, "si empiezo a jugar y está cerrado, que se abra" (`docs/SPEC-puente-ingame.md` in the
+plugin repo). The app is **Obsidian** by default; since 0.3.1 you can pick **Hebra** instead,
+which hosts Tyrian Companion as an external plugin.
 
 **When it fires.** At most once per addon load, right after the very first connection attempt
 to the plugin's bridge. If that attempt's TCP `connect()` is refused or times out — nobody
 listening, the ordinary case when the game starts before Obsidian does — the addon takes that as
-"Obsidian is closed" and launches it. A successful connect, even if the plugin then answers
+"the app is closed" and launches the chosen one. A successful connect, even if the plugin then answers
 `auth_rejected` or `version_unsupported`, means somebody was listening, so nothing is launched
 either way; later reconnection retries never trigger a second launch. The decision itself
 (`core::obsidian_launch::should_launch`) is plain Rust with no OS call, covered by `cargo test`
 on Linux.
 
-**Setting.** `open_obsidian_on_start`, a checkbox in this addon's Options panel, on by default —
-including for a `settings.json` saved before this setting existed. With it off, nothing is ever
-launched. The Options panel also shows a line with the outcome of this load's one attempt
+**Settings.** Two, both in this addon's Options panel:
+
+- `open_obsidian_on_start`, a checkbox, on by default — including for a `settings.json` saved
+  before this setting existed. With it off, nothing is ever launched. The key keeps its original
+  name on disk so files from 0.3.0 still load; it now governs whichever app is chosen.
+- `launch_app`, an "App to open" radio pair, `"obsidian"` (default) or `"hebra"`. A
+  `settings.json` without the key means Obsidian, so an older install behaves exactly as before.
+  Choosing applies and saves at once, and does not wake a client the plugin told to stop
+  retrying.
+
+The Options panel also shows a line, naming the app, with the outcome of this load's one attempt
 (launched / no handler / error with its code), never a native alert: the SPEC's alerts are for
 the plugin's own content.
 
 **Mechanism.** Two paths, gated behind `#[cfg(windows)]` like the rest of this addon:
 
 - **Under Wine/Proton** (this repository's only tested platform, David's own machine: Fedora +
-  GE-Proton): launches `%SystemRoot%\system32\winebrowser.exe` with `obsidian://open` as its one
-  argument. `winebrowser.exe` ships in every Wine/Proton prefix and forwards that argument to the
-  host's `xdg-open`, which is what actually opens or focuses the Fedora Obsidian flatpak — no
-  registry key is written in the prefix. Measured in
+  GE-Proton): launches `%SystemRoot%\system32\winebrowser.exe` with `obsidian://open` (or
+  `hebra://open`) as its one argument. `winebrowser.exe` ships in every Wine/Proton prefix and
+  forwards that argument to the host's `xdg-open`, which is what actually opens or focuses the
+  Fedora Obsidian flatpak, or starts Hebra through its `x-scheme-handler/hebra` entry (Hebra's
+  deep-link parser ignores a URI that is not a note or a Lumbre connect, so `hebra://open` only
+  starts the app) — no registry key is written in the prefix. The Obsidian path was measured in
   [H18.27](https://github.com/fodaveg/tyrian-companion/blob/main/docs/audit/sonda-h18-27-abrir-obsidian-desde-proton.md)
   (path B there). Wine/Proton is detected by the `wine_get_version` export Wine's own
   `ntdll.dll` carries and a real Windows one never does — no prefix access needed for the check
   itself.
-- **Native Windows** (no Wine): only if `HKEY_CLASSES_ROOT\obsidian` exists — Obsidian's own
-  Windows installer registers it — `ShellExecuteW` opens `obsidian://open` the normal way. If
+- **Native Windows** (no Wine): only if `HKEY_CLASSES_ROOT\obsidian` (or `\hebra`) exists — the
+  app's own Windows installer registers it — `ShellExecuteW` opens `obsidian://open` (or
+  `hebra://open`) the normal way. If
   the key is missing, nothing is launched, on purpose: otherwise Windows would pop its own "how
   do you want to open this?" dialog on top of the game. **Not verified**: this repository has no
   real Windows machine to test this path on; it is implemented against the documented Win32
@@ -192,11 +208,11 @@ launch request, so this never blocks the game's thread.
 
 ## Settings
 
-Three settings, all in Nexus's Options window under this addon's own section, and all saved
-to `<GW2>/addons/tyrian_companion_nexus/settings.json`. `open_obsidian_on_start` (see "Automatic
-Obsidian launch" above) is the odd one out: its checkbox applies and saves right away, since
-there is nothing to validate, unlike the port and the token below, which only take effect after
-**Save**:
+Four settings, all in Nexus's Options window under this addon's own section, and all saved
+to `<GW2>/addons/tyrian_companion_nexus/settings.json`. `open_obsidian_on_start` and
+`launch_app` (see "Automatic app launch" above) are the odd ones out: their checkbox and radio
+buttons apply and save right away, since there is nothing to validate, unlike the port and the
+token below, which only take effect after **Save**:
 
 - **Token.** The plugin only talks to addons that know its secret. To paste it:
   1. In Obsidian, open Tyrian Companion's settings and, in the "Addon token" row, press
