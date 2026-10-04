@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::backoff::Backoff;
 use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
-use crate::obsidian_launch::{should_launch, FirstConnectOutcome, ObsidianLaunchOutcome};
+use crate::obsidian_launch::{should_launch, FirstConnectOutcome, LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{
     build_alert_ack_line, build_bye_line, build_context_line, build_heartbeat_line, build_hello_line, is_usable_token,
     parse_server_line, ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE,
@@ -83,10 +83,11 @@ pub trait Host: Send + 'static {
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
-    /// Tries to open or focus Obsidian. Called at most once per load, only when
+    /// Tries to open or focus `app` (the player's choice, Obsidian or Hebra). Called at most
+    /// once per load, only when
     /// [`obsidian_launch::should_launch`](crate::obsidian_launch::should_launch) says so (see
     /// [`run`]'s own doc). Must not block on the child process it starts.
-    fn open_obsidian(&self) -> ObsidianLaunchOutcome;
+    fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome;
 }
 
 /// What does not change for the life of the process.
@@ -262,7 +263,7 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             let first_connect =
                 if connect_result.is_ok() { FirstConnectOutcome::Connected } else { FirstConnectOutcome::NoListener };
             if should_launch(state.open_obsidian_on_start(), false, first_connect) {
-                state.set_obsidian_launch_outcome(host.open_obsidian());
+                state.set_obsidian_launch_outcome(host.open_app(state.launch_app()));
             }
         }
         let end = match connect_result {

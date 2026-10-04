@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nexus::data_link::{read_nexus_link, read_resource};
 use tyrian_companion_nexus_core::client::{GameReading, Host};
 use tyrian_companion_nexus_core::game_context::{MumbleSnapshot, MUMBLE_LINK_BYTES};
-use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
+use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 
 use crate::obsidian_launch;
 
@@ -58,7 +58,7 @@ impl Host for NexusHost {
         GAME_EXITING.load(Ordering::Relaxed)
     }
 
-    fn open_obsidian(&self) -> ObsidianLaunchOutcome {
-        obsidian_launch::open_obsidian()
+    fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome {
+        obsidian_launch::open_app(app)
     }
 }

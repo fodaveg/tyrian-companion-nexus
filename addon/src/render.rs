@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 use nexus::imgui::{StyleColor, TreeNodeFlags, Ui};
 
-use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
+use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
 use tyrian_companion_nexus_core::settings::{self, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
@@ -62,18 +62,20 @@ fn status_line(status: Status) -> ([f32; 4], &'static str) {
     }
 }
 
-/// What the panel shows about this load's one attempt to open Obsidian automatically (see
-/// `tyrian_companion_nexus_core::obsidian_launch`). Native alerts are reserved for the plugin's
-/// own content; this is housekeeping the player did not ask to be interrupted for.
-fn obsidian_launch_line(outcome: ObsidianLaunchOutcome) -> ([f32; 4], String) {
+/// What the panel shows about this load's one attempt to open the chosen app, Obsidian or Hebra,
+/// automatically (see `tyrian_companion_nexus_core::obsidian_launch`). Native alerts are
+/// reserved for the plugin's own content; this is housekeeping the player did not ask to be
+/// interrupted for.
+fn launch_line(app: LaunchApp, outcome: ObsidianLaunchOutcome) -> ([f32; 4], String) {
+    let name = app.name();
     match outcome {
         ObsidianLaunchOutcome::Launched => {
-            (GREEN, "Obsidian: launched automatically (the first connection attempt found nobody listening)".to_string())
+            (GREEN, format!("{name}: launched automatically (the first connection attempt found nobody listening)"))
         }
         ObsidianLaunchOutcome::NoHandler => {
-            (ORANGE, "Obsidian: not launched — no obsidian:// handler is registered in Windows".to_string())
+            (ORANGE, format!("{name}: not launched — no {} handler is registered in Windows", app.uri().trim_end_matches("open")))
         }
-        ObsidianLaunchOutcome::Error(code) => (RED, format!("Obsidian: could not launch it (error code {code})")),
+        ObsidianLaunchOutcome::Error(code) => (RED, format!("{name}: could not launch it (error code {code})")),
     }
 }
 
@@ -120,9 +122,12 @@ pub fn options_render(ui: &Ui) {
                     pending.token = token.clone();
                     pending.notice = None;
                     let open_obsidian_on_start = shared.open_obsidian_on_start();
-                    shared.apply_settings(port, &token, open_obsidian_on_start);
+                    let launch_app = shared.launch_app();
+                    shared.apply_settings(port, &token, open_obsidian_on_start, launch_app);
                     if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-                        if let Err(error) = settings::save(&dir, &Settings { port, token, open_obsidian_on_start }) {
+                        if let Err(error) =
+                            settings::save(&dir, &Settings { port, token, open_obsidian_on_start, launch_app })
+                        {
                             log::error!("failed to save settings: {error}");
                         }
                     }
@@ -148,22 +153,40 @@ pub fn options_render(ui: &Ui) {
 
     ui.separator();
     {
-        // Applied right away, unlike port/token: a checkbox has nothing to validate, so there is
-        // no reason to make it wait for "Save". It is read from and written straight to shared
-        // state, never through `pending`, so a token edited but not yet saved is never read back
-        // out when this box is the only thing that changed.
+        // Applied right away, unlike port/token: a checkbox or a choice between two apps has
+        // nothing to validate, so there is no reason to make it wait for "Save". Both are read
+        // from and written straight to shared state, never through `pending`, so a token edited
+        // but not yet saved is never read back out when these are the only things that changed.
         let mut open_on_start = shared.open_obsidian_on_start();
-        if ui.checkbox("Open Obsidian automatically when the game starts", &mut open_on_start) {
+        let mut launch_app = shared.launch_app();
+        let mut changed = false;
+        if ui.checkbox("Open Obsidian or Hebra automatically when the game starts", &mut open_on_start) {
             shared.set_open_obsidian_on_start(open_on_start);
+            changed = true;
+        }
+        ui.text("App to open:");
+        for app in LaunchApp::ALL {
+            ui.same_line();
+            if ui.radio_button(app.name(), &mut launch_app, app) {
+                shared.set_launch_app(launch_app);
+                changed = true;
+            }
+        }
+        if changed {
             if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-                let settings = Settings { port: shared.port(), token: shared.token(), open_obsidian_on_start: open_on_start };
+                let settings = Settings {
+                    port: shared.port(),
+                    token: shared.token(),
+                    open_obsidian_on_start: open_on_start,
+                    launch_app,
+                };
                 if let Err(error) = settings::save(&dir, &settings) {
                     log::error!("failed to save settings: {error}");
                 }
             }
         }
         if let Some(outcome) = shared.obsidian_launch_outcome() {
-            let (color, text) = obsidian_launch_line(outcome);
+            let (color, text) = launch_line(launch_app, outcome);
             text_colored_wrapped(ui, color, &text);
         }
     }

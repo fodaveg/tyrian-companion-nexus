@@ -18,6 +18,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::obsidian_launch::LaunchApp;
 use crate::protocol::DEFAULT_PORT;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,11 @@ pub struct Settings {
     /// fresh install gets.
     #[serde(default = "default_open_obsidian_on_start")]
     pub open_obsidian_on_start: bool,
+    /// Which app that launch opens: Obsidian or Hebra (`core::obsidian_launch::LaunchApp`). The
+    /// `open_obsidian_on_start` key above keeps its name on disk so an older file still loads;
+    /// `#[serde(default)]` makes a file without this key mean Obsidian, as before.
+    #[serde(default)]
+    pub launch_app: LaunchApp,
 }
 
 fn default_open_obsidian_on_start() -> bool {
@@ -48,13 +54,14 @@ impl fmt::Debug for Settings {
             .field("port", &self.port)
             .field("token", &token)
             .field("open_obsidian_on_start", &self.open_obsidian_on_start)
+            .field("launch_app", &self.launch_app)
             .finish()
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true }
+        Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true, launch_app: LaunchApp::default() }
     }
 }
 
@@ -127,7 +134,7 @@ mod tests {
     #[test]
     fn round_trips_through_save_and_load() {
         let dir = temp_dir("roundtrip");
-        let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false };
+        let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false, launch_app: LaunchApp::Hebra };
         save(&dir, &settings).expect("save succeeds");
         assert_eq!(load(&dir), Loaded { settings, discarded_api_key: false });
         let _ = fs::remove_dir_all(&dir);
@@ -151,6 +158,34 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE_NAME), format!(r#"{{ "port": 50003, "token": "{}" }}"#, "a".repeat(40))).unwrap();
         assert!(load(&dir).settings.open_obsidian_on_start);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_launch_app_existed_loads_it_as_obsidian() {
+        // A 0.3.0 settings.json has `open_obsidian_on_start` but no `launch_app`: it must keep
+        // opening Obsidian, and keep its own value of the flag, exactly as it did.
+        let dir = temp_dir("pre-launch-app");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(FILE_NAME),
+            format!(r#"{{ "port": 50004, "token": "{}", "open_obsidian_on_start": false }}"#, "a".repeat(40)),
+        )
+        .unwrap();
+        let settings = load(&dir).settings;
+        assert_eq!(settings.launch_app, LaunchApp::Obsidian);
+        assert!(!settings.open_obsidian_on_start);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_chosen_app_is_written_under_the_launch_app_key_and_the_old_flag_key_stays() {
+        let dir = temp_dir("launch-app-keys");
+        let settings = Settings { launch_app: LaunchApp::Hebra, ..Settings::default() };
+        save(&dir, &settings).expect("save succeeds");
+        let written = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert!(written.contains(r#""launch_app": "hebra""#), "{written}");
+        assert!(written.contains(r#""open_obsidian_on_start": true"#), "{written}");
         let _ = fs::remove_dir_all(&dir);
     }
 

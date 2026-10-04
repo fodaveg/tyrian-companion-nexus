@@ -13,6 +13,53 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
+/// Which app the addon opens when it decides to launch one: the one that runs the Tyrian
+/// Companion plugin's side of the bridge. Obsidian is the original and the default; Hebra
+/// (David, 4 oct 2026) hosts the same plugin as an external plugin, and its `hebra://`
+/// deep-link parser ignores a URI that is neither `note` nor `lumbre/connect`, so
+/// `hebra://open` only starts the app. Persisted in `settings.json` as the lowercase name, and
+/// defaulted to [`LaunchApp::Obsidian`] when the key is absent so an older file loads exactly
+/// as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchApp {
+    #[default]
+    Obsidian,
+    Hebra,
+}
+
+impl LaunchApp {
+    /// Every choice, in the order the Options panel lists them.
+    pub const ALL: [LaunchApp; 2] = [LaunchApp::Obsidian, LaunchApp::Hebra];
+
+    /// The name shown to the player.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Obsidian => "Obsidian",
+            Self::Hebra => "Hebra",
+        }
+    }
+
+    /// The URI handed to the OS (or to `winebrowser.exe`) to open or focus the app.
+    pub fn uri(self) -> &'static str {
+        match self {
+            Self::Obsidian => "obsidian://open",
+            Self::Hebra => "hebra://open",
+        }
+    }
+
+    /// The `HKEY_CLASSES_ROOT` subkey whose presence means the app registered its URI scheme on
+    /// native Windows.
+    pub fn registry_key(self) -> &'static str {
+        match self {
+            Self::Obsidian => "obsidian",
+            Self::Hebra => "hebra",
+        }
+    }
+}
+
 /// What [`should_launch`] treats as "was the plugin listening?", for the very first connection
 /// attempt this addon's load makes. Only a TCP-level failure of that first `connect()` — refused
 /// or timed out, `core::client`'s only two ways for it to fail — counts as [`NoListener`]:
@@ -39,8 +86,8 @@ pub enum ObsidianLaunchOutcome {
     /// The launch call was accepted by the OS. This does not confirm Obsidian actually opened
     /// or is now focused, only that the launch mechanism did not report an immediate error.
     Launched,
-    /// Windows native only: no `HKEY_CLASSES_ROOT\obsidian` handler is registered, so nothing
-    /// was launched — the alternative is Windows popping its own "how do you want to open
+    /// Windows native only: the chosen app's `HKEY_CLASSES_ROOT\<scheme>` handler
+    /// ([`LaunchApp::registry_key`]) is not registered, so nothing was launched — the alternative is Windows popping its own "how do you want to open
     /// this?" dialog on top of the game.
     NoHandler,
     /// The launch mechanism reported an error. The code is whatever the OS call returned
@@ -53,7 +100,7 @@ impl fmt::Display for ObsidianLaunchOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Launched => write!(formatter, "launched"),
-            Self::NoHandler => write!(formatter, "no obsidian:// handler registered"),
+            Self::NoHandler => write!(formatter, "no URI handler registered"),
             Self::Error(code) => write!(formatter, "error (code {code})"),
         }
     }
@@ -65,7 +112,8 @@ impl fmt::Display for ObsidianLaunchOutcome {
 /// `false` that one time; it is a parameter (rather than hidden state in here) so each rule can
 /// be tested on its own without spinning up a client loop.
 ///
-/// - `open_on_start`: the `open_obsidian_on_start` setting.
+/// - `open_on_start`: the `open_obsidian_on_start` setting (the on-disk key predates Hebra; it
+///   now governs whichever [`LaunchApp`] is chosen).
 /// - `already_attempted`: `true` once this load has already made this decision, whatever it
 ///   decided. Guarantees the "as most once per load" rule even if the caller is ever called more
 ///   than once by mistake.
@@ -77,6 +125,32 @@ pub fn should_launch(open_on_start: bool, already_attempted: bool, first_connect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_app_has_its_own_uri_and_registry_key() {
+        assert_eq!(LaunchApp::Obsidian.uri(), "obsidian://open");
+        assert_eq!(LaunchApp::Obsidian.registry_key(), "obsidian");
+        assert_eq!(LaunchApp::Hebra.uri(), "hebra://open");
+        assert_eq!(LaunchApp::Hebra.registry_key(), "hebra");
+    }
+
+    #[test]
+    fn every_uri_is_its_own_registry_key_as_a_scheme() {
+        for app in LaunchApp::ALL {
+            assert_eq!(app.uri(), format!("{}://open", app.registry_key()));
+        }
+    }
+
+    #[test]
+    fn the_default_app_is_obsidian() {
+        assert_eq!(LaunchApp::default(), LaunchApp::Obsidian);
+    }
+
+    #[test]
+    fn the_app_serializes_as_its_lowercase_name() {
+        assert_eq!(serde_json::to_string(&LaunchApp::Hebra).unwrap(), "\"hebra\"");
+        assert_eq!(serde_json::from_str::<LaunchApp>("\"obsidian\"").unwrap(), LaunchApp::Obsidian);
+    }
 
     #[test]
     fn launches_when_the_first_connect_is_refused_and_the_setting_is_on() {

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::obsidian_launch::ObsidianLaunchOutcome;
+use crate::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{Alert, AlertKind, DEFAULT_PORT};
 
 /// What the client is doing right now, for the panel's status line.
@@ -79,7 +79,10 @@ pub struct SharedState {
     /// before its first connection attempt; written from settings load and from the Options
     /// panel's checkbox.
     open_obsidian_on_start: AtomicBool,
-    /// What happened, if anything, when this load tried to open Obsidian automatically. `None`
+    /// Which app that launch opens (`core::obsidian_launch::LaunchApp`); same lifecycle as the
+    /// flag above.
+    launch_app: Mutex<LaunchApp>,
+    /// What happened, if anything, when this load tried to open the chosen app automatically. `None`
     /// until the client loop's first connection attempt has run.
     obsidian_launch_outcome: Mutex<Option<ObsidianLaunchOutcome>>,
 }
@@ -106,6 +109,7 @@ impl SharedState {
             warned_about_missing_token: AtomicBool::new(false),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAPACITY)),
             open_obsidian_on_start: AtomicBool::new(true),
+            launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
         }
     }
@@ -119,13 +123,14 @@ impl SharedState {
         lock(&self.token).clone()
     }
 
-    /// Replaces the port, the token and the `open_obsidian_on_start` setting together and marks
-    /// the settings as changed, which lifts a stop caused by `auth_rejected` or
-    /// `version_unsupported`.
-    pub fn apply_settings(&self, port: u16, token: &str, open_obsidian_on_start: bool) {
+    /// Replaces the port, the token, the `open_obsidian_on_start` setting and the app it opens
+    /// together and marks the settings as changed, which lifts a stop caused by `auth_rejected`
+    /// or `version_unsupported`.
+    pub fn apply_settings(&self, port: u16, token: &str, open_obsidian_on_start: bool, launch_app: LaunchApp) {
         self.port.store(port, Ordering::Relaxed);
         *lock(&self.token) = token.to_string();
         self.open_obsidian_on_start.store(open_obsidian_on_start, Ordering::Relaxed);
+        *lock(&self.launch_app) = launch_app;
         self.settings_generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -141,7 +146,18 @@ impl SharedState {
         self.open_obsidian_on_start.store(value, Ordering::Relaxed);
     }
 
-    /// What the addon's attempt to open Obsidian this load did, if it has run yet.
+    /// The app the automatic launch opens.
+    pub fn launch_app(&self) -> LaunchApp {
+        *lock(&self.launch_app)
+    }
+
+    /// Sets the app on its own, without bumping the settings generation, for the same reason as
+    /// [`set_open_obsidian_on_start`](Self::set_open_obsidian_on_start).
+    pub fn set_launch_app(&self, app: LaunchApp) {
+        *lock(&self.launch_app) = app;
+    }
+
+    /// What the addon's attempt to open the chosen app this load did, if it has run yet.
     pub fn obsidian_launch_outcome(&self) -> Option<ObsidianLaunchOutcome> {
         *lock(&self.obsidian_launch_outcome)
     }
@@ -267,10 +283,11 @@ mod tests {
     fn saving_settings_bumps_the_generation() {
         let state = SharedState::new();
         let before = state.settings_generation();
-        state.apply_settings(50000, "t", false);
+        state.apply_settings(50000, "t", false, LaunchApp::Hebra);
         assert_eq!(state.port(), 50000);
         assert_eq!(state.token(), "t");
         assert!(!state.open_obsidian_on_start());
+        assert_eq!(state.launch_app(), LaunchApp::Hebra);
         assert_eq!(state.settings_generation(), before + 1);
     }
 
@@ -285,6 +302,20 @@ mod tests {
         let before = state.settings_generation();
         state.set_open_obsidian_on_start(false);
         assert!(!state.open_obsidian_on_start());
+        assert_eq!(state.settings_generation(), before);
+    }
+
+    #[test]
+    fn the_launch_app_defaults_to_obsidian() {
+        assert_eq!(SharedState::new().launch_app(), LaunchApp::Obsidian);
+    }
+
+    #[test]
+    fn choosing_the_launch_app_does_not_bump_the_generation() {
+        let state = SharedState::new();
+        let before = state.settings_generation();
+        state.set_launch_app(LaunchApp::Hebra);
+        assert_eq!(state.launch_app(), LaunchApp::Hebra);
         assert_eq!(state.settings_generation(), before);
     }
 

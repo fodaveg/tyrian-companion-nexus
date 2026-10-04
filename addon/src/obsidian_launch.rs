@@ -1,29 +1,30 @@
-//! Opens Obsidian when this addon's first connection attempt to the plugin's bridge finds
-//! nobody listening. `core::client::run` (`tyrian_companion_nexus_core::obsidian_launch`)
-//! decides *whether* to call [`open_obsidian`]; this module is only the *how*, and only for
-//! Windows — Nexus never loads this crate anywhere else.
+//! Opens Obsidian, or Hebra (the player's choice, [`LaunchApp`]), when this addon's first
+//! connection attempt to the plugin's bridge finds nobody listening. `core::client::run`
+//! (`tyrian_companion_nexus_core::obsidian_launch`) decides *whether* to call [`open_app`]; this
+//! module is only the *how*, and only for Windows — Nexus never loads this crate anywhere else.
 //!
 //! Two paths, matching `docs/audit/sonda-h18-27-abrir-obsidian-desde-proton.md` in the
 //! `tyrian-companion` repo (David, 24 sep 2026: "si empiezo a jugar y está cerrado, que se
 //! abra"):
 //!
 //! - **Under Wine/Proton** (detected by [`running_under_wine`]): launch
-//!   `%SystemRoot%\system32\winebrowser.exe` with `obsidian://open` as its one argument.
-//!   winebrowser hands that off to the host's `xdg-open`, which is what actually opens or
-//!   focuses the Fedora Obsidian flatpak. Verified in H18.27, path B there — no registry key is
-//!   written, unlike path A, which the sonda also verified but which needs a key nothing on this
-//!   addon's own install path would ever write.
-//! - **Native Windows** (no Wine): only if `HKEY_CLASSES_ROOT\obsidian` exists — Obsidian's own
-//!   installer registers it — `ShellExecuteW` with `obsidian://open` the normal way. If the key
-//!   is missing, nothing is launched: otherwise Windows would pop its own "how do you want to
-//!   open this?" dialog on top of the game. **Not verified**: this repository has no real
-//!   Windows machine to test it on (see the README's "Automatic Obsidian launch" section).
+//!   `%SystemRoot%\system32\winebrowser.exe` with the app's URI (`obsidian://open`,
+//!   `hebra://open`) as its one argument. winebrowser hands that off to the host's `xdg-open`,
+//!   which is what actually opens or focuses the app (the Fedora Obsidian flatpak; Hebra's
+//!   `x-scheme-handler/hebra`). Verified for Obsidian in H18.27, path B there — no registry key
+//!   is written, unlike path A, which the sonda also verified but which needs a key nothing on
+//!   this addon's own install path would ever write.
+//! - **Native Windows** (no Wine): only if `HKEY_CLASSES_ROOT\<scheme>` exists (`obsidian`,
+//!   `hebra`) — the app's own installer registers it — `ShellExecuteW` with the URI the normal
+//!   way. If the key is missing, nothing is launched: otherwise Windows would pop its own "how
+//!   do you want to open this?" dialog on top of the game. **Not verified**: this repository has
+//!   no real Windows machine to test it on (see the README's "Automatic app launch" section).
 //!
 //! Neither path waits for the child process: `CreateProcessW`/`ShellExecuteW` both return as
-//! soon as the OS has accepted the launch request, so [`open_obsidian`] never blocks the game's
+//! soon as the OS has accepted the launch request, so [`open_app`] never blocks the game's
 //! thread.
 
-use tyrian_companion_nexus_core::obsidian_launch::ObsidianLaunchOutcome;
+use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use windows::core::{s, w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -33,15 +34,15 @@ use windows::Win32::System::Threading::{CreateProcessW, PROCESS_CREATION_FLAGS, 
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-const OBSIDIAN_URI: &str = "obsidian://open";
-
-/// Tries to open or focus Obsidian, once, the way `core::client::run` decides to when this
-/// addon's very first connection attempt to the plugin finds nobody listening.
-pub fn open_obsidian() -> ObsidianLaunchOutcome {
+/// Tries to open or focus `app` (Obsidian or Hebra, the player's choice), once, the way
+/// `core::client::run` decides to when this addon's very first connection attempt to the plugin
+/// finds nobody listening. Both apps go through the same two paths below, differing only in the
+/// URI ([`LaunchApp::uri`]) and the registry key ([`LaunchApp::registry_key`]).
+pub fn open_app(app: LaunchApp) -> ObsidianLaunchOutcome {
     if running_under_wine() {
-        launch_via_winebrowser()
+        launch_via_winebrowser(app)
     } else {
-        launch_native()
+        launch_native(app)
     }
 }
 
@@ -64,9 +65,9 @@ fn running_under_wine() -> bool {
 /// Path B from H18.27 §4.4: `winebrowser.exe`, which every Wine/Proton prefix already carries,
 /// forwards its one argument to the host's `xdg-open` without this addon ever touching the
 /// prefix's registry.
-fn launch_via_winebrowser() -> ObsidianLaunchOutcome {
+fn launch_via_winebrowser(app: LaunchApp) -> ObsidianLaunchOutcome {
     match winebrowser_path() {
-        Some(path) => spawn_process(&path, OBSIDIAN_URI),
+        Some(path) => spawn_process(&path, app.uri()),
         // Safety: `GetLastError` only reads thread-local state `GetSystemDirectoryW` just set;
         // no precondition beyond having just called a Win32 function on this thread.
         None => ObsidianLaunchOutcome::Error(unsafe { GetLastError() }.0),
@@ -89,16 +90,20 @@ fn winebrowser_path() -> Option<String> {
     Some(format!("{dir}\\winebrowser.exe"))
 }
 
-/// Native Windows path from H18.27's "Límite explícito": only if Obsidian's installer has
-/// registered `obsidian://` in `HKEY_CLASSES_ROOT`. **Not verified** on a real Windows machine.
-fn launch_native() -> ObsidianLaunchOutcome {
-    if !has_obsidian_handler() {
+/// Native Windows path from H18.27's "Límite explícito": only if the app's installer has
+/// registered its URI scheme in `HKEY_CLASSES_ROOT` (`obsidian`, `hebra`). **Not verified** on a
+/// real Windows machine.
+fn launch_native(app: LaunchApp) -> ObsidianLaunchOutcome {
+    if !has_handler(app) {
         return ObsidianLaunchOutcome::NoHandler;
     }
-    // Safety: every pointer argument is a valid, null-terminated wide string literal alive for
-    // the whole call; `hwnd: None` means the launch is not tied to any particular window, and
-    // `ShellExecuteW` itself never blocks on the process it starts.
-    let result = unsafe { ShellExecuteW(None, w!("open"), w!("obsidian://open"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    let uri = wide(app.uri());
+    // Safety: every pointer argument is a valid, null-terminated wide string alive for the whole
+    // call (`uri` is owned by this function); `hwnd: None` means the launch is not tied to any
+    // particular window, and `ShellExecuteW` itself never blocks on the process it starts.
+    let result = unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR::from_raw(uri.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
     // A pseudo-`HINSTANCE`: > 32 is success, <= 32 is one of the Windows SDK's own `SE_ERR_*`
     // codes (see the sonda's §3: `SE_ERR_NOASSOC` = 31 for "nothing registered").
     if result.0 as isize > 32 {
@@ -108,13 +113,16 @@ fn launch_native() -> ObsidianLaunchOutcome {
     }
 }
 
-/// `true` if `HKEY_CLASSES_ROOT\obsidian` can be opened for reading at all — its mere presence
-/// is what is being checked, not any particular value under it.
-fn has_obsidian_handler() -> bool {
+/// `true` if `HKEY_CLASSES_ROOT\<scheme>` ([`LaunchApp::registry_key`]) can be opened for
+/// reading at all — its mere presence is what is being checked, not any particular value under it.
+fn has_handler(app: LaunchApp) -> bool {
+    let subkey = wide(app.registry_key());
     let mut key = HKEY::default();
-    // Safety: `RegOpenKeyExW` only reads from the registry; on success it writes a fresh,
+    // Safety: `subkey` is a valid, null-terminated wide string owned by this function for the
+    // whole call; `RegOpenKeyExW` only reads from the registry, and on success it writes a fresh,
     // valid handle into `key`, which is closed right after this function is done with it.
-    let opened = unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, w!("obsidian"), None, KEY_READ, &mut key) };
+    let opened =
+        unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, PCWSTR::from_raw(subkey.as_ptr()), None, KEY_READ, &mut key) };
     if opened != ERROR_SUCCESS {
         return false;
     }
