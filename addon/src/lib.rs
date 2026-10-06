@@ -109,6 +109,7 @@ fn load() {
         render!(|ui| render::options_render(ui)),
     )
     .revert_on_unload();
+    register_render(RenderType::Render, render!(|ui| render::farming_render(ui))).revert_on_unload();
     register_wnd_proc(game_wnd_proc).revert_on_unload();
 
     let config = ClientConfig { client_version: CLIENT_VERSION.to_string(), instance: instance::new_instance_id() };

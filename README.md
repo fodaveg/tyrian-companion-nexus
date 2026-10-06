@@ -24,6 +24,10 @@ with Obsidian closed (see "Automatic app launch" below).
 Version 0.3.1 lets you choose whether that automatic launch opens Obsidian or Hebra, which
 also hosts Tyrian Companion; Obsidian stays the default.
 
+Version 0.4.0 adds an optional, movable Labyrinth farming window. Its `farm1` feed is an
+authenticated extension of v3 negotiated after `welcome`; older v3 hosts still receive the
+same context, heartbeat and alert acknowledgements and no farming subscription.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
@@ -63,7 +67,7 @@ This is a two-crate Cargo workspace, and that split is deliberate:
 
 - **`core/`** (`tyrian_companion_nexus_core`): the v3 wire protocol (building `hello`,
   `context`, `heartbeat` and `bye` exactly as the plugin validates them, reading `welcome`,
-  `alert` and `error`), the client loop itself (`client.rs`: connect, authenticate, report,
+  `alert`, `error` and the optional `farm1` capability/state), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
   the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
   shared in-memory state. No dependency on `nexus` or `windows`: the loop reaches the game
@@ -72,7 +76,7 @@ This is a two-crate Cargo workspace, and that split is deliberate:
 - **`addon/`** (`tyrian_companion_nexus`, a `cdylib`): the actual Nexus addon — the
   `nexus::export!` entry point, the `Host` that paints alerts and reads `NexusLink` and the
   Mumble Link, the `WndProc` callback that notices the game closing, and the ImGui options
-  panel. Its `nexus` dependency (and everything under it, transitively including the
+  and farming panels. Its `nexus` dependency (and everything under it, transitively including the
   `windows` crate) is fenced behind `[target.'cfg(windows)'.dependencies]` in its
   `Cargo.toml`, with matching `#[cfg(windows)]` on the Rust side in `addon/src/lib.rs`. That
   fence exists because `windows` gates most of its own types behind `cfg(windows)` and
@@ -124,7 +128,7 @@ ship with Windows or with Wine. Nexus resolves an addon's dependencies from the 
 
 and the addon never appears in game. The C++ runtime is not this addon's doing: it arrives
 through `arcdps-imgui-sys`, which `nexus` depends on unconditionally and which compiles ImGui
-as C++, even though nothing here calls ImGui.
+as C++, including the native ImGui panels this addon now renders.
 
 `.cargo/config.toml` covers libgcc and winpthread with `-static-libgcc` and an explicit
 `-Wl,-Bstatic -lwinpthread`. It cannot cover libstdc++ the same way: `-static-libstdc++` is a
@@ -239,6 +243,48 @@ token below, which only take effect after **Save**:
 Changes take effect on the addon's next connection attempt, right away if the plugin had
 rejected the previous token; they do not tear down a connection that is already up.
 
+## Labyrinth farming panel
+
+In Nexus Options, enable **Show Labyrinth farming panel / Mostrar panel de Laberinto**.
+It is hidden by default, including for older `settings.json` files. The adjacent language
+checkbox switches only this panel between Spanish and English; the position reset restores
+the window if it was moved outside the screen. Drag its native title bar to move it; closing
+it hides it until re-enabled in Options. These controls save immediately without saving a
+pending token edit. The host's font/DPI and window style are retained, with an opaque background.
+
+The read-only window separates measurement phase from host connection. It shows positive
+**observed bags**, the host's declared session duration, a bags/hour band (or a minimum
+if there is no upper bound), the API reading's age, and free character bag slots with their
+own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
+numeric progress and the host's estimate; the addon never estimates a rate or advances the
+duration by itself. Closing reconciliation shows signed **net bags at close** separately
+from the observed counter. Partial Magic Find and preparation are labelled as such;
+temporary buffs and AFK are never represented as verified.
+
+No start/stop or goal-edit buttons are in this window: manage the session and preparation
+in Hebra or Obsidian. Neither hiding the panel nor losing the bridge stops a session.
+
+The host advertises `{"v":3,"type":"farming_cap","nonce":…,"tag":"farm1"}` only
+after authentication. The addon subscribes once using `farming_sub`, sharing the same
+outgoing sequence as context, heartbeat and alert acknowledgements. A host without that
+capability gets no subscription and the window says the panel is unavailable. Incoming
+flat `farming_state` frames stay within 512 bytes, require exact keys, closed enums and
+int32-or-null metrics, and are accepted only with the current 22-character base64url nonce
+and increasing positive int32 farming sequence. Their sequence is independent of alert
+deduplication and they are never ACKed.
+
+Snapshots expire after 15 seconds of monotonic time, or immediately on disconnection.
+The window retains the last reading, marks it **Stale data / Datos antiguos**, and removes
+ETA. Counts, declared duration and rates freeze; a transport refresh never renews an API
+observation or a character-slot observation. The feed does not send account/character
+identity, builds, economic details, inventory contents, or free-form text. No new API
+polling happens inside the addon.
+
+QA limits for 0.4.0: portable parser/state and loopback tests cover the feed, and the Windows
+cross-build checks the ImGui code and DLL dependencies. These checks cannot certify panel
+placement, text contrast, keyboard navigation or Nexus load in a running Guild Wars 2
+session; Fedora/Wine/game runtime QA remains pending until measured on that client.
+
 ## Reconnecting
 
 The addon does not need the plugin, or the game, to start first. If there is no server
@@ -256,11 +302,17 @@ Protocol v3 is v2 plus one message from the addon: right after painting an alert
 sends `{"v":3,"type":"alert_ack","nonce":…,"seq":…,"alertSeq":…}` on the same `seq` sequence as
 `context`, `heartbeat` and `bye`, once per `(server, alertSeq)`. The `hello` goes out with `"v":3`;
 the plugin's `welcome`, `alert` and `error` lines are read at v2 or v3.
+The optional `farm1` subscription uses that sequence too, without changing those existing frames.
 
 ## Tests
 
 `cargo test` (from the repository root, or `cargo test -p tyrian_companion_nexus_core`)
 covers what does not need a running game:
+
+- `farm1` byte cap (512 accepted, 513 rejected), exact keys and duplicate-key rejection,
+  numeric bounds, nullable values, every enum, capability negotiation with older-server
+  compatibility, nonce and sequence isolation, no farming ACKs, independent observation
+  ages, monotonic TTL and immediate disconnect invalidation;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the

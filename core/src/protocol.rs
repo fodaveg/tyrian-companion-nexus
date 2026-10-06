@@ -21,6 +21,8 @@
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::farming::FarmingState;
+
 /// Default port the plugin listens on. Matches the spec and the plugin's own default.
 pub const DEFAULT_PORT: u16 = 47823;
 
@@ -340,6 +342,14 @@ pub fn build_alert_ack_line(nonce: &str, seq: u64, alert_seq: u64) -> Option<Str
     finish_line(serde_json::to_string(&line).ok()?)
 }
 
+/// Subscribes only after an authenticated `farming_cap`. It shares the outgoing sequence
+/// with context, heartbeat and acknowledgements; an older v3 server receives no extra line.
+pub fn build_farming_sub_line(nonce: &str, seq: u64) -> Option<String> {
+    finish_line(serde_json::to_string(&serde_json::json!({
+        "v": PROTOCOL_VERSION, "type": "farming_sub", "nonce": nonce, "seq": seq, "tag": "farm1"
+    })).ok()?)
+}
+
 /// The plugin's answer to an accepted `hello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
@@ -473,6 +483,8 @@ impl ErrorCode {
 pub enum ServerLine {
     Welcome(Welcome),
     Alert(Alert),
+    FarmingCapability(String),
+    FarmingState(FarmingState),
     Error(ErrorCode),
     /// `v` is greater than [`PROTOCOL_VERSION`]: ask for an update once, interpret nothing.
     UnsupportedVersion,
@@ -487,6 +499,19 @@ const WELCOME_KEYS: &[&str] = &["v", "type", "server", "nonce", "heartbeatInterv
 const ALERT_KEYS: &[&str] = &["v", "type", "kind", "name", "quantity", "totalCopper", "content"];
 const ALERT_KEYS_WITH_SEQ: &[&str] = &["v", "type", "seq", "kind", "name", "quantity", "totalCopper", "content"];
 const ERROR_KEYS: &[&str] = &["v", "type", "code"];
+const FARMING_KEYS: &[&str] = &["v", "type", "tag", "nonce", "seq", "ttl", "phase", "err",
+    "elapsed", "observed", "net", "lo", "hi", "age", "slots", "slotSrc", "slotAge", "goal",
+    "target", "progress", "eta", "mf", "mfKind", "prep"];
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FarmingCapability {
+    v: u64,
+    #[serde(rename = "type")]
+    kind: String,
+    nonce: String,
+    tag: String,
+}
 
 fn has_exact_keys(record: &Map<String, Value>, keys: &[&str]) -> bool {
     record.len() == keys.len() && keys.iter().all(|key| record.contains_key(*key))
@@ -531,9 +556,26 @@ pub fn parse_server_line(line: &str) -> ServerLine {
         "welcome" => parse_welcome(&record).map(ServerLine::Welcome),
         "alert" => parse_alert(&record).map(ServerLine::Alert),
         "error" => parse_error(&record, version).map(ServerLine::Error),
+        "farming_cap" => parse_farming_cap(line, &record).map(ServerLine::FarmingCapability),
+        "farming_state" => parse_farming_state(line, &record).map(ServerLine::FarmingState),
         _ => return ServerLine::Ignored,
     };
     parsed.unwrap_or(ServerLine::Discard)
+}
+
+fn parse_farming_cap(line: &str, record: &Map<String, Value>) -> Option<String> {
+    if !has_exact_keys(record, &["v", "type", "nonce", "tag"]) { return None; }
+    // Deserialize the original text too: unlike `Map`, serde's struct rejects duplicate keys.
+    let cap: FarmingCapability = serde_json::from_str(line).ok()?;
+    if cap.v != 3 || cap.kind != "farming_cap" || cap.tag != "farm1" { return None; }
+    as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS && *nonce == cap.nonce)
+}
+
+fn parse_farming_state(line: &str, record: &Map<String, Value>) -> Option<FarmingState> {
+    if !has_exact_keys(record, FARMING_KEYS) { return None; }
+    as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS)?;
+    let state: FarmingState = serde_json::from_str(line).ok()?;
+    state.valid().then_some(state)
 }
 
 fn parse_welcome(record: &Map<String, Value>) -> Option<Welcome> {

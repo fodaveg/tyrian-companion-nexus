@@ -40,7 +40,7 @@ use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
 use crate::obsidian_launch::{should_launch, FirstConnectOutcome, LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{
-    build_alert_ack_line, build_bye_line, build_context_line, build_heartbeat_line, build_hello_line, is_usable_token,
+    build_alert_ack_line, build_bye_line, build_context_line, build_farming_sub_line, build_heartbeat_line, build_hello_line, is_usable_token,
     parse_server_line, ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE,
     TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE, UPDATE_PLUGIN_MESSAGE,
 };
@@ -164,6 +164,14 @@ impl Session {
         Some(line)
     }
 
+    /// Adds a negotiated farming subscription to the same outgoing sequence and heartbeat
+    /// clock as context and alert acknowledgements.
+    pub fn subscribe_farming(&mut self, now: Instant) -> Option<String> {
+        let line = build_farming_sub_line(&self.nonce, self.next_seq)?;
+        self.take_seq(now);
+        Some(line)
+    }
+
     /// The `bye` line. Nothing is sent after it.
     pub fn bye(&mut self, reason: ByeReason, now: Instant) -> Option<String> {
         let line = build_bye_line(&self.nonce, self.next_seq, reason)?;
@@ -270,6 +278,7 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             Ok(stream) => serve(stream, &hello, state, host, &mut tracker, stop),
             Err(_) => ConnectionEnd::default(),
         };
+        state.disconnect_farming();
         if end.welcomed {
             backoff.record_success();
             log::info!("disconnected from the Tyrian Companion plugin");
@@ -315,6 +324,7 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
     if state.status() == Status::Connected {
         state.set_status(Status::WaitingForPlugin);
     }
+    state.disconnect_farming();
 }
 
 fn connect(port: u16) -> std::io::Result<TcpStream> {
@@ -427,6 +437,7 @@ fn handle_line(
             // A second `welcome` on one connection is not something the plugin sends; ignoring it
             // keeps the nonce and sequence the plugin is actually checking.
             if session.is_none() {
+                state.begin_farming_connection(&welcome.nonce);
                 *session = Some(Session::new(welcome, Instant::now()));
                 state.set_status(Status::Connected);
                 log::info!("connected to the Tyrian Companion plugin on 127.0.0.1:{}", state.port());
@@ -444,6 +455,17 @@ fn handle_line(
                     outgoing.push(line);
                 }
             }
+        }
+        ServerLine::FarmingCapability(nonce) => {
+            let Some(session) = session.as_mut() else { return None };
+            if state.enable_farming(&nonce) {
+                if let Some(line) = session.subscribe_farming(Instant::now()) {
+                    outgoing.push(line);
+                }
+            }
+        }
+        ServerLine::FarmingState(reading) => {
+            if session.is_some() { state.accept_farming(reading, Instant::now()); }
         }
         ServerLine::Error(code) => return Some(code),
         ServerLine::UnsupportedVersion => {

@@ -7,6 +7,9 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
+
+use crate::farming::{FarmingFeed, FarmingState, FarmingView};
 
 use crate::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{Alert, AlertKind, DEFAULT_PORT};
@@ -75,6 +78,7 @@ pub struct SharedState {
     warned_about_version: AtomicBool,
     warned_about_missing_token: AtomicBool,
     history: Mutex<VecDeque<HistoryEntry>>,
+    farming: Mutex<FarmingFeed>,
     /// The `open_obsidian_on_start` setting (`core::obsidian_launch`). Read by the client loop
     /// before its first connection attempt; written from settings load and from the Options
     /// panel's checkbox.
@@ -108,6 +112,7 @@ impl SharedState {
             warned_about_version: AtomicBool::new(false),
             warned_about_missing_token: AtomicBool::new(false),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAPACITY)),
+            farming: Mutex::new(FarmingFeed::default()),
             open_obsidian_on_start: AtomicBool::new(true),
             launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
@@ -180,6 +185,29 @@ impl SharedState {
 
     pub fn connected(&self) -> bool {
         self.status() == Status::Connected
+    }
+
+    /// Starts a capability handshake for this connection; previous readings remain stale.
+    pub fn begin_farming_connection(&self, nonce: &str) {
+        lock(&self.farming).begin(nonce);
+    }
+
+    pub fn disconnect_farming(&self) {
+        lock(&self.farming).disconnect();
+    }
+
+    pub fn enable_farming(&self, nonce: &str) -> bool {
+        lock(&self.farming).enable(nonce)
+    }
+
+    /// Accepts only a subscribed connection's increasing farming sequence. This deliberately
+    /// never touches alert deduplication, receipts or alert history.
+    pub fn accept_farming(&self, reading: FarmingState, now: Instant) -> bool {
+        lock(&self.farming).accept(reading, now)
+    }
+
+    pub fn farming_view(&self, now: Instant) -> FarmingView {
+        lock(&self.farming).view(now)
     }
 
     /// `true` the first time it is called; `false` on every call after, for the lifetime of

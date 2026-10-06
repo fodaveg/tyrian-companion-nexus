@@ -15,6 +15,7 @@
 pub mod backoff;
 pub mod client;
 pub mod framer;
+pub mod farming;
 pub mod game_context;
 pub mod instance;
 pub mod obsidian_launch;

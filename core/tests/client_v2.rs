@@ -120,6 +120,7 @@ fn validate_sequenced(frame: &str, nonce: &str, seq: u64) -> Result<Map<String, 
     let keys: &[&str] = match record.get("type").and_then(Value::as_str) {
         Some("context") => &["v", "type", "nonce", "seq", "state", "mapId", "character"],
         Some("alert_ack") => &["v", "type", "nonce", "seq", "alertSeq"],
+        Some("farming_sub") => &["v", "type", "nonce", "seq", "tag"],
         Some("heartbeat") => &["v", "type", "nonce", "seq"],
         Some("bye") => &["v", "type", "nonce", "seq", "reason"],
         _ => return Err("unexpected_message"),
@@ -136,6 +137,7 @@ fn validate_sequenced(frame: &str, nonce: &str, seq: u64) -> Result<Map<String, 
     match record["type"].as_str() {
         Some("bye") if !matches!(record["reason"].as_str(), Some("game_exit" | "addon_unload")) => Err("frame_schema"),
         Some("alert_ack") if !record["alertSeq"].is_u64() => Err("frame_schema"),
+        Some("farming_sub") if record["tag"] != "farm1" => Err("frame_schema"),
         Some("context") => {
             let state_ok = matches!(record["state"].as_str(), Some("gameplay" | "loading" | "character_select"));
             let map_ok = record["mapId"].is_null() || record["mapId"].as_u64().is_some_and(|id| (1..=2_147_483_647).contains(&id));
@@ -368,6 +370,61 @@ fn closed_port() -> u16 {
 }
 
 // --- Scenarios ---
+
+#[test]
+fn farm1_negotiates_once_and_never_acknowledges_or_deduplicates_as_an_alert() {
+    let plugin = FakePlugin::start();
+    let (state, host, handle) = start_client(&plugin, TOKEN);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 100);
+    assert_eq!(connection.expect_non_heartbeat()["type"], "context");
+    // Before capability there must be only ordinary v3 traffic, preserving older servers.
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat");
+    connection.send(&format!(r#"{{"v":3,"type":"farming_cap","nonce":"{NONCE_2}","tag":"farm1"}}"#));
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat");
+    assert!(!state.farming_view(Instant::now()).capable);
+    let cap = format!(r#"{{"v":3,"type":"farming_cap","nonce":"{NONCE_1}","tag":"farm1"}}"#);
+    connection.send(&cap);
+    assert_eq!(connection.expect_non_heartbeat()["type"], "farming_sub");
+    connection.send(&cap);
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat");
+    let frame = serde_json::json!({
+        "v":3,"type":"farming_state","tag":"farm1","nonce":NONCE_1,"seq":100,"ttl":15,
+        "phase":"active","err":null,"elapsed":60,"observed":10,"net":null,"lo":null,"hi":null,
+        "age":5,"slots":null,"slotSrc":"unknown","slotAge":null,"goal":"none","target":null,
+        "progress":null,"eta":null,"mf":null,"mfKind":"unknown","prep":"unknown"
+    });
+    connection.send(&frame.to_string());
+    wait_until(|| state.farming_view(Instant::now()).reading.is_some());
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat", "farming produces no ACK");
+    assert!(host.alerts().is_empty());
+    assert!(state.history_snapshot().is_empty());
+    connection.send_alert(1, ALERT_CONTENT);
+    connection.expect_ack(1);
+    assert_eq!(host.wait_for_alerts(1), vec![ALERT_CONTENT]);
+    connection.send_alert(1, ALERT_CONTENT);
+    connection.send(&frame.to_string());
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat");
+    assert_eq!(host.alerts(), vec![ALERT_CONTENT]);
+    handle.stop();
+    let bye = connection.expect_non_heartbeat();
+    assert_eq!(bye["type"], "bye");
+    assert!(!state.farming_view(Instant::now()).fresh);
+    assert_eq!(state.farming_view(Instant::now()).reading.unwrap().observed, Some(10));
+}
+
+#[test]
+fn an_old_v3_server_receives_no_unnegotiated_farming_subscription() {
+    let plugin = FakePlugin::start();
+    let (state, _, handle) = start_client(&plugin, TOKEN);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 100);
+    assert_eq!(connection.expect_non_heartbeat()["type"], "context");
+    assert_eq!(connection.expect_sequenced()["type"], "heartbeat");
+    assert!(!state.farming_view(Instant::now()).capable);
+    handle.stop();
+    assert_eq!(connection.expect_non_heartbeat()["type"], "bye");
+}
 
 #[test]
 fn a_full_session_follows_the_spec_walkthrough() {

@@ -40,6 +40,12 @@ pub struct Settings {
     /// `#[serde(default)]` makes a file without this key mean Obsidian, as before.
     #[serde(default)]
     pub launch_app: LaunchApp,
+    /// Optional read-only Labyrinth window; older settings leave it hidden.
+    #[serde(default)]
+    pub show_farming_panel: bool,
+    /// Spanish by default; the Options panel can switch the farming window to English.
+    #[serde(default)]
+    pub farming_english: bool,
 }
 
 fn default_open_obsidian_on_start() -> bool {
@@ -55,13 +61,16 @@ impl fmt::Debug for Settings {
             .field("token", &token)
             .field("open_obsidian_on_start", &self.open_obsidian_on_start)
             .field("launch_app", &self.launch_app)
+            .field("show_farming_panel", &self.show_farming_panel)
+            .field("farming_english", &self.farming_english)
             .finish()
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true, launch_app: LaunchApp::default() }
+        Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true, launch_app: LaunchApp::default(),
+            show_farming_panel: false, farming_english: false }
     }
 }
 
@@ -134,7 +143,8 @@ mod tests {
     #[test]
     fn round_trips_through_save_and_load() {
         let dir = temp_dir("roundtrip");
-        let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false, launch_app: LaunchApp::Hebra };
+        let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false, launch_app: LaunchApp::Hebra,
+            show_farming_panel: true, farming_english: true };
         save(&dir, &settings).expect("save succeeds");
         assert_eq!(load(&dir), Loaded { settings, discarded_api_key: false });
         let _ = fs::remove_dir_all(&dir);
