@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "date": "2026-10-06",
+  "candidate_version": "0.5.0",
+  "scope": "Nexus passive owned location3 inventory reader and negotiated live1 producer; no publication or live game QA",
+  "base_commit": "7bae4fb0f6da2edf24ebad53aca4f2d69dab141a",
+  "verified_source_tree": "441ae76c5b3a2235ea1e502e17bf82e0acdb76d3",
+  "source_tree_scope": "All implementation/tests/package/README files; this evidence receipt is added afterwards and final Git tree is in commit body",
+  "normative_contract_commit": "cdde1034ac1011e9cef276b6dcc465ac0e5fcd8c",
+  "normative_contract": "tyrian-companion/docs/SPEC-live-loot.md",
+  "source_proof": {
+    "commit": "5341767f81ae7e3d27c73f9016f11ec3338f17c1",
+    "inventory": "tyrian-companion/docs/audit/loot-inventory-probe/inventory_reader_v3.py",
+    "inventory_sha256": "9007515514fb22f6caf4af22e2afa5bc92e7203ba33715f451cb658623a2e64d",
+    "state": "tyrian-companion/docs/audit/loot-inventory-probe/state_reader.py",
+    "state_sha256": "693cec68425b55bad434651d6712cbe9534008bbe291cf4195e17e9ea1dd39d9",
+    "teb": "tyrian-companion/docs/audit/loot-teb-probe/probe.c",
+    "live_proof_platform": "Fedora/GE-Proton11-7; v2 observed item12147 0->2->4; v3 separately expanded profiles"
+  },
+  "environment": {
+    "host": "Linux/Fedora x86_64",
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "mingw": "GCC16.2.1 20260819 Fedora MinGW16.2.1-1.fc44",
+    "target": "x86_64-pc-windows-gnu",
+    "dependencies": "Existing cached dependencies/toolchain; no installation, no new crate; additional windows feature flags only",
+    "execution": "Escalated runner needed for isolated worktree writes and required loopback socket tests"
+  },
+  "checks": [
+    {
+      "command": "cargo test --offline --quiet",
+      "exit_code": 0,
+      "tests": 153,
+      "groups": {
+        "core_unit": 95,
+        "existing_tcp": 20,
+        "farming": 8,
+        "inventory": 13,
+        "live_producer": 12,
+        "live_tcp": 5
+      },
+      "candidate_version": "0.5.0",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo build --offline --release --target x86_64-pc-windows-gnu",
+      "exit_code": 0,
+      "candidate_version": "0.5.0",
+      "terminal_elapsed_seconds": 3.27,
+      "result": "PASS",
+      "completed_by_utc": "2026-10-06 07:10:29"
+    },
+    {
+      "command": "x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll",
+      "exit_code": 0,
+      "assertions": [
+        "GetAddonDef export exists",
+        "No libstdc++-6.dll, libgcc_s_seh-1.dll or libwinpthread-1.dll imports"
+      ],
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --cached --check",
+      "exit_code": 0,
+      "result": "PASS"
+    }
+  ],
+  "artifact": {
+    "path": "target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll",
+    "sha256": "4b024cb23b6cd3660955f136a0946ca1500760cac6ee18ba90fc8fda4be34c96",
+    "bytes": 6060680,
+    "tracked": false,
+    "availability": "Local retained artifact for root QA/integration; another machine may not retain this path"
+  },
+  "fixtures": {
+    "path": "core/tests/fixtures/live1.json",
+    "sha256": "aa52f966c1872b8408c85565cc54ef62013bbe0ed5fc530ae0564dd49ded69aa",
+    "semantics": "Canonical spec wire examples; synthetic slots8 in example versus native null; none currencies and unknown cause"
+  },
+  "reader_limits": {
+    "game_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+    "profile": "owned-bags-v3",
+    "positions": 640,
+    "requested_bytes_per_cycle": 131072,
+    "read_requests_per_cycle": 32768,
+    "own_threads": 128,
+    "system_thread_entries": 4096,
+    "native_checked_deadline_ms": 750,
+    "per_stack_maximum": 250,
+    "target_interval_ms": 1000,
+    "max_inflight_samples": 1,
+    "max_rows_per_frame": 8,
+    "max_frame_bytes": 512,
+    "max_sample_bytes": 262144,
+    "ready_ack_timeout_ms": 10000,
+    "storage_retry_floor_ms": 5000
+  },
+  "coverage": {
+    "items": "Owned controlled-character location3, supported quantity profiles; unknown instances explicitly partial and suppress entire affected ID",
+    "currencies": "none",
+    "magic_find": "no verified native source",
+    "free_slots": null,
+    "cause": "unknown"
+  },
+  "limitations": [
+    "DLL compiled and portable/loopback tests pass; Fedora/Proton in-addon bootstrap/read/load/unload and Windows native runtime remain unvalidated",
+    "Exact read/reread checks minimize races but cannot observe changes that cancel between samples or recover missing intervals",
+    "Unsupported hashes/getters, owner/location mismatch, concurrent change, unreadable memory, limits and checked deadlines fail closed",
+    "Only explicitly certified unconditional/conditional NULL Stackable fallbacks allow quantity1; unknown profiles never guessed1 or0",
+    "Sparse empty inventory positions do not prove usable/free bag slots",
+    "No wallet/MF implementation or corresponding task closure claimed",
+    "OS calls in progress cannot be preempted; cancellation checked between read/hash/metadata steps",
+    "No durable addon replay; lost ACK/disconnect/context/owner/read gaps require a fresh epoch/baseline; unavailable diagnostics retain the last declared epoch after invalidation",
+    "Import-table correctness does not certify actual Nexus LoadLibrary or game runtime",
+    "Raw runner logs not persisted separately; this receipt records actual tool-terminal command exits and test summaries"
+  ],
+  "disk": {
+    "own_artifacts_bytes": 920315857,
+    "available_bytes_after_gate": 96439922688,
+    "before_readable": "90GiB available before final incremental build; initial pre-build was 91GiB",
+    "after_readable": "90GiB available after final incremental build",
+    "removed": [],
+    "retained": "Own worktree/target kept for active root review and real-game QA candidate; work is not yet integrated",
+    "available_bytes_before_final_build": 96502206464
+  }
+}

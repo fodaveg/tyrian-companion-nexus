@@ -18,6 +18,8 @@ pub mod framer;
 pub mod farming;
 pub mod game_context;
 pub mod instance;
+pub mod inventory;
+pub mod live;
 pub mod obsidian_launch;
 pub mod protocol;
 pub mod settings;

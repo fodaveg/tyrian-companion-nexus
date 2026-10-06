@@ -79,6 +79,9 @@ pub struct SharedState {
     warned_about_missing_token: AtomicBool,
     history: Mutex<VecDeque<HistoryEntry>>,
     farming: Mutex<FarmingFeed>,
+    live_status: Mutex<crate::live::LiveStatus>,
+    live_context: Mutex<Option<crate::protocol::GameContext>>,
+    inventory_diagnostics: Mutex<crate::inventory::Diagnostics>,
     /// The `open_obsidian_on_start` setting (`core::obsidian_launch`). Read by the client loop
     /// before its first connection attempt; written from settings load and from the Options
     /// panel's checkbox.
@@ -113,11 +116,24 @@ impl SharedState {
             warned_about_missing_token: AtomicBool::new(false),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAPACITY)),
             farming: Mutex::new(FarmingFeed::default()),
+            live_status: Mutex::new(crate::live::LiveStatus::NotNegotiated),
+            live_context: Mutex::new(None),
+            inventory_diagnostics: Mutex::new(crate::inventory::Diagnostics::default()),
             open_obsidian_on_start: AtomicBool::new(true),
             launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
         }
     }
+
+    /// Latest reported character/map for local QA; never a memory address.
+    pub fn live_context(&self) -> Option<crate::protocol::GameContext> { lock(&self.live_context).clone() }
+    pub fn set_live_context(&self, value: crate::protocol::GameContext) { *lock(&self.live_context) = Some(value); }
+    /// Measurement state remains separate from TCP/game presence.
+    pub fn live_status(&self) -> crate::live::LiveStatus { *lock(&self.live_status) }
+    pub fn set_live_status(&self, value: crate::live::LiveStatus) { *lock(&self.live_status) = value; }
+    /// Counters from the last bounded capture, without raw pointers or inventory rows.
+    pub fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { *lock(&self.inventory_diagnostics) }
+    pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics) { *lock(&self.inventory_diagnostics) = value; }
 
     pub fn port(&self) -> u16 {
         self.port.load(Ordering::Relaxed)

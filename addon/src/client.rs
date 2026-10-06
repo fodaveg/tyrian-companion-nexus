@@ -5,8 +5,7 @@
 //! - painting an alert: `nexus::alert::send_alert` (`GUI_SendAlert`), with the plugin's `content`
 //!   verbatim;
 //! - reading the game: `NexusLink::is_gameplay` and the Mumble Link Nexus shares with addons
-//!   (`DL_MUMBLE_LINK`), both through Nexus's data links. Nothing else of the game is read: no
-//!   process memory, no GW2 API;
+//!   (`DL_MUMBLE_LINK`), plus the negotiated passive owned-inventory reader; no GW2 API;
 //! - knowing the game is closing: the `WndProc` callback in `lib.rs` sets [`GAME_EXITING`] on
 //!   `WM_CLOSE`/`WM_DESTROY`, the only evidence the SPEC accepts for a `bye` with `game_exit`.
 //!
@@ -53,6 +52,11 @@ impl Host for NexusHost {
         let mumble = bytes.and_then(|bytes| MumbleSnapshot::from_bytes(&bytes));
         GameReading { is_gameplay, mumble }
     }
+
+    fn read_inventory(&self, stop: &AtomicBool) -> Result<tyrian_companion_nexus_core::inventory::InventorySnapshot, tyrian_companion_nexus_core::inventory::ReadError> {
+        crate::inventory::sample(stop)
+    }
+    fn inventory_diagnostics(&self) -> tyrian_companion_nexus_core::inventory::Diagnostics { crate::inventory::diagnostics() }
 
     fn game_exiting(&self) -> bool {
         GAME_EXITING.load(Ordering::Relaxed)

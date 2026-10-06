@@ -2,8 +2,8 @@
 
 A [Nexus](https://raidcore.gg/) addon for Guild Wars 2 that paints, inside the game, the
 loot and price alerts the [Tyrian Companion](https://github.com/fodaveg/tyrian-companion)
-Obsidian plugin emits, and tells the plugin what the game is doing so it can mark play
-sessions on its own. It implements protocol **v3** of `docs/SPEC-puente-ingame.md` in that
+Obsidian or Hebra plugin emits, and reports game context and negotiated passive inventory
+observations for automatic sessions. It implements protocol **v3** of `docs/SPEC-puente-ingame.md` in that
 repo, which is the contract and the source of truth if the two disagree.
 
 Version 0.2.0 speaks v2 only. The plugin answers a v1 addon (0.1.x) with
@@ -27,6 +27,10 @@ also hosts Tyrian Companion; Obsidian stays the default.
 Version 0.4.0 adds an optional, movable Labyrinth farming window. Its `farm1` feed is an
 authenticated extension of v3 negotiated after `welcome`; older v3 hosts still receive the
 same context, heartbeat and alert acknowledgements and no farming subscription.
+
+Version 0.5.0 adds the negotiated passive inventory source `live1`. It retains the v3 base
+protocol and `farm1` compatibility. Compilation and portable tests do not certify native
+reader runtime; see the coverage and QA limits below.
 
 ## What it does, and does not do
 
@@ -54,12 +58,66 @@ minute and `character_select` after that, with no map and no character; before t
 character loads it reports `character_select`. That minute is an assumption the in-game test
 has to confirm (`LOADING_WINDOW` in `core/src/game_context.rs`).
 
-It reads nothing else. No positions, camera, combat, account or loot: the audited sources do
-not carry a loot feed or a reliable AFK signal, and the protocol has no field for them. It
-does not read process memory, does not call the Guild Wars 2 API, and does not send any input
-to the game. That is a structural property, not a style choice: it is what keeps this addon
-inside the "utility that helps players without affecting others" branch of ArenaNet's
-third-party program policy. What the plugin does with the context happens outside the game.
+The optional `live1` channel reads the controlled character's owned carried inventory. It
+uses bounded, passive `ReadProcessMemory` copies in the normally loaded Nexus addon, not
+DRF or an authenticated inventory API. It never calls game getters, writes game memory,
+hooks game code, suspends threads, or sends input. This describes the implementation; it
+is not a claim of ArenaNet approval. Map/presence still come from Nexus/Mumble Link.
+
+## Passive inventory source (`live1`)
+
+A v3 host advertises `live_cap` after authentication. Older hosts get the existing context,
+heartbeat, alert acknowledgements and optional `farm1` messages only; no memory sampling
+starts without live negotiation. Presence and measurement availability remain independent.
+
+The reader validates the executable's SHA-256 and AMD64 PE profile, discovers TEB/TLS
+contexts autonomously, and checks the controlled character, inventory owner, location3
+matrix (`C8/D0/D4`), sparse instance resolver, definitions and quantity getter identities.
+No session pointer or PID is hardcoded. The currently certified executable is
+`27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c`, profile
+`owned-bags-v3`. All other builds are unavailable until separately certified.
+
+Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
+including coherence rechecks and TEB discovery. The Windows adapter also checks a
+750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 128 own threads
+and 4096 system thread entries. Quantity is limited to 0..250 **per stack** by this
+profile; aggregation by ID may exceed 250. A cycle that exceeds a budget or changes during
+reread is rejected completely. Unsupported quantity profiles preserve unknown coverage:
+an unknown instance suppresses that entire ID, never becoming quantity one or zero. One
+is allowed only for the explicitly certified NULL Stackable fallback branches.
+
+Free slots are `null`: sparse empty entries do not prove usable bag capacity. Currencies
+are `none`, and Magic Find has no verified source. These are missing coverage, not zero
+balances or completed wallet/MF support.
+
+The background bridge worker targets one capture per second; render performs no inventory
+reads and never waits for a socket or disk. Unload cancels the worker and joins it before
+unmapping; reads and hash chunks check cancellation, but cannot preempt an OS call in progress. Real resolution depends on the reader and host
+ACK. The addon emits aggregate begin/rows/end batches, each line at most 512 bytes, up to
+eight rows per part, on the existing consecutive TCP sequence. It has one sample in flight,
+waits for a durable `live_ack` and bounds ready/ACK and batch transmission to ten seconds.
+The actual native maximum is 640 rows, 80 row parts and under 256 KiB per sample. No
+unbounded queue or durable replay is implemented here.
+
+Every connection, actual map/character/state change, inventory-owner change and read gap
+requires a new random epoch and baseline. An identical periodic context preserves the
+epoch. Baseline never represents newly acquired loot. Unknown quantities yield partial
+samples for inspection, then require rebaseline. Read/ACK failures keep game presence but
+expose unavailable measurement or storage errors. Inventory increases and decreases have
+**unknown cause**; rapid changes that cancel between samples and gaps cannot be recovered.
+The host owns persistence, prices and notifications; the addon does not label these changes
+as certified drops, sales, deposits or openings.
+
+Nexus Options and the farming window distinguish inventory measurement from connection.
+The optional reader diagnostics show profile, owner-check outcome and bounded counters,
+without addresses or a complete inventory dump. Blish can supply presence/alerts/HUD but
+needs this local Nexus producer for inventory observations; Mumble alone has no item feed.
+
+The external Fedora/GE-Proton11-7 proof observed item12147 from 0 to2 to4. Its two live
+acquisitions used the Python v2 proof; v3 separately checked additional conditional profiles.
+That evidence guided this port but does not certify the addon in a running game. Native
+Windows load and reader runtime, Fedora/Proton addon bootstrap, reorder/character change,
+reconnect and real inventory QA remain pending until tested on this DLL candidate.
 
 ## Layout
 
@@ -70,13 +128,13 @@ This is a two-crate Cargo workspace, and that split is deliberate:
   `alert`, `error` and the optional `farm1` capability/state), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
   the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
-  shared in-memory state. No dependency on `nexus` or `windows`: the loop reaches the game
+  shared in-memory state, the safe inventory interpreter and negotiated live1 producer. No dependency on `nexus` or `windows`: the loop reaches the game
   only through a `Host` trait. This is what `cargo test` exercises, and it builds and tests on
   any host, this repository's Linux dev machine included.
 - **`addon/`** (`tyrian_companion_nexus`, a `cdylib`): the actual Nexus addon — the
   `nexus::export!` entry point, the `Host` that paints alerts and reads `NexusLink` and the
   Mumble Link, the `WndProc` callback that notices the game closing, and the ImGui options
-  and farming panels. Its `nexus` dependency (and everything under it, transitively including the
+  and farming panels, and the current-process Win64 inventory adapter. Its `nexus` dependency (and everything under it, transitively including the
   `windows` crate) is fenced behind `[target.'cfg(windows)'.dependencies]` in its
   `Cargo.toml`, with matching `#[cfg(windows)]` on the Rust side in `addon/src/lib.rs`. That
   fence exists because `windows` gates most of its own types behind `cfg(windows)` and
@@ -254,7 +312,7 @@ pending token edit. The host's font/DPI and window style are retained, with an o
 
 The read-only window separates measurement phase from host connection. It shows positive
 **observed bags**, the host's declared session duration, a bags/hour band (or a minimum
-if there is no upper bound), the API reading's age, and free character bag slots with their
+if there is no upper bound), the observation's age, and free character bag slots with their
 own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
 numeric progress and the host's estimate; the addon never estimates a rate or advances the
 duration by itself. Closing reconciliation shows signed **net bags at close** separately
@@ -275,7 +333,7 @@ deduplication and they are never ACKed.
 
 Snapshots expire after 15 seconds of monotonic time, or immediately on disconnection.
 The window retains the last reading, marks it **Stale data / Datos antiguos**, and removes
-ETA. Counts, declared duration and rates freeze; a transport refresh never renews an API
+ETA. Counts, declared duration and rates freeze; a transport refresh never renews an inventory
 observation or a character-slot observation. The feed does not send account/character
 identity, builds, economic details, inventory contents, or free-form text. No new API
 polling happens inside the addon.
@@ -308,6 +366,11 @@ The optional `farm1` subscription uses that sequence too, without changing those
 
 `cargo test` (from the repository root, or `cargo test -p tyrian_companion_nexus_core`)
 covers what does not need a running game:
+
+- passive inventory fixtures: build/profile guards, owned location3, sparse references,
+  conditional/NULL quantity branches, aggregation/unknowns, concurrent changes and budgets;
+- live1 canonical wire fixtures, 512/513 cap, old-host negotiation, epochs/baselines, context
+  equality, ACK isolation, source/storage failure, partial samples and bounded chunks;
 
 - `farm1` byte cap (512 accepted, 513 rejected), exact keys and duplicate-key rejection,
   numeric bounds, nullable values, every enum, capability negotiation with older-server

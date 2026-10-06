@@ -80,6 +80,12 @@ pub trait Host: Send + 'static {
     fn show_alert(&self, text: &str);
     /// Reads the game's current state. Called about four times a second while connected.
     fn read_game(&self) -> GameReading;
+    /// Passive owned inventory, called only on this worker after v3 live1 negotiation.
+    /// Existing/fake hosts keep explicit absence and never perform an API fallback.
+    fn read_inventory(&self, _stop: &AtomicBool) -> Result<crate::inventory::InventorySnapshot, crate::inventory::ReadError> {
+        Err(crate::inventory::ReadError::RootUnavailable)
+    }
+    fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
@@ -108,6 +114,9 @@ pub struct Session {
     heartbeat_interval: Duration,
     last_sent_at: Instant,
     last_context: Option<GameContext>,
+    last_context_seq: Option<u64>,
+    live_allowed: bool,
+    live: crate::live::Channel,
 }
 
 impl Session {
@@ -121,6 +130,9 @@ impl Session {
             heartbeat_interval: Duration::from_millis(welcome.heartbeat_interval_ms).max(MIN_HEARTBEAT_INTERVAL),
             last_sent_at: now,
             last_context: None,
+            last_context_seq: None,
+            live_allowed: true,
+            live: crate::live::Channel::new(),
         }
     }
 
@@ -140,9 +152,11 @@ impl Session {
     /// call after the `welcome` always sends one), otherwise a `heartbeat` if the connection has
     /// been silent for the interval. The sequence only advances for a line actually returned.
     pub fn next_outgoing(&mut self, now: Instant, context: &GameContext) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
+        self.live.context_changed(context);
         if self.last_context.as_ref() != Some(context) {
             if let Some(line) = build_context_line(&self.nonce, self.next_seq, context) {
-                self.take_seq(now);
+                self.last_context_seq = Some(self.take_seq(now));
                 self.last_context = Some(context.clone());
                 return Some(line);
             }
@@ -159,6 +173,7 @@ impl Session {
     /// it only for an alert that was just painted and only once per `(server, alertSeq)`; the
     /// heartbeat clock restarts, as with any line sent.
     pub fn ack_alert(&mut self, alert_seq: u64, now: Instant) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
         let line = build_alert_ack_line(&self.nonce, self.next_seq, alert_seq)?;
         self.take_seq(now);
         Some(line)
@@ -167,13 +182,32 @@ impl Session {
     /// Adds a negotiated farming subscription to the same outgoing sequence and heartbeat
     /// clock as context and alert acknowledgements.
     pub fn subscribe_farming(&mut self, now: Instant) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
         let line = build_farming_sub_line(&self.nonce, self.next_seq)?;
         self.take_seq(now);
         Some(line)
     }
 
+    /// Serialize an entire bounded batch before advancing the shared TCP sequence.
+    /// A framing/numbering failure sends none of the batch.
+    fn live_lines(&mut self, frames: Vec<serde_json::Value>, now: Instant) -> Option<Vec<String>> {
+        if frames.len() > 82 { return None; }
+        let mut lines = Vec::with_capacity(frames.len());
+        let mut bytes = 0;
+        for (offset, frame) in frames.into_iter().enumerate() {
+            let seq = self.next_seq.checked_add(offset as u64)?;
+            let line = crate::live::frame_line(frame, &self.nonce, seq)?;
+            bytes += line.len();
+            if bytes > 256 * 1024 { return None; }
+            lines.push(line);
+        }
+        for _ in &lines { self.take_seq(now); }
+        Some(lines)
+    }
+
     /// The `bye` line. Nothing is sent after it.
     pub fn bye(&mut self, reason: ByeReason, now: Instant) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
         let line = build_bye_line(&self.nonce, self.next_seq, reason)?;
         self.take_seq(now);
         Some(line)
@@ -189,8 +223,9 @@ pub struct ClientHandle {
 
 impl ClientHandle {
     /// Signals the thread to stop and blocks until it has: it sends its `bye`, closes the socket
-    /// and exits within about `READ_POLL_INTERVAL`, so nothing is left running against Nexus APIs
-    /// of a DLL that is about to be unmapped.
+    /// and exits after the current bounded read/poll notices cancellation. Native reads/hash
+    /// chunks check this flag too; an OS call already in progress cannot be preempted here.
+    /// Nothing is left running against Nexus APIs of a DLL that is about to be unmapped.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
@@ -279,6 +314,9 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             Err(_) => ConnectionEnd::default(),
         };
         state.disconnect_farming();
+        if !matches!(state.live_status(), crate::live::LiveStatus::NotNegotiated | crate::live::LiveStatus::StorageUnavailable | crate::live::LiveStatus::Conflict) {
+            state.set_live_status(crate::live::LiveStatus::Unavailable);
+        }
         if end.welcomed {
             backoff.record_success();
             log::info!("disconnected from the Tyrian Companion plugin");
@@ -309,6 +347,11 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
                 }
                 halted_at = Some(generation);
                 continue;
+            }
+            Some(ErrorCode::Unknown(ref code)) if code == "live_storage_unavailable" => {
+                // Persistence failure is not a successful measurement. Keep a five-second floor
+                // between rebaseline attempts rather than reset to the fastest reconnect loop.
+                wait(Duration::from_secs(5), stop);
             }
             Some(ref code @ (ErrorCode::AddonFault(_) | ErrorCode::Unknown(_))) => {
                 log::error!("the plugin closed the connection over an addon fault: {}", code.as_str());
@@ -354,7 +397,7 @@ fn serve(
 ) -> ConnectionEnd {
     let mut end = ConnectionEnd::default();
     let _ = stream.set_nodelay(true);
-    if stream.write_all(hello.as_bytes()).is_err() || stream.set_read_timeout(Some(READ_POLL_INTERVAL)).is_err() {
+    if stream.set_write_timeout(Some(READ_POLL_INTERVAL)).is_err() || stream.write_all(hello.as_bytes()).is_err() || stream.set_read_timeout(Some(READ_POLL_INTERVAL)).is_err() {
         return end;
     }
     let started = Instant::now();
@@ -400,13 +443,39 @@ fn serve(
         match session.as_mut() {
             Some(session) => {
                 end.welcomed = true;
+                if session.next_seq > crate::live::MAX_SAFE || session.live.timed_out(Instant::now()) {
+                    state.set_live_status(crate::live::LiveStatus::Unavailable);
+                    return end;
+                }
                 let reading = host.read_game();
                 let now = Instant::now();
                 let context = tracker.observe(now, reading.is_gameplay, reading.mumble.as_ref());
                 if let Some(line) = session.next_outgoing(now, &context) {
-                    if stream.write_all(line.as_bytes()).is_err() {
-                        return end;
-                    }
+                    if stream.write_all(line.as_bytes()).is_err() { return end; }
+                }
+                state.set_live_context(context.clone());
+                let ctx = session.last_context_seq.unwrap_or(0);
+                let mut frames = session.live.gameplay_status();
+                if let Some(pending) = session.live.pending_frames(ctx, now) { frames.extend(pending); }
+                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) {
+                    let sample = host.read_inventory(stop);
+                    if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
+                    state.set_inventory_diagnostics(host.inventory_diagnostics());
+                    let captured_at = Instant::now();
+                    let reading = host.read_game();
+                    let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
+                    if after != context {
+                        // The context changed while copying the inventory: discard it entirely.
+                        if let Some(line) = session.next_outgoing(captured_at, &after) {
+                            if stream.write_all(line.as_bytes()).is_err() { return end; }
+                        }
+                    } else { frames.extend(session.live.capture(sample, ctx, captured_at)); }
+                }
+                state.set_live_status(session.live.status);
+                let Some(lines) = session.live_lines(frames, Instant::now()) else { return end; };
+                let sending_started = Instant::now();
+                for line in lines {
+                    if sending_started.elapsed() >= crate::live::RESPONSE_TIMEOUT || stream.write_all(line.as_bytes()).is_err() { return end; }
                 }
             }
             None if started.elapsed() > WELCOME_TIMEOUT => {
@@ -438,7 +507,11 @@ fn handle_line(
             // keeps the nonce and sequence the plugin is actually checking.
             if session.is_none() {
                 state.begin_farming_connection(&welcome.nonce);
-                *session = Some(Session::new(welcome, Instant::now()));
+                state.set_live_status(crate::live::LiveStatus::NotNegotiated);
+                let mut new = Session::new(welcome, Instant::now());
+                // Welcome's public DTO stays backward compatible; live is v3-only on the wire.
+                new.live_allowed = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|r|r["v"].as_u64()) == Some(3);
+                *session = Some(new);
                 state.set_status(Status::Connected);
                 log::info!("connected to the Tyrian Companion plugin on 127.0.0.1:{}", state.port());
             }
@@ -466,6 +539,14 @@ fn handle_line(
         }
         ServerLine::FarmingState(reading) => {
             if session.is_some() { state.accept_farming(reading, Instant::now()); }
+        }
+        ServerLine::Live(reply) => {
+            let Some(session) = session.as_mut() else { return None; };
+            if session.live_allowed && !session.live.accept(reply, &session.nonce, Instant::now()) {
+                state.set_live_status(session.live.status);
+                return Some(ErrorCode::Unknown("live_storage_unavailable".into()));
+            }
+            state.set_live_status(session.live.status);
         }
         ServerLine::Error(code) => return Some(code),
         ServerLine::UnsupportedVersion => {

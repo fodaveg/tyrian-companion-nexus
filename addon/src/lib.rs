@@ -5,14 +5,11 @@
 //! `docs/SPEC-puente-ingame.md` in the `tyrian-companion` repo, protocol v3, is the contract this
 //! addon implements.
 //!
-//! What this addon is, structurally, and why: an authenticated client of one loopback TCP port.
-//! It sends the four line types the protocol allows (`hello`, `context`, `heartbeat`, `bye`),
-//! reads what its host already exposes to every addon (`NexusLink::is_gameplay` and the Mumble
-//! Link's map and character), and paints alerts. It never calls the GW2 API, never reads process
-//! memory, and never sends an input to the game. That is what keeps it inside the "utility that
-//! helps players without affecting others" branch of ArenaNet's third-party policy (see the
-//! spec's "Política de ArenaNet"): what the plugin does with the context happens outside the
-//! game, in the user's notes.
+//! An authenticated loopback client and a negotiated passive inventory producer. The native
+//! reader copies owned fields with RPM under a certified executable profile; it never invokes
+//! game functions, writes memory, suspends threads, hooks code or sends input. It does not call
+//! the GW2 API. This is the factual scope, not a claim of third-party-policy approval.
+//! `docs/SPEC-live-loot.md` defines live1; the base v3 and farm1 frames stay compatible.
 //!
 //! Everything below is `#[cfg(windows)]`: `nexus` (and the `windows` crate underneath it)
 //! only compiles when targeting Windows, matching `Cargo.toml`'s own `[target.'cfg(windows)'`
@@ -25,6 +22,8 @@
 
 #[cfg(windows)]
 mod client;
+#[cfg(windows)]
+mod inventory;
 #[cfg(windows)]
 mod obsidian_launch;
 #[cfg(windows)]

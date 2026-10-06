@@ -389,7 +389,7 @@ impl AlertKind {
     /// (which paints `content` verbatim and nothing else).
     pub fn label(self) -> &'static str {
         match self {
-            Self::ValuableLoot => "Valuable loot",
+            Self::ValuableLoot => "Valuable item observed",
             Self::AlwaysAlert => "Alert",
             Self::SellSignal => "Sell",
             Self::HoldSignal => "Hold",
@@ -485,6 +485,7 @@ pub enum ServerLine {
     Alert(Alert),
     FarmingCapability(String),
     FarmingState(FarmingState),
+    Live(crate::live::Reply),
     Error(ErrorCode),
     /// `v` is greater than [`PROTOCOL_VERSION`]: ask for an update once, interpret nothing.
     UnsupportedVersion,
@@ -558,6 +559,7 @@ pub fn parse_server_line(line: &str) -> ServerLine {
         "error" => parse_error(&record, version).map(ServerLine::Error),
         "farming_cap" => parse_farming_cap(line, &record).map(ServerLine::FarmingCapability),
         "farming_state" => parse_farming_state(line, &record).map(ServerLine::FarmingState),
+        "live_cap" | "live_ready" | "live_ack" => crate::live::parse_reply(kind, line).map(ServerLine::Live),
         _ => return ServerLine::Ignored,
     };
     parsed.unwrap_or(ServerLine::Discard)

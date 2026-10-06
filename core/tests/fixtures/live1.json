@@ -1,0 +1,97 @@
+{
+  "contract": "Tyrian live1 A/B/C 2026-10-06",
+  "frames": [
+    {
+      "v": 3,
+      "type": "live_cap",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "tag": "live1"
+    },
+    {
+      "v": 3,
+      "type": "live_open",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 1,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "build": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+      "profile": "owned-bags-v3"
+    },
+    {
+      "v": 3,
+      "type": "live_ready",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "status": "ready"
+    },
+    {
+      "v": 3,
+      "type": "live_begin",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 2,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 0,
+      "ctx": 0,
+      "ms": 0,
+      "mode": "baseline",
+      "items": "complete",
+      "currencies": "none",
+      "unknown": 0,
+      "slots": 8,
+      "rows": 2
+    },
+    {
+      "v": 3,
+      "type": "live_rows",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 3,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 0,
+      "part": 0,
+      "rows": [
+        [
+          0,
+          12147,
+          0
+        ],
+        [
+          0,
+          36038,
+          200
+        ]
+      ]
+    },
+    {
+      "v": 3,
+      "type": "live_end",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 4,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 0
+    },
+    {
+      "v": 3,
+      "type": "live_ack",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 0,
+      "status": "stored"
+    },
+    {
+      "v": 3,
+      "type": "live_status",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 5,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "status": "unavailable",
+      "reason": "read_failed"
+    }
+  ],
+  "limitations": "Synthetic wire fixtures; slot=8 is fixture only, native reader reports null. Currencies/MF absent."
+}

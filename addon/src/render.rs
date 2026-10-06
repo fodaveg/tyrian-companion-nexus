@@ -102,6 +102,19 @@ pub fn options_render(ui: &Ui) {
 
     let (color, text) = status_line(shared.status());
     text_colored_wrapped(ui, color, text);
+    ui.text_wrapped(inventory_status(shared.live_status(), true));
+    ui.text_wrapped("Currency balances and verified Magic Find: no coverage");
+    if ui.collapsing_header("Reader diagnostics", TreeNodeFlags::empty()) {
+        ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
+        ui.text_wrapped(format!("Supported build SHA-256: {}", tyrian_companion_nexus_core::inventory::BUILD_SHA256));
+        let diagnostics = shared.inventory_diagnostics();
+        ui.text_wrapped(if diagnostics.owner_verified { "Inventory owner: verified" } else { "Inventory owner: not verified" });
+        ui.text_wrapped(format!("Own threads: {} / 128; positions: {} / 640", diagnostics.threads, diagnostics.positions));
+        ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
+        if let Some(context) = shared.live_context() {
+            ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
+        }
+    }
 
     {
         let mut pending = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -280,6 +293,22 @@ fn farming_error_label(error: FarmingError, english: bool) -> &'static str {
     translated(english, es, en)
 }
 
+/// Source status is separate from both host connectivity and persisted session phase.
+fn inventory_status(status: tyrian_companion_nexus_core::live::LiveStatus, english: bool) -> &'static str {
+    use tyrian_companion_nexus_core::live::LiveStatus;
+    let (es, en) = match status {
+        LiveStatus::NotNegotiated => ("Inventario: fuente no disponible en este host", "Inventory: source unavailable in this host"),
+        LiveStatus::Waiting => ("Inventario: esperando confirmación", "Inventory: waiting for confirmation"),
+        LiveStatus::Measuring => ("Inventario: observaciones guardadas", "Inventory: observations stored"),
+        LiveStatus::Partial => ("Inventario: cantidades sin resolver", "Inventory: unresolved quantities"),
+        LiveStatus::UnsupportedBuild => ("Inventario: versión del juego no compatible", "Inventory: unsupported game build"),
+        LiveStatus::Unavailable => ("Inventario: lectura no disponible", "Inventory: reading unavailable"),
+        LiveStatus::Conflict => ("Inventario: otra fuente vinculada a la sesión", "Inventory: another source owns the session"),
+        LiveStatus::StorageUnavailable => ("Inventario: no se pudo guardar la lectura", "Inventory: observation could not be stored"),
+    };
+    translated(english, es, en)
+}
+
 /// Optional native window. It only renders validated host snapshots, never reads the API,
 /// sends game input, starts/stops a session, or extrapolates a counter from stale data.
 pub fn farming_render(ui: &Ui) {
@@ -403,6 +432,8 @@ pub fn farming_render(ui: &Ui) {
                 ui.text_wrapped(tr("Sin lectura", "No reading"));
             }
             ui.separator();
+            ui.text_wrapped(inventory_status(shared.live_status(), english));
+            ui.text_wrapped(tr("Monedas y hallazgo mágico verificado: sin cobertura", "Currencies and verified Magic Find: no coverage"));
             ui.text_wrapped(if shared.connected() { tr("Conexión al host: conectado", "Host connection: connected") }
                 else { tr("Conexión al host: sin conexión", "Host connection: offline") });
             if shared.connected() && !view.capable {
