@@ -165,6 +165,48 @@ fn location4_matrix_is_not_read() {
     assert!(r.bytes < MAX_BYTES);
 }
 #[test]
+fn excluded_item_classification_and_identity_races_reject_the_capture() {
+    struct Moving {
+        fixture: Fixture,
+        change: (u64, u64, usize),
+    }
+    impl Memory for Moving {
+        fn read_exact(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), ReadError> {
+            self.fixture.read_exact(address, bytes)?;
+            // Mutate after the initial excluded classification has already been copied.
+            if address == ITEM + 0x48 {
+                let (target, value, size) = self.change;
+                self.fixture.put(target, value, size);
+            }
+            Ok(())
+        }
+    }
+    for change in [(ITEM + 0x48, 3, 2), (ITEM, VT + 8, 8)] {
+        let mut fixture = fixture(570);
+        fixture.put(ITEM + 0x48, 4, 2);
+        let mut reader = Reader::new(Moving { fixture, change });
+        assert_eq!(
+            inventory_snapshot(&mut reader, profile(), CTX),
+            Err(ReadError::Changed)
+        );
+    }
+}
+#[test]
+fn stable_excluded_item_does_not_read_its_owner_definition_or_quantity() {
+    let mut fixture = fixture(570);
+    fixture.put(ITEM + 0x48, 4, 2);
+    fixture.forbidden = vec![
+        ITEM + 0x38,
+        ITEM + 0x40,
+        ITEM + 0x58,
+        ITEM + 0x98,
+        VT + 0x260,
+    ];
+    let snapshot = snapshot(fixture).unwrap();
+    assert!(snapshot.quantities.is_empty());
+    assert_eq!(snapshot.unknown, 0);
+}
+#[test]
 fn wrong_build_and_invalid_ranges_cannot_read() {
     assert!(matches!(
         BuildProfile::checked("bad", BASE, 0x2c48000),

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-/// A transport snapshot expires independently of the API observation's own age.
+/// A transport snapshot expires independently of the source observation's own age.
 pub const FARMING_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -52,7 +52,7 @@ pub struct FarmingState {
     pub net: Option<i32>,
     pub lo: Option<i32>,
     pub hi: Option<i32>,
-    /// Seconds since the API observation, independent of transport refreshes.
+    /// Seconds since the source observation, independent of transport refreshes.
     pub age: Option<i32>,
     pub slots: Option<i32>,
     #[serde(rename = "slotSrc")]
@@ -80,7 +80,7 @@ impl FarmingState {
     }
 }
 
-/// A reading ready for rendering, with monotonic transport freshness kept apart from API ages.
+/// A reading ready for rendering, with monotonic transport freshness kept apart from source ages.
 #[derive(Debug, Clone)]
 pub struct FarmingView {
     pub capable: bool,
@@ -91,10 +91,22 @@ pub struct FarmingView {
 }
 
 impl FarmingView {
-    /// Stale snapshots and inactive/error sessions never expose an ETA as a current estimate.
+    /// Source age is independent of transport refreshes. Exact age 5 is already stale.
+    pub fn source_fresh(&self) -> bool {
+        self.fresh && self.age.is_some_and(|age| age < 5)
+    }
+
+    /// Bags depend on a fresh observation; duration is the host's declared countdown and
+    /// remains available through an observation error. Transport and phase still apply.
     pub fn eta(&self) -> Option<i32> {
-        self.reading.as_ref().filter(|reading| self.fresh && reading.phase == Phase::Active && reading.err.is_none())
-            .and_then(|reading| reading.eta)
+        let reading = self.reading.as_ref()?;
+        if !self.fresh || reading.phase != Phase::Active { return None; }
+        let allowed = match reading.goal {
+            Goal::Duration => matches!(reading.err, None | Some(FarmingError::Observe)),
+            Goal::Bags => reading.err.is_none() && self.source_fresh(),
+            Goal::None => false,
+        };
+        if allowed { reading.eta } else { None }
     }
 }
 

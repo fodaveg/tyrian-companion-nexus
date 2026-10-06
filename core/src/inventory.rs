@@ -262,6 +262,7 @@ pub fn inventory_snapshot<M: Memory>(
     let item_array = r.pointer(itemctx + 0x30)?;
     let mut slots = Vec::with_capacity(count as usize);
     let mut checked = Vec::with_capacity(count as usize);
+    let mut excluded = Vec::with_capacity(count as usize);
     let mut seen = BTreeSet::new();
     let mut quantities: BTreeMap<u32, u32> = BTreeMap::new();
     let mut unsupported = BTreeSet::new();
@@ -279,6 +280,9 @@ pub fn inventory_snapshot<M: Memory>(
         r.equal(vt + 0x70, 8, b + 0x13c45d0)?;
         let location = r.scalar(item + 0x48, 2)?;
         if location & 15 != 3 {
+            // Classification is part of coverage: an excluded entry must not enter our
+            // inventory during this copy. Do not inspect its owner, ID or quantity.
+            excluded.push((item, vt, location));
             continue;
         }
         r.equal(item + 0x58, 8, inventory)?;
@@ -323,6 +327,11 @@ pub fn inventory_snapshot<M: Memory>(
     }
     for (slot, item) in slots.into_iter().enumerate() {
         if r.pointer(array + slot as u64 * 8)? != item {
+            return Err(ReadError::Changed);
+        }
+    }
+    for (item, vt, location) in excluded {
+        if r.pointer(item)? != vt || r.scalar(item + 0x48, 2)? != location {
             return Err(ReadError::Changed);
         }
     }

@@ -146,7 +146,7 @@ fn ttl_is_monotonic_disconnect_is_immediate_and_metrics_are_frozen() {
     state.accept_farming(reading(&frame()), now);
     let before = state.farming_view(now + Duration::from_secs(14));
     assert!(before.fresh);
-    assert_eq!((before.age, before.slot_age, before.eta()), (Some(32), Some(17), Some(4834)));
+    assert_eq!((before.age, before.slot_age, before.eta()), (Some(32), Some(17), None));
     let stale = state.farming_view(now + Duration::from_secs(15));
     assert!(!stale.fresh);
     assert_eq!(stale.eta(), None);
@@ -177,4 +177,51 @@ fn transport_refresh_does_not_reset_api_age_and_closed_sessions_have_no_eta() {
     let failed = state.farming_view(now + Duration::from_secs(7));
     assert_eq!(failed.reading.unwrap().err, Some(tyrian_companion_nexus_core::farming::FarmingError::Observe));
     assert_eq!(state.farming_view(now + Duration::from_secs(7)).eta(), None);
+}
+
+#[test]
+fn duration_eta_is_independent_of_observation_age_and_observe_error() {
+    let state = SharedState::new();
+    let now = Instant::now();
+    state.begin_farming_connection(NONCE);
+    state.enable_farming(NONCE);
+    let mut value = frame();
+    value["goal"] = json!("duration");
+    value["err"] = json!("observe");
+    for (seq, age) in [(1, Value::Null), (2, json!(60))] {
+        value["seq"] = json!(seq);
+        value["age"] = age;
+        state.accept_farming(reading(&value), now);
+        assert_eq!(state.farming_view(now).eta(), Some(4834));
+    }
+    assert_eq!(state.farming_view(now + Duration::from_secs(15)).eta(), None);
+    for (seq, error) in [(3, "save"), (4, "start"), (5, "stop"), (6, "other")] {
+        value["seq"] = json!(seq);
+        value["err"] = json!(error);
+        state.accept_farming(reading(&value), now);
+        assert_eq!(state.farming_view(now).eta(), None);
+    }
+    value["seq"] = json!(7); value["err"] = Value::Null; value["phase"] = json!("complete");
+    state.accept_farming(reading(&value), now);
+    assert_eq!(state.farming_view(now).eta(), None);
+}
+
+#[test]
+fn bags_eta_expires_at_exactly_five_seconds_without_transport_refresh_reset() {
+    let state = SharedState::new();
+    let now = Instant::now();
+    state.begin_farming_connection(NONCE);
+    state.enable_farming(NONCE);
+    let mut value = frame(); value["age"] = json!(0);
+    state.accept_farming(reading(&value), now);
+    assert!(state.farming_view(now + Duration::from_secs(4)).source_fresh());
+    assert_eq!(state.farming_view(now + Duration::from_secs(4)).eta(), Some(4834));
+    assert!(!state.farming_view(now + Duration::from_secs(5)).source_fresh());
+    assert_eq!(state.farming_view(now + Duration::from_secs(5)).eta(), None);
+    value["seq"] = json!(2); value["age"] = json!(5);
+    state.accept_farming(reading(&value), now + Duration::from_secs(5));
+    assert_eq!(state.farming_view(now + Duration::from_secs(5)).eta(), None);
+    value["seq"] = json!(3); value["age"] = Value::Null;
+    state.accept_farming(reading(&value), now + Duration::from_secs(6));
+    assert_eq!(state.farming_view(now + Duration::from_secs(6)).eta(), None);
 }

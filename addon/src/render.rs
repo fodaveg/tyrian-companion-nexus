@@ -358,7 +358,7 @@ pub fn farming_render(ui: &Ui) {
                 };
                 ui.text_wrapped(format!("{rate} {}", tr("bolsas/h", "bags/h")));
                 if reading.lo.is_none() { ui.text_wrapped(tr("Ritmo aún no disponible", "Rate not available yet")); }
-                if !view.fresh { ui.text_wrapped(tr("Último ritmo registrado", "Last recorded rate")); }
+                if !view.source_fresh() { ui.text_wrapped(tr("Último ritmo registrado", "Last recorded rate")); }
                 ui.text_wrapped(view.age.map_or_else(
                     || tr("Sin lectura", "No reading").to_string(),
                     |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),

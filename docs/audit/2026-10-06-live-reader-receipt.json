@@ -2,10 +2,10 @@
   "version": 1,
   "date": "2026-10-06",
   "candidate_version": "0.5.0",
-  "scope": "Nexus passive owned location3 inventory reader and negotiated live1 producer; no publication or live game QA",
+  "scope": "Nexus passive owned location3 inventory reader and negotiated live1 producer; review follow-up rechecks excluded classification and keeps duration ETA independent of source age; no publication or live game QA",
   "base_commit": "7bae4fb0f6da2edf24ebad53aca4f2d69dab141a",
-  "verified_source_tree": "441ae76c5b3a2235ea1e502e17bf82e0acdb76d3",
-  "source_tree_scope": "All implementation/tests/package/README files; this evidence receipt is added afterwards and final Git tree is in commit body",
+  "verified_source_tree": "0790b064312a8e61b38d4fa58be49f4c5529cd8b",
+  "source_tree_scope": "All implementation/tests/package/README files; evidence receipt omitted from the source tree and staged afterwards; final Git tree is in commit body",
   "normative_contract_commit": "cdde1034ac1011e9cef276b6dcc465ac0e5fcd8c",
   "normative_contract": "tyrian-companion/docs/SPEC-live-loot.md",
   "source_proof": {
@@ -29,12 +29,12 @@
     {
       "command": "cargo test --offline --quiet",
       "exit_code": 0,
-      "tests": 153,
+      "tests": 157,
       "groups": {
         "core_unit": 95,
         "existing_tcp": 20,
-        "farming": 8,
-        "inventory": 13,
+        "farming": 10,
+        "inventory": 15,
         "live_producer": 12,
         "live_tcp": 5
       },
@@ -45,9 +45,9 @@
       "command": "cargo build --offline --release --target x86_64-pc-windows-gnu",
       "exit_code": 0,
       "candidate_version": "0.5.0",
-      "terminal_elapsed_seconds": 3.27,
+      "terminal_elapsed_seconds": 3.17,
       "result": "PASS",
-      "completed_by_utc": "2026-10-06 07:10:29"
+      "completed_by_utc": "2026-10-06 07:21:48"
     },
     {
       "command": "x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll",
@@ -66,10 +66,11 @@
   ],
   "artifact": {
     "path": "target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll",
-    "sha256": "4b024cb23b6cd3660955f136a0946ca1500760cac6ee18ba90fc8fda4be34c96",
-    "bytes": 6060680,
+    "sha256": "bd9f41e6db8054ad02dcad0f5f7eef65a48f37d54f4743c467e6107c4a859b0f",
+    "bytes": 6066102,
     "tracked": false,
-    "availability": "Local retained artifact for root QA/integration; another machine may not retain this path"
+    "availability": "Local retained artifact for root QA/integration; another machine may not retain this path",
+    "supersedes_sha256": "4b024cb23b6cd3660955f136a0946ca1500760cac6ee18ba90fc8fda4be34c96"
   },
   "fixtures": {
     "path": "core/tests/fixtures/live1.json",
@@ -114,12 +115,35 @@
     "Raw runner logs not persisted separately; this receipt records actual tool-terminal command exits and test summaries"
   ],
   "disk": {
-    "own_artifacts_bytes": 920315857,
-    "available_bytes_after_gate": 96439922688,
+    "own_artifacts_bytes": 922279235,
+    "available_bytes_after_gate": 96394559488,
     "before_readable": "90GiB available before final incremental build; initial pre-build was 91GiB",
     "after_readable": "90GiB available after final incremental build",
     "removed": [],
     "retained": "Own worktree/target kept for active root review and real-game QA candidate; work is not yet integrated",
-    "available_bytes_before_final_build": 96502206464
-  }
+    "available_bytes_before_final_build": 96434016256
+  },
+  "followup_of": "480ae57f4b4a338a45b4ab340515bc118c4fc285",
+  "review_regressions": [
+    {
+      "test": "core/tests/inventory.rs::excluded_item_classification_and_identity_races_reject_the_capture",
+      "red_command": "cargo test --offline --test inventory excluded_item_classification_and_identity_races_reject_the_capture --quiet",
+      "red_exit_code": 101,
+      "red_source_commit": "480ae57f4b4a338a45b4ab340515bc118c4fc285",
+      "red_result": "After copying location4, fixture changes it to3. Original reader wrongly accepted complete empty quantities; fixed reader rejects Changed. Excluded vtable mutation also rejected.",
+      "green_command": "cargo test --offline --test inventory --quiet",
+      "green_exit_code": 0,
+      "green_tests": 15
+    },
+    {
+      "test": "core/tests/farming.rs::duration_eta_is_independent_of_observation_age_and_observe_error",
+      "red_command": "cargo test --offline --test farming duration_eta_is_independent_of_observation_age_and_observe_error --quiet",
+      "red_exit_code": 101,
+      "red_source_commit": "480ae57f4b4a338a45b4ab340515bc118c4fc285",
+      "red_result": "Original guard hid active duration ETA for observe error; fixed guard permits observe with unknown or old age. Other errors, inactive phase and stale transport still hide ETA. Bags boundary4 visible/5 hidden; old or absent age labels rate historical.",
+      "green_command": "cargo test --offline --test farming --quiet",
+      "green_exit_code": 0,
+      "green_tests": 10
+    }
+  ]
 }

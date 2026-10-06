@@ -82,7 +82,8 @@ including coherence rechecks and TEB discovery. The Windows adapter also checks 
 750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 128 own threads
 and 4096 system thread entries. Quantity is limited to 0..250 **per stack** by this
 profile; aggregation by ID may exceed 250. A cycle that exceeds a budget or changes during
-reread is rejected completely. Unsupported quantity profiles preserve unknown coverage:
+reread is rejected completely. Excluded entries also recheck their identity and location;
+a location change during copying invalidates the capture. Unsupported quantity profiles preserve unknown coverage:
 an unknown instance suppresses that entire ID, never becoming quantity one or zero. One
 is allowed only for the explicitly certified NULL Stackable fallback branches.
 
@@ -315,7 +316,11 @@ The read-only window separates measurement phase from host connection. It shows 
 if there is no upper bound), the observation's age, and free character bag slots with their
 own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
 numeric progress and the host's estimate; the addon never estimates a rate or advances the
-duration by itself. Closing reconciliation shows signed **net bags at close** separately
+duration by itself. A bags ETA requires an observation younger than five seconds; an older
+or unknown age labels the rate as the last recorded rate. Duration countdowns remain
+available through observation errors and unknown/old source age, while still requiring
+a fresh transport snapshot and active session. The feed does not identify the source type.
+Closing reconciliation shows signed **net bags at close** separately
 from the observed counter. Partial Magic Find and preparation are labelled as such;
 temporary buffs and AFK are never represented as verified.
 
