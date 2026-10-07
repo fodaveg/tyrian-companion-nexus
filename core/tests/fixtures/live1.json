@@ -84,14 +84,72 @@
     },
     {
       "v": 3,
-      "type": "live_status",
+      "type": "live_begin",
       "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
       "seq": 5,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 1,
+      "ctx": 0,
+      "ms": 1000,
+      "mode": "sample",
+      "items": "complete",
+      "currencies": "listed",
+      "unknown": 0,
+      "slots": null,
+      "rows": 4
+    },
+    {
+      "v": 3,
+      "type": "live_rows",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 6,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 1,
+      "part": 0,
+      "rows": [
+        [
+          0,
+          12147,
+          2
+        ],
+        [
+          0,
+          36038,
+          200
+        ],
+        [
+          1,
+          1,
+          0
+        ],
+        [
+          1,
+          45,
+          10225
+        ]
+      ]
+    },
+    {
+      "v": 3,
+      "type": "live_end",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 7,
+      "tag": "live1",
+      "epoch": "AgICAgICAgICAgICAgICAg",
+      "cursor": 1
+    },
+    {
+      "v": 3,
+      "type": "live_status",
+      "nonce": "AQEBAQEBAQEBAQEBAQEBAQ",
+      "seq": 8,
       "tag": "live1",
       "epoch": "AgICAgICAgICAgICAgICAg",
       "status": "unavailable",
       "reason": "read_failed"
     }
   ],
-  "limitations": "Synthetic wire fixtures; slot=8 is fixture only, native reader reports null. Currencies/MF absent."
+  "limitations": "Synthetic wire fixtures; slot=8 is fixture only, native reader reports null. The cursor 1 sample lists two synthetic currency rows (kind 1); an unlisted currency ID is not covered and is never zero. MF absent."
 }

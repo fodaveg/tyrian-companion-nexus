@@ -3,6 +3,10 @@
 //! OS metadata calls discover TEBs; exact ReadProcessMemory copies read game fields. No hook,
 //! game function, input, write or thread suspension is used. Called only by the background
 //! bridge worker after live1 negotiation, at most once per second; render does no memory reads.
+//!
+//! One cycle reads the owned inventory and then the wallet, from the same verified build and
+//! context and before the same deadline. The wallet has its own smaller read budget and can
+//! only fail on its own: an inventory sample never depends on it.
 
 use std::collections::BTreeSet;
 use std::ffi::{c_void, OsString};
@@ -14,6 +18,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
+};
+use tyrian_companion_nexus_core::wallet::{
+    self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
 use windows::core::{s, w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
@@ -45,10 +52,11 @@ struct ProcessMemory<'a> {
 }
 impl<'a> ProcessMemory<'a> {
     fn new(stop: &'a AtomicBool) -> Self {
-        Self {
-            deadline: Instant::now() + Duration::from_millis(750),
-            stop,
-        }
+        Self::until(stop, Instant::now() + Duration::from_millis(750))
+    }
+    /// A second reader of the same cycle shares the cycle's deadline instead of extending it.
+    fn until(stop: &'a AtomicBool, deadline: Instant) -> Self {
+        Self { deadline, stop }
     }
 }
 impl Memory for ProcessMemory<'_> {
@@ -95,6 +103,9 @@ const _: () = assert!(std::mem::offset_of!(ThreadBasic, teb) == 8);
 struct NativeReader {
     profile: BuildProfile,
     query: QueryThread,
+    /// The wallet's static guards, checked once for this verified build: `Some` holds the
+    /// proof, `None` records bytes that differ. A failed copy is not recorded and is retried.
+    wallet: OnceLock<Option<WalletProfile>>,
 }
 static READER: OnceLock<Result<NativeReader, ReadError>> = OnceLock::new();
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
@@ -103,6 +114,9 @@ static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     reads: 0,
     positions: 0,
     owner_verified: false,
+    wallet: WalletCoverage::NotRead,
+    wallet_bytes: 0,
+    wallet_reads: 0,
 });
 pub fn diagnostics() -> Diagnostics {
     *DIAGNOSTICS.lock().unwrap_or_else(|p| p.into_inner())
@@ -166,11 +180,36 @@ impl NativeReader {
         let query = unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, QueryThread>(address)
         };
-        Ok(Self { profile, query })
+        Ok(Self {
+            profile,
+            query,
+            wallet: OnceLock::new(),
+        })
+    }
+    /// The wallet of the context the inventory was just read from. Its guards are verified on
+    /// the first cycle that reaches this point; every later cycle reuses that verdict.
+    fn wallet<M: Memory>(
+        &self,
+        reader: &mut Reader<M>,
+        context: u64,
+    ) -> Result<WalletSnapshot, WalletError> {
+        let verified = match self.wallet.get() {
+            Some(verified) => verified,
+            None => match WalletProfile::verified(reader, self.profile) {
+                Ok(profile) => self.wallet.get_or_init(|| Some(profile)),
+                Err(WalletError::Guard) => self.wallet.get_or_init(|| None),
+                Err(error) => return Err(error),
+            },
+        };
+        let profile = verified.as_ref().ok_or(WalletError::Guard)?;
+        wallet::wallet_snapshot(reader, profile, context)
     }
     fn sample(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
-        let mut reader = Reader::new(ProcessMemory::new(stop));
         let deadline = Instant::now() + Duration::from_millis(750);
+        let mut reader = Reader::new(ProcessMemory::until(stop, deadline));
+        let mut wallet_reader =
+            Reader::bounded(ProcessMemory::until(stop, deadline), wallet::MAX_BYTES);
+        let mut coverage = WalletCoverage::NotRead;
         let mut own = 0;
         let result = (|| {
             let pid = unsafe { GetCurrentProcessId() };
@@ -247,7 +286,17 @@ impl NativeReader {
                 .into_iter()
                 .next()
                 .ok_or(ReadError::RootUnavailable)?;
-            inventory::inventory_snapshot(&mut reader, self.profile, context)
+            let mut snapshot = inventory::inventory_snapshot(&mut reader, self.profile, context)?;
+            // Only after a whole inventory sample. Whatever happens here, that sample stands:
+            // without a wallet it goes out with `currencies:none`.
+            match self.wallet(&mut wallet_reader, context) {
+                Ok(wallet) => {
+                    coverage = WalletCoverage::Listed(wallet.balances().len() as u32);
+                    snapshot.wallet = Some(wallet);
+                }
+                Err(error) => coverage = WalletCoverage::Unavailable(error),
+            }
+            Ok(snapshot)
         })();
         publish(Diagnostics {
             threads: own as u32,
@@ -255,6 +304,9 @@ impl NativeReader {
             reads: reader.reads as u32,
             positions: result.as_ref().map(|s| s.positions).unwrap_or(0),
             owner_verified: result.is_ok(),
+            wallet: coverage,
+            wallet_bytes: wallet_reader.bytes as u32,
+            wallet_reads: wallet_reader.reads as u32,
         });
         result
     }

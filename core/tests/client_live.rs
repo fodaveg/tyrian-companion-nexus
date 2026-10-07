@@ -11,6 +11,7 @@ use tyrian_companion_nexus_core::game_context::MumbleSnapshot;
 use tyrian_companion_nexus_core::inventory::{InventorySnapshot, ReadError};
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::state::SharedState;
+use tyrian_companion_nexus_core::wallet::WalletSnapshot;
 const TOKEN: &str = "k2VnU0bq9mRjYp8tXwH3cL5sA7dF1gJ4hN6zQ0eT2uB";
 const NONCE: &str = "AQEBAQEBAQEBAQEBAQEBAQ";
 const SERVER: &str = "AgICAgICAgICAgICAgICAg";
@@ -23,6 +24,8 @@ struct FakeHost {
     change_on_capture: Arc<AtomicBool>,
     block_capture: Arc<AtomicBool>,
     capture_started: Arc<AtomicBool>,
+    /// What the wallet read of the next capture yields; `None` is a failed or absent read.
+    wallet: Arc<Mutex<Option<WalletSnapshot>>>,
 }
 impl FakeHost {
     fn new() -> Self {
@@ -33,6 +36,7 @@ impl FakeHost {
             change_on_capture: Arc::new(AtomicBool::new(false)),
             block_capture: Arc::new(AtomicBool::new(false)),
             capture_started: Arc::new(AtomicBool::new(false)),
+            wallet: Arc::new(Mutex::new(None)),
             game: Arc::new(Mutex::new(GameReading {
                 is_gameplay: Some(true),
                 mumble: Some(MumbleSnapshot {
@@ -73,6 +77,7 @@ impl Host for FakeHost {
             unknown: 0,
             positions: 570,
             free_slots: None,
+            wallet: self.wallet.lock().unwrap().clone(),
         })
     }
     fn game_exiting(&self) -> bool {
@@ -221,6 +226,56 @@ fn real_worker_negotiates_zero_two_four_waits_for_ack_and_interleaves_alert_ack(
     host.quantity.store(4, Ordering::Relaxed);
     p.ack(&epoch, 1, "stored");
     p.sample(&epoch, 2, 4);
+    p.ack(&epoch, 2, "stored");
+    handle.stop();
+}
+#[test]
+fn real_worker_lists_wallet_rows_and_a_lost_wallet_keeps_the_item_sample_epoch_and_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    let wallet = |magic: u32| {
+        WalletSnapshot::checked((0x210000, 0x220000), BTreeMap::from([(1, 0), (45, magic)]))
+    };
+    *host.wallet.lock().unwrap() = wallet(10214);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let epoch = p.open();
+    p.ready(&epoch);
+    let listed = |p: &mut Peer, cursor: u64, mode: &str, rows: Value| {
+        let begin = p.next();
+        assert_eq!(begin["type"], "live_begin");
+        assert_eq!(begin["epoch"], epoch.as_str());
+        assert_eq!(begin["cursor"], cursor);
+        assert_eq!(begin["mode"], mode);
+        assert_eq!(begin["items"], "complete");
+        assert_eq!(begin["currencies"], "listed");
+        assert_eq!(begin["rows"], 3);
+        let part = p.next();
+        assert_eq!(part["type"], "live_rows");
+        assert_eq!(part["rows"], rows);
+        assert_eq!(p.next()["type"], "live_end");
+    };
+    listed(
+        &mut p,
+        0,
+        "baseline",
+        json!([[0, 12147, 0], [1, 1, 0], [1, 45, 10214]]),
+    );
+    // The next wallet read fails while the inventory read succeeds: same epoch, next cursor,
+    // `currencies:none` with item rows only, and no `live_status` in between.
+    *host.wallet.lock().unwrap() = None;
+    host.quantity.store(2, Ordering::Relaxed);
+    p.ack(&epoch, 0, "stored");
+    p.sample(&epoch, 1, 2);
+    *host.wallet.lock().unwrap() = wallet(10225);
+    p.ack(&epoch, 1, "stored");
+    listed(
+        &mut p,
+        2,
+        "sample",
+        json!([[0, 12147, 2], [1, 1, 0], [1, 45, 10225]]),
+    );
     p.ack(&epoch, 2, "stored");
     handle.stop();
 }

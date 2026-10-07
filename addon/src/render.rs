@@ -103,7 +103,8 @@ pub fn options_render(ui: &Ui) {
     let (color, text) = status_line(shared.status());
     text_colored_wrapped(ui, color, text);
     ui.text_wrapped(inventory_status(shared.live_status(), true));
-    ui.text_wrapped("Currency balances and verified Magic Find: no coverage");
+    ui.text_wrapped(wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, true));
+    ui.text_wrapped("Verified Magic Find: no coverage");
     if ui.collapsing_header("Reader diagnostics", TreeNodeFlags::empty()) {
         ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
         ui.text_wrapped(format!("Supported build SHA-256: {}", tyrian_companion_nexus_core::inventory::BUILD_SHA256));
@@ -111,6 +112,8 @@ pub fn options_render(ui: &Ui) {
         ui.text_wrapped(if diagnostics.owner_verified { "Inventory owner: verified" } else { "Inventory owner: not verified" });
         ui.text_wrapped(format!("Own threads: {} / 128; positions: {} / 640", diagnostics.threads, diagnostics.positions));
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
+        ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
+            tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
         if let Some(context) = shared.live_context() {
             ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
         }
@@ -309,6 +312,30 @@ fn inventory_status(status: tyrian_companion_nexus_core::live::LiveStatus, engli
     translated(english, es, en)
 }
 
+/// Wallet coverage of the last capture: how many currencies it listed, or the closed reason it
+/// listed none. Covered means those IDs only; an unlisted currency is unknown, never zero. With
+/// no measurement in progress there is no capture to describe, whatever an older one found.
+fn wallet_status(status: tyrian_companion_nexus_core::live::LiveStatus, coverage: tyrian_companion_nexus_core::wallet::WalletCoverage, english: bool) -> String {
+    use tyrian_companion_nexus_core::wallet::{WalletCoverage, WalletError};
+    let measuring = status.is_sampling();
+    let (es, en) = match coverage {
+        WalletCoverage::Listed(count) if measuring => return format!("{}: {count}", translated(english, "Monedas cubiertas", "Currencies covered")),
+        WalletCoverage::Unavailable(error) if measuring => match error {
+            WalletError::Guard => ("perfil de cartera no verificado", "wallet profile not verified"),
+            WalletError::Profile => ("estructura desconocida", "unknown structure"),
+            WalletError::Root => ("personaje no disponible", "character unavailable"),
+            WalletError::Bounds => ("mapa fuera de límites", "map out of bounds"),
+            WalletError::Empty => ("cartera vacía o ausente", "wallet empty or absent"),
+            WalletError::Integrity => ("mapa incoherente", "inconsistent map"),
+            WalletError::Range => ("valor fuera de rango", "value out of range"),
+            WalletError::Changed => ("cambió durante la lectura", "changed while reading"),
+            WalletError::ReadFailed => ("lectura fallida", "read failed"),
+        },
+        _ => ("sin lectura", "no reading"),
+    };
+    format!("{} ({})", translated(english, "Monedas: sin cobertura", "Currencies: no coverage"), translated(english, es, en))
+}
+
 /// Optional native window. It only renders validated host snapshots, never reads the API,
 /// sends game input, starts/stops a session, or extrapolates a counter from stale data.
 pub fn farming_render(ui: &Ui) {
@@ -433,7 +460,8 @@ pub fn farming_render(ui: &Ui) {
             }
             ui.separator();
             ui.text_wrapped(inventory_status(shared.live_status(), english));
-            ui.text_wrapped(tr("Monedas y hallazgo mágico verificado: sin cobertura", "Currencies and verified Magic Find: no coverage"));
+            ui.text_wrapped(wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, english));
+            ui.text_wrapped(tr("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"));
             ui.text_wrapped(if shared.connected() { tr("Conexión al host: conectado", "Host connection: connected") }
                 else { tr("Conexión al host: sin conexión", "Host connection: offline") });
             if shared.connected() && !view.capable {

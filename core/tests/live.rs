@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::inventory::{InventorySnapshot, ReadError};
 use tyrian_companion_nexus_core::live::*;
 use tyrian_companion_nexus_core::protocol::{is_canonical_instance, GameContext, GameState};
+use tyrian_companion_nexus_core::wallet::{WalletSnapshot, MAX_CURRENCIES};
 const NONCE: &str = "AQEBAQEBAQEBAQEBAQEBAQ";
 const EPOCH: &str = "AgICAgICAgICAgICAgICAg";
 fn sample(n: u32) -> InventorySnapshot {
@@ -14,6 +15,18 @@ fn sample(n: u32) -> InventorySnapshot {
         unknown: 0,
         positions: 570,
         free_slots: None,
+        wallet: None,
+    }
+}
+const WALLET_OWNER: (u64, u64) = (0x210000, 0x220000);
+fn wallet(owner: (u64, u64), balances: &[(u32, u32)]) -> Option<WalletSnapshot> {
+    Some(WalletSnapshot::checked(owner, balances.iter().copied().collect()).unwrap())
+}
+/// The canonical inventory sample plus gold (1) at zero and volatile magic (45).
+fn with_wallet(n: u32, magic: u32) -> InventorySnapshot {
+    InventorySnapshot {
+        wallet: wallet(WALLET_OWNER, &[(45, magic), (1, 0)]),
+        ..sample(n)
     }
 }
 fn context() -> GameContext {
@@ -317,4 +330,206 @@ fn unknown_build_blocks_until_actual_context_change_and_duplicate_ack_does_not_r
     assert!(!c.wants_sample(now + Duration::from_secs(2)));
     ack(&mut c, &open, 1, "stored", now + Duration::from_secs(1));
     assert!(c.wants_sample(now + Duration::from_secs(2)));
+}
+/// Every row of a sample, in transmission order.
+fn all_rows(frames: &[Value]) -> Vec<Value> {
+    frames
+        .iter()
+        .filter(|frame| frame["type"] == "live_rows")
+        .flat_map(|frame| frame["rows"].as_array().unwrap().clone())
+        .collect()
+}
+#[test]
+fn listed_wallet_adds_currency_rows_after_the_items_and_none_carries_no_currency_row() {
+    let frames = snapshot_frames(EPOCH, 0, 0, 0, &with_wallet(0, 10214)).unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0]["currencies"], "listed");
+    assert_eq!(frames[0]["items"], "complete");
+    assert_eq!(frames[0]["rows"], 4);
+    // A present key at zero is a covered zero; no other currency is implied.
+    assert_eq!(
+        frames[1]["rows"],
+        json!([[0, 12147, 0], [0, 36038, 200], [1, 1, 0], [1, 45, 10214]])
+    );
+    let frames = snapshot_frames(EPOCH, 0, 0, 0, &sample(0)).unwrap();
+    assert_eq!(frames[0]["currencies"], "none");
+    assert_eq!(frames[0]["rows"], 2);
+    assert!(all_rows(&frames).iter().all(|row| row[0] == 0));
+    // An inventory without rows still lists its wallet; `listed` always has a currency row.
+    let only_wallet = InventorySnapshot {
+        quantities: BTreeMap::new(),
+        ..with_wallet(0, 7)
+    };
+    let frames = snapshot_frames(EPOCH, 0, 0, 0, &only_wallet).unwrap();
+    assert_eq!(frames[0]["currencies"], "listed");
+    assert_eq!(frames[0]["rows"], 2);
+    assert_eq!(all_rows(&frames), vec![json!([1, 1, 0]), json!([1, 45, 7])]);
+}
+#[test]
+fn item_and_currency_rows_keep_one_global_order_across_parts_of_at_most_eight() {
+    let s = InventorySnapshot {
+        quantities: (1..=13).map(|n| (n * 1000, n)).collect(),
+        wallet: wallet(
+            WALLET_OWNER,
+            &[(83, 9), (2, 0), (45, 5), (1, 1), (23, 3), (4, 4), (63, 6)],
+        ),
+        ..sample(0)
+    };
+    let frames = snapshot_frames(EPOCH, 3, 9, 3000, &s).unwrap();
+    assert_eq!(frames[0]["rows"], 20);
+    let parts: Vec<_> = frames[1..frames.len() - 1].iter().collect();
+    assert_eq!(parts.len(), 3);
+    for (index, part) in parts.iter().enumerate() {
+        assert_eq!(part["type"], "live_rows");
+        assert_eq!(part["part"], index);
+        assert_eq!(part["rows"].as_array().unwrap().len(), [8, 8, 4][index]);
+    }
+    // The second part holds the last five items and the first three currencies.
+    assert_eq!(parts[1]["rows"][4], json!([0, 13000, 13]));
+    assert_eq!(parts[1]["rows"][5], json!([1, 1, 1]));
+    let keys: Vec<(u64, u64)> = all_rows(&frames)
+        .iter()
+        .map(|row| (row[0].as_u64().unwrap(), row[1].as_u64().unwrap()))
+        .collect();
+    assert_eq!(keys.len(), 20);
+    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(frames.last().unwrap()["type"], "live_end");
+}
+#[test]
+fn full_inventory_with_the_largest_wallet_stays_inside_every_live1_limit() {
+    let s = InventorySnapshot {
+        quantities: (1..=640)
+            .map(|n| (i32::MAX as u32 - n, i32::MAX as u32))
+            .collect(),
+        wallet: wallet(
+            WALLET_OWNER,
+            &(1..=MAX_CURRENCIES as u32)
+                .map(|n| (i32::MAX as u32 - n, i32::MAX as u32))
+                .collect::<Vec<_>>(),
+        ),
+        ..sample(0)
+    };
+    let frames = snapshot_frames(EPOCH, MAX_SAFE, MAX_SAFE, MAX_SAFE, &s).unwrap();
+    assert_eq!(frames[0]["rows"], MAX_ROWS);
+    assert_eq!(all_rows(&frames).len(), MAX_ROWS);
+    assert_eq!(frames.len(), 1 + 512 + 1);
+    let mut bytes = 0;
+    for frame in frames {
+        let line = frame_line(frame, NONCE, MAX_SAFE).unwrap();
+        assert!(line.trim_end().len() <= 512);
+        bytes += line.len();
+    }
+    assert!(bytes < 256 * 1024, "{bytes}");
+    // No wallet built by the reader can exceed the rows left next to a full inventory.
+    let too_many = (1..=MAX_CURRENCIES as u32 + 1).map(|n| (n, 0)).collect();
+    assert_eq!(WalletSnapshot::checked(WALLET_OWNER, too_many), None);
+}
+#[test]
+fn failed_wallet_read_keeps_the_item_sample_its_epoch_and_never_a_live_status() {
+    let now = Instant::now();
+    let mut c = channel(now);
+    let open = c.capture(Ok(with_wallet(0, 10214)), 0, now).remove(0);
+    ready(&mut c, &open, now);
+    let baseline = c.pending_frames(0, now).unwrap();
+    assert_eq!(baseline[0]["mode"], "baseline");
+    assert_eq!(baseline[0]["currencies"], "listed");
+    assert_eq!(all_rows(&baseline).len(), 4);
+    assert!(ack(&mut c, &open, 0, "stored", now));
+    // The wallet read failed in this cycle: the inventory sample is what the reader returned.
+    let time = now + Duration::from_secs(1);
+    let frames = c.capture(Ok(sample(2)), 0, time);
+    assert_eq!(frames[0]["type"], "live_begin");
+    assert_eq!(frames[0]["epoch"], open["epoch"]);
+    assert_eq!(frames[0]["cursor"], 1);
+    assert_eq!(frames[0]["items"], "complete");
+    assert_eq!(frames[0]["currencies"], "none");
+    assert_eq!(frames[0]["rows"], 2);
+    assert_eq!(
+        all_rows(&frames),
+        vec![json!([0, 12147, 2]), json!([0, 36038, 200])]
+    );
+    assert!(frames.iter().all(|frame| frame["type"] != "live_status"));
+    assert!(ack(&mut c, &open, 1, "stored", time));
+    assert_eq!(c.status, LiveStatus::Measuring);
+    // The wallet comes back in the same epoch; the host owns the rebaseline of its IDs.
+    let time = now + Duration::from_secs(2);
+    let frames = c.capture(Ok(with_wallet(2, 10225)), 0, time);
+    assert_eq!(frames[0]["epoch"], open["epoch"]);
+    assert_eq!(frames[0]["cursor"], 2);
+    assert_eq!(frames[0]["currencies"], "listed");
+    assert_eq!(all_rows(&frames)[3], json!([1, 45, 10225]));
+}
+#[test]
+fn wallet_of_another_owner_loses_currency_coverage_once_without_cutting_the_item_epoch() {
+    let now = Instant::now();
+    let mut c = channel(now);
+    let open = c.capture(Ok(with_wallet(0, 10214)), 0, now).remove(0);
+    ready(&mut c, &open, now);
+    c.pending_frames(0, now);
+    ack(&mut c, &open, 0, "stored", now);
+    let other = (WALLET_OWNER.0, WALLET_OWNER.1 + 0x1000);
+    let moved = |n| InventorySnapshot {
+        wallet: wallet(other, &[(1, 0), (45, 99)]),
+        ..sample(n)
+    };
+    let time = now + Duration::from_secs(1);
+    let frames = c.capture(Ok(moved(2)), 0, time);
+    assert_eq!(frames[0]["type"], "live_begin");
+    assert_eq!(frames[0]["epoch"], open["epoch"]);
+    assert_eq!(frames[0]["currencies"], "none");
+    assert_eq!(
+        all_rows(&frames),
+        vec![json!([0, 12147, 2]), json!([0, 36038, 200])]
+    );
+    ack(&mut c, &open, 1, "stored", time);
+    // From the uncovered sample on, the new owner's balances are listed again.
+    let time = now + Duration::from_secs(2);
+    let frames = c.capture(Ok(moved(2)), 0, time);
+    assert_eq!(frames[0]["epoch"], open["epoch"]);
+    assert_eq!(frames[0]["currencies"], "listed");
+    assert_eq!(all_rows(&frames)[3], json!([1, 45, 99]));
+}
+#[test]
+fn last_capture_diagnostics_are_current_only_while_an_epoch_is_being_sampled() {
+    for (status, sampling) in [
+        (LiveStatus::NotNegotiated, false),
+        (LiveStatus::Waiting, true),
+        (LiveStatus::Measuring, true),
+        (LiveStatus::Partial, true),
+        (LiveStatus::UnsupportedBuild, false),
+        (LiveStatus::Unavailable, false),
+        (LiveStatus::Conflict, false),
+        (LiveStatus::StorageUnavailable, false),
+    ] {
+        assert_eq!(status.is_sampling(), sampling, "{status:?}");
+    }
+    let now = Instant::now();
+    assert!(!Channel::new().status.is_sampling());
+    let mut c = channel(now);
+    c.capture(Ok(with_wallet(0, 10214)), 0, now);
+    assert!(c.status.is_sampling());
+    c.capture(Err(ReadError::ReadFailed), 0, now + Duration::from_secs(1));
+    assert!(!c.status.is_sampling());
+    let mut loading = context();
+    loading.state = GameState::Loading;
+    c.context_changed(&loading);
+    c.gameplay_status();
+    assert!(!c.status.is_sampling());
+}
+#[test]
+fn shared_fixture_listed_sample_is_what_the_producer_emits_for_that_wallet() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/live1.json")).unwrap();
+    let expected: Vec<&Value> = fixture["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|frame| frame["cursor"] == 1 && frame["type"] != "live_ack")
+        .collect();
+    let frames = snapshot_frames(EPOCH, 1, 0, 1000, &with_wallet(2, 10225)).unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(expected.len(), 3);
+    for (frame, expected) in frames.into_iter().zip(expected) {
+        let line = frame_line(frame, NONCE, expected["seq"].as_u64().unwrap()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), *expected);
+    }
 }

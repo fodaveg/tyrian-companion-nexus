@@ -3,6 +3,7 @@
 //! establish fresh epochs; the host owns observations and persistence.
 use crate::inventory::{InventorySnapshot, ReadError, BUILD_SHA256, PROFILE};
 use crate::protocol::{is_canonical_instance, GameContext, GameState, MAX_LINE_BYTES};
+use crate::wallet::WalletSnapshot;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -10,6 +11,8 @@ use std::time::{Duration, Instant};
 pub const MAX_SAFE: u64 = 9_007_199_254_740_991;
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// live1's own cap on the rows of one sample, items and currencies together.
+pub const MAX_ROWS: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -126,11 +129,20 @@ pub enum LiveStatus {
     Conflict,
     StorageUnavailable,
 }
+impl LiveStatus {
+    /// True while captures are being taken for an open epoch. Only then do the diagnostics of
+    /// the last capture, such as its wallet coverage, describe something current.
+    pub fn is_sampling(self) -> bool {
+        matches!(self, Self::Waiting | Self::Measuring | Self::Partial)
+    }
+}
 
 #[derive(Debug)]
 struct Epoch {
     id: String,
     owner: (u64, u64),
+    /// Wallet owner of the latest capture of this epoch, if that capture had a wallet.
+    wallet_owner: Option<(u64, u64)>,
     started: Instant,
     cursor: u64,
     ready: bool,
@@ -275,6 +287,8 @@ impl Channel {
     }
     /// Capture errors invalidate the whole epoch. Unknown quantities preserve known IDs in a
     /// partial sample, and its ACK must be followed by a new epoch before further comparison.
+    /// The wallet is a separate channel of the same sample: without one the sample goes out
+    /// with `currencies:none`, and neither that nor a wallet owner change cuts the epoch.
     pub fn capture(
         &mut self,
         result: Result<InventorySnapshot, ReadError>,
@@ -282,7 +296,7 @@ impl Channel {
         now: Instant,
     ) -> Vec<Value> {
         self.next_capture = Some(now + CAPTURE_INTERVAL);
-        let snapshot = match result {
+        let mut snapshot = match result {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let reason = match error {
@@ -323,6 +337,7 @@ impl Channel {
             self.epoch = Some(Epoch {
                 id,
                 owner: snapshot.owner,
+                wallet_owner: snapshot.wallet.as_ref().map(WalletSnapshot::owner),
                 started: now,
                 cursor: 0,
                 ready: false,
@@ -335,6 +350,15 @@ impl Channel {
             return vec![frame];
         }
         let e = self.epoch.as_mut().unwrap();
+        // Balances of another wallet owner cannot be compared with the previous sample's. Only
+        // the currencies lose coverage, for this one sample: the host then takes their next
+        // appearance as a local baseline, and the items of this sample stay comparable.
+        let wallet_owner = snapshot.wallet.as_ref().map(WalletSnapshot::owner);
+        if matches!((e.wallet_owner, wallet_owner), (Some(before), Some(after)) if before != after)
+        {
+            snapshot.wallet = None;
+        }
+        e.wallet_owner = wallet_owner;
         let ms = now.saturating_duration_since(e.started).as_millis();
         if ms == 0 || ms > MAX_SAFE as u128 {
             self.epoch = None;
@@ -369,6 +393,10 @@ impl Channel {
 }
 
 /// Frames before transport numbering; all row totals are sorted, never raw pointers/slots.
+/// Item rows `[0,id,n]` come first and currency rows `[1,id,balance]` after them, which is the
+/// contract's global `(kind,id)` order; parts of up to eight rows may hold both kinds. With a
+/// wallet the sample says `currencies:listed` and covers exactly the IDs it lists; without one
+/// it says `none` and carries no currency row. A [`WalletSnapshot`] is never empty.
 pub fn snapshot_frames(
     epoch: &str,
     cursor: u64,
@@ -376,12 +404,15 @@ pub fn snapshot_frames(
     ms: u64,
     s: &InventorySnapshot,
 ) -> Option<Vec<Value>> {
+    let balances = s.wallet.as_ref().map(WalletSnapshot::balances);
+    let total = s.quantities.len() + balances.map_or(0, |balances| balances.len());
     if !is_canonical_instance(epoch)
         || cursor > MAX_SAFE
         || ctx > MAX_SAFE
         || ms > MAX_SAFE
         || s.unknown > 640
         || s.quantities.len() > 640
+        || total > MAX_ROWS
         || (cursor == 0 && ms != 0)
         || (cursor > 0 && ms == 0)
         || s.free_slots.is_some_and(|slots| slots > 4096)
@@ -394,9 +425,20 @@ pub fn snapshot_frames(
     let mut frames = vec![
         json!({"type":"live_begin","epoch":epoch,"cursor":cursor,"ctx":ctx,"ms":ms,
         "mode":if cursor==0 {"baseline"}else{"sample"},"items":if s.unknown==0 {"complete"}else{"partial"},
-        "currencies":"none","unknown":s.unknown,"slots":s.free_slots,"rows":s.quantities.len()}),
+        "currencies":if balances.is_some() {"listed"}else{"none"},
+        "unknown":s.unknown,"slots":s.free_slots,"rows":total}),
     ];
-    let rows: Vec<_> = s.quantities.iter().map(|(id, n)| [0, *id, *n]).collect();
+    let rows: Vec<_> = s
+        .quantities
+        .iter()
+        .map(|(id, n)| [0, *id, *n])
+        .chain(
+            balances
+                .into_iter()
+                .flatten()
+                .map(|(id, balance)| [1, *id, *balance]),
+        )
+        .collect();
     for (part, rows) in rows.chunks(8).enumerate() {
         frames.push(
             json!({"type":"live_rows","epoch":epoch,"cursor":cursor,"part":part,"rows":rows}),

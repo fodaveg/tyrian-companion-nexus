@@ -5,8 +5,8 @@
 //! `docs/SPEC-puente-ingame.md` in the `tyrian-companion` repo, protocol v3, is the contract this
 //! addon implements.
 //!
-//! An authenticated loopback client and a negotiated passive inventory producer. The native
-//! reader copies owned fields with RPM under a certified executable profile; it never invokes
+//! An authenticated loopback client and a negotiated passive inventory and wallet producer. The
+//! native reader copies owned fields with RPM under a certified executable profile; it never invokes
 //! game functions, writes memory, suspends threads, hooks code or sends input. It does not call
 //! the GW2 API. This is the factual scope, not a claim of third-party-policy approval.
 //! `docs/SPEC-live-loot.md` defines live1; the base v3 and farm1 frames stay compatible.

@@ -2,7 +2,8 @@
 //!
 //! Everything in this crate is plain, host-testable Rust: no `nexus`, no `windows`, no
 //! `nexus::alert::send_alert` call. That includes the TCP client loop itself (`client`), which
-//! reaches the game only through its `Host` trait. The `addon` crate (a `cdylib`, Nexus's own
+//! reaches the game only through its `Host` trait, and the inventory and wallet interpreters
+//! (`inventory`, `wallet`), which read only through a `Memory` trait. The `addon` crate (a `cdylib`, Nexus's own
 //! `nexus` bindings, and the `Host` that reads `NexusLink`/Mumble Link and paints alerts) is the
 //! other half, and only builds when targeting Windows — the `windows` crate it pulls in
 //! gates most of its own types behind `cfg(windows)`, so it cannot compile for this
@@ -23,5 +24,7 @@ pub mod live;
 pub mod obsidian_launch;
 pub mod protocol;
 pub mod settings;
+pub mod sha256;
 pub mod state;
 pub mod token;
+pub mod wallet;

@@ -5,7 +5,8 @@
 //! - painting an alert: `nexus::alert::send_alert` (`GUI_SendAlert`), with the plugin's `content`
 //!   verbatim;
 //! - reading the game: `NexusLink::is_gameplay` and the Mumble Link Nexus shares with addons
-//!   (`DL_MUMBLE_LINK`), plus the negotiated passive owned-inventory reader; no GW2 API;
+//!   (`DL_MUMBLE_LINK`), plus the negotiated passive owned-inventory and wallet reader; no GW2
+//!   API;
 //! - knowing the game is closing: the `WndProc` callback in `lib.rs` sets [`GAME_EXITING`] on
 //!   `WM_CLOSE`/`WM_DESTROY`, the only evidence the SPEC accepts for a `bye` with `game_exit`.
 //!

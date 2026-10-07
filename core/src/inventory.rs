@@ -4,6 +4,7 @@
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
 
+use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const BUILD_SHA256: &str = "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c";
@@ -12,7 +13,7 @@ pub const TLS_INDEX_RVA: u64 = 0x28145c0;
 pub const MAX_POSITIONS: u32 = 640;
 pub const MAX_BYTES: usize = 131_072;
 pub const MAX_READS: usize = 32_768;
-const MAX_POINTER: u64 = 0x0000_7fff_ffff_ffff;
+pub(crate) const MAX_POINTER: u64 = 0x0000_7fff_ffff_ffff;
 
 /// Closed diagnostics; no address, character identity or OS error reaches the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,34 +34,45 @@ pub trait Memory {
 /// One-cycle budget, including failed requests and stability checks. Allocation is bounded too.
 pub struct Reader<M> {
     memory: M,
+    limit: usize,
     pub bytes: usize,
     pub reads: usize,
 }
 impl<M: Memory> Reader<M> {
     pub fn new(memory: M) -> Self {
+        Self::bounded(memory, MAX_BYTES)
+    }
+    /// A reader with a smaller byte budget of its own; `limit` can never raise [`MAX_BYTES`].
+    pub fn bounded(memory: M, limit: usize) -> Self {
         Self {
             memory,
+            limit: limit.min(MAX_BYTES),
             bytes: 0,
             reads: 0,
         }
     }
     pub fn read<const N: usize>(&mut self, address: u64) -> Result<[u8; N], ReadError> {
-        if N == 0
-            || N > 4096
+        let mut bytes = [0; N];
+        self.read_into(address, &mut bytes)?;
+        Ok(bytes)
+    }
+    /// The one exact copy every read goes through: 1..=4096 bytes, charged before the request.
+    pub fn read_into(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), ReadError> {
+        let size = bytes.len();
+        if size == 0
+            || size > 4096
             || address < 0x10000
             || address
-                .checked_add(N as u64)
+                .checked_add(size as u64)
                 .is_none_or(|end| end > MAX_POINTER)
-            || self.bytes + N > MAX_BYTES
+            || self.bytes + size > self.limit
             || self.reads >= MAX_READS
         {
             return Err(ReadError::Bounds);
         }
-        self.bytes += N;
+        self.bytes += size;
         self.reads += 1;
-        let mut bytes = [0; N];
-        self.memory.read_exact(address, &mut bytes)?;
-        Ok(bytes)
+        self.memory.read_exact(address, bytes)
     }
     pub fn scalar(&mut self, address: u64, size: usize) -> Result<u64, ReadError> {
         Ok(match size {
@@ -88,7 +100,7 @@ impl<M: Memory> Reader<M> {
 /// The hash must come from the executable itself. An unsupported hash cannot read game fields.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildProfile {
-    base: u64,
+    pub(crate) base: u64,
 }
 impl BuildProfile {
     pub fn checked(hash: &str, base: u64, image_size: u64) -> Result<Self, ReadError> {
@@ -147,6 +159,9 @@ pub struct InventorySnapshot {
     pub positions: u32,
     /// The observed sparse array does not certify usable bag capacity or free slots.
     pub free_slots: Option<u32>,
+    /// Wallet balances read in the same cycle. `None` is missing coverage, never zero balances;
+    /// [`inventory_snapshot`] leaves it empty and a wallet failure never rejects this sample.
+    pub wallet: Option<WalletSnapshot>,
 }
 
 /// GetStackQuantity's certified branches. Never invoke the getter or guess an unknown quantity.
@@ -372,6 +387,7 @@ pub fn inventory_snapshot<M: Memory>(
         unknown,
         positions: count as u32,
         free_slots: None,
+        wallet: None,
     })
 }
 
@@ -383,4 +399,8 @@ pub struct Diagnostics {
     pub reads: u32,
     pub positions: u32,
     pub owner_verified: bool,
+    /// Wallet outcome of the same cycle; its reads have their own budget and counters.
+    pub wallet: WalletCoverage,
+    pub wallet_bytes: u32,
+    pub wallet_reads: u32,
 }

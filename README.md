@@ -32,6 +32,11 @@ Version 0.5.0 adds the negotiated passive inventory source `live1`. It retains t
 protocol and `farm1` compatibility. Compilation and portable tests do not certify native
 reader runtime; see the coverage and QA limits below.
 
+Version 0.6.0 adds the wallet to that source: a sample can list currency balances next to the
+item totals. It changes no frame of `live1`; a host that already accepts `currencies:listed`
+needs nothing else. See "Wallet coverage" below for what a listed balance does and does not
+mean.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
@@ -58,7 +63,8 @@ minute and `character_select` after that, with no map and no character; before t
 character loads it reports `character_select`. That minute is an assumption the in-game test
 has to confirm (`LOADING_WINDOW` in `core/src/game_context.rs`).
 
-The optional `live1` channel reads the controlled character's owned carried inventory. It
+The optional `live1` channel reads the controlled character's owned carried inventory and the
+wallet's currency balances. It
 uses bounded, passive `ReadProcessMemory` copies in the normally loaded Nexus addon, not
 DRF or an authenticated inventory API. It never calls game getters, writes game memory,
 hooks game code, suspends threads, or sends input. This describes the implementation; it
@@ -87,17 +93,56 @@ a location change during copying invalidates the capture. Unsupported quantity p
 an unknown instance suppresses that entire ID, never becoming quantity one or zero. One
 is allowed only for the explicitly certified NULL Stackable fallback branches.
 
-Free slots are `null`: sparse empty entries do not prove usable bag capacity. Currencies
-are `none`, and Magic Find has no verified source. These are missing coverage, not zero
-balances or completed wallet/MF support.
+Free slots are `null`: sparse empty entries do not prove usable bag capacity. Magic Find has
+no verified source. These are missing coverage, not zero values or completed MF support.
 
-The background bridge worker targets one capture per second; render performs no inventory
-reads and never waits for a socket or disk. Unload cancels the worker and joins it before
+### Wallet coverage
+
+In the same cycle, after a whole inventory sample, the worker reads the wallet the game's own
+wallet window uses: context `+0x98` (character context), `+0xA0` (the wallet's local
+character, a different object and vtable from the controlled-inventory wrapper at `+0x98`),
+`+0x1878` (the embedded currency manager), and its open-addressing map (capacity and count
+DWORDs, a pointer to 12-byte buckets of key, balance and occupied hash). The native key is
+the public currency ID of `/v2/currencies` and the balance is the DWORD after it.
+
+Before any balance is copied, the three vtables and the three getters on that route must be
+the certified ones. Once per verified build, five fixed ranges of the executable (the two
+route getters, the balance getter, the map lookup and its 256-entry hash table, 1416 bytes)
+must match their audited SHA-256 digests; a different byte leaves the wallet without coverage
+until the addon is loaded again, while a failed copy is tried again on the next cycle. The capacity must be a power
+of two up to 4096 and the count at most the capacity. The table is copied once, in reads of
+whole buckets, and the owner pointers, the vtables and the header are read again afterwards.
+Every occupied bucket must carry the hash the game computes for its key and be reachable by
+the game's linear probing from that hash's bucket, no key may repeat, and the number of
+occupied buckets must equal the count. A key of zero, a key or balance above 2147483647, or
+any other failure rejects **all** currencies of that cycle: nothing is clamped and no part of
+a wallet is sent. The wallet has a byte budget of its own, 65536 requested bytes per cycle,
+next to the inventory's; it shares the cycle's 750ms deadline and never calls a getter.
+
+A sample with a wallet says `currencies:listed` and adds one `[1,id,balance]` row per key,
+after the item rows. `listed` covers **only the IDs in those rows**. A key present with a
+balance of zero is a covered zero. A wallet that could not be read, an empty map or an absent
+one says `currencies:none` with no currency row: that is missing coverage, not zero balances,
+and it never invalidates the item rows of the same sample, opens a new epoch or sends a
+`live_status`. If the wallet's owner differs from the previous sample's, that one sample goes
+out with `currencies:none`, so the host takes the next balances as a baseline.
+
+**Known limit: the first gain of a currency the account never held is not counted.** The
+native map is sparse; a currency the account has never had has no key, so it is not listed
+and not covered. When it first appears, the host takes that balance as the local baseline of
+that ID, without a delta, as `docs/SPEC-live-loot.md` fixes for any first appearance. The
+addon does not invent a zero row to work around this: it cannot tell "never held" from "not
+read". Later changes of that currency are observed normally.
+
+The background bridge worker targets one capture per second; render performs no inventory or
+wallet reads and never waits for a socket or disk. Unload cancels the worker and joins it before
 unmapping; reads and hash chunks check cancellation, but cannot preempt an OS call in progress. Real resolution depends on the reader and host
 ACK. The addon emits aggregate begin/rows/end batches, each line at most 512 bytes, up to
 eight rows per part, on the existing consecutive TCP sequence. It has one sample in flight,
 waits for a durable `live_ack` and bounds ready/ACK and batch transmission to ten seconds.
-The actual native maximum is 640 rows, 80 row parts and under 256 KiB per sample. No
+The actual native maximum is 640 item rows plus 3456 currency rows, which is the contract's
+4096 rows and 512 row parts, and under 256 KiB per sample; a wallet with more keys than that
+is not listed. The wallet observed in the live comparison had 55. No
 unbounded queue or durable replay is implemented here.
 
 Every connection, actual map/character/state change, inventory-owner change and read gap
@@ -110,6 +155,11 @@ The host owns persistence, prices and notifications; the addon does not label th
 as certified drops, sales, deposits or openings.
 
 Nexus Options and the farming window distinguish inventory measurement from connection.
+Both show the wallet coverage of the last capture while a measurement is in progress: the
+number of currencies covered, or "no coverage" with one closed reason (no reading, wallet
+profile not verified, unknown structure, character unavailable, map out of bounds, wallet
+empty or absent, inconsistent map, value out of range, changed while reading, read failed).
+Verified Magic Find stays "no coverage".
 The optional reader diagnostics show profile, owner-check outcome and bounded counters,
 without addresses or a complete inventory dump. Blish can supply presence/alerts/HUD but
 needs this local Nexus producer for inventory observations; Mumble alone has no item feed.
@@ -120,6 +170,15 @@ That evidence guided this port but does not certify the addon in a running game.
 Windows load and reader runtime, Fedora/Proton addon bootstrap, reorder/character change,
 reconnect and real inventory QA remain pending until tested on this DLL candidate.
 
+The wallet route was first identified statically, then read whole by an external read-only
+probe on the same Fedora/GE-Proton setup on 7 October 2026: capacity 128, 55 occupied keys,
+the same 55 IDs `/v2/account/wallet` returned, 54 equal balances and one (45, volatile magic)
+11 higher than the cached API value while playing, with no hash mismatch and no unreachable
+key. That is one account, one session and one executable. It does not cover a spend, a
+currency reaching zero, a first-ever currency, a character change or a map rehash, and it is
+not a run of this DLL: the wallet reader in the addon has only been exercised against
+fixtures.
+
 ## Layout
 
 This is a two-crate Cargo workspace, and that split is deliberate:
@@ -129,7 +188,7 @@ This is a two-crate Cargo workspace, and that split is deliberate:
   `alert`, `error` and the optional `farm1` capability/state), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
   the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
-  shared in-memory state, the safe inventory interpreter and negotiated live1 producer. No dependency on `nexus` or `windows`: the loop reaches the game
+  shared in-memory state, the safe inventory and wallet interpreters and negotiated live1 producer. No dependency on `nexus` or `windows`: the loop reaches the game
   only through a `Host` trait. This is what `cargo test` exercises, and it builds and tests on
   any host, this repository's Linux dev machine included.
 - **`addon/`** (`tyrian_companion_nexus`, a `cdylib`): the actual Nexus addon — the
@@ -374,8 +433,14 @@ covers what does not need a running game:
 
 - passive inventory fixtures: build/profile guards, owned location3, sparse references,
   conditional/NULL quantity branches, aggregation/unknowns, concurrent changes and budgets;
+- passive wallet fixtures over the audited guard bytes: the live-shaped 55-key map, a covered
+  zero, empty and absent maps, wrong vtables and getters, a changed guard byte, malformed
+  headers and pointers, failed copies, wrong hashes, unreachable and repeated keys, a count
+  that disagrees, out-of-range keys and balances, concurrent changes and the wallet budget;
 - live1 canonical wire fixtures, 512/513 cap, old-host negotiation, epochs/baselines, context
-  equality, ACK isolation, source/storage failure, partial samples and bounded chunks;
+  equality, ACK isolation, source/storage failure, partial samples and bounded chunks, and
+  `currencies:listed` rows: their order and chunking, a failed wallet read next to a valid
+  inventory, and the largest sample against every live1 limit;
 
 - `farm1` byte cap (512 accepted, 513 rejected), exact keys and duplicate-key rejection,
   numeric bounds, nullable values, every enum, capability negotiation with older-server
