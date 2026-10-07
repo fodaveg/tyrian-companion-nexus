@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 pub const MAX_SAFE: u64 = 9_007_199_254_740_991;
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Wait before `live_open` is sent again after the plugin answered `source_conflict`. The plugin
+/// gives that answer while another producer owns the session and also while its local store is
+/// down, so the conflict can end without any change of game context.
+pub const CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// live1's own cap on the rows of one sample, items and currencies together.
 pub const MAX_ROWS: usize = 4096;
 
@@ -161,11 +165,16 @@ pub struct Channel {
     next_capture: Option<Instant>,
     reason: Option<&'static str>,
     blocked: bool,
+    conflict_retry: Option<Duration>,
     pub status: LiveStatus,
 }
 impl Channel {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Replace the wait between `live_open` retries after a conflict; `None` restores the default.
+    pub fn set_conflict_retry(&mut self, wait: Option<Duration>) {
+        self.conflict_retry = wait;
     }
     pub fn enabled(&self) -> bool {
         self.enabled
@@ -188,12 +197,17 @@ impl Channel {
                     if status == "ready" {
                         e.ready = true;
                         e.sent_at = now;
+                    } else if status == "source_conflict" {
+                        // Not permanent: schedule one new `live_open`. Until it is due nothing is
+                        // read, so a conflict costs one capture per wait, not one per frame.
+                        self.epoch = None;
+                        self.next_capture =
+                            Some(now + self.conflict_retry.unwrap_or(CONFLICT_RETRY_INTERVAL));
+                        self.status = LiveStatus::Conflict;
                     } else {
                         self.blocked = true;
                         self.epoch = None;
-                        self.status = if status == "source_conflict" {
-                            LiveStatus::Conflict
-                        } else if status == "unsupported_build" {
+                        self.status = if status == "unsupported_build" {
                             LiveStatus::UnsupportedBuild
                         } else {
                             LiveStatus::Unavailable

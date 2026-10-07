@@ -520,6 +520,7 @@ fn handle_line(
                 state.begin_price_connection(&welcome.nonce);
                 state.set_live_status(crate::live::LiveStatus::NotNegotiated);
                 let mut new = Session::new(welcome, Instant::now());
+                new.live.set_conflict_retry(state.live_conflict_retry());
                 // Welcome's public DTO stays backward compatible; live is v3-only on the wire.
                 new.live_allowed = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|r|r["v"].as_u64()) == Some(3);
                 *session = Some(new);

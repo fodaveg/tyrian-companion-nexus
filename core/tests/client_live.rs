@@ -337,6 +337,62 @@ fn context_change_during_capture_discards_sample_before_live_open() {
 }
 
 #[test]
+fn source_conflict_is_retried_on_the_same_connection_without_a_context_change() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let state = Arc::new(SharedState::new());
+    state.apply_settings(
+        listener.local_addr().unwrap().port(),
+        TOKEN,
+        false,
+        LaunchApp::Obsidian,
+    );
+    // The real wait is 30 s; the loopback test shortens it through the shared state.
+    state.set_live_conflict_retry(Some(Duration::from_millis(400)));
+    let host = FakeHost::new();
+    let handle = spawn(
+        state.clone(),
+        host.clone(),
+        ClientConfig {
+            client_version: "0.4.0".into(),
+            instance: tyrian_companion_nexus_core::instance::new_instance_id(),
+        },
+    )
+    .unwrap();
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let first = p.open();
+    p.send(json!({"v":3,"type":"live_ready","nonce":p.nonce,"tag":"live1","epoch":first,"status":"source_conflict"}));
+    // Between the conflict and the retry the game is not read, and the panel keeps the conflict.
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(host.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        state.live_status(),
+        tyrian_companion_nexus_core::live::LiveStatus::Conflict
+    );
+    host.quantity.store(7, Ordering::Relaxed);
+    // Heartbeats keep arriving, so a missing retry must fail by deadline, not by read timeout.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let second = loop {
+        let line = p.sequenced();
+        if line["type"] == "live_open" {
+            break line["epoch"].as_str().unwrap().to_string();
+        }
+        assert_eq!(line["type"], "heartbeat");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no second live_open after the conflict wait"
+        );
+    };
+    assert_ne!(first, second);
+    assert_eq!(host.calls.load(Ordering::Relaxed), 2);
+    p.ready(&second);
+    p.sample(&second, 0, 7);
+    p.ack(&second, 0, "stored");
+    handle.stop();
+}
+
+#[test]
 fn unload_cancels_pending_capture_without_sending_status_or_inventory_after_bye() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let (host, _state, handle) = start(&listener);

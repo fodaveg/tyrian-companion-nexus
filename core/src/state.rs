@@ -84,6 +84,9 @@ pub struct SharedState {
     live_status: Mutex<crate::live::LiveStatus>,
     live_context: Mutex<Option<crate::protocol::GameContext>>,
     inventory_diagnostics: Mutex<crate::inventory::Diagnostics>,
+    /// Override of the wait before `live_open` is retried after a `source_conflict`; `None` keeps
+    /// `live::CONFLICT_RETRY_INTERVAL`. Only tests set it.
+    live_conflict_retry: Mutex<Option<std::time::Duration>>,
     /// The `open_obsidian_on_start` setting (`core::obsidian_launch`). Read by the client loop
     /// before its first connection attempt; written from settings load and from the Options
     /// panel's checkbox.
@@ -122,6 +125,7 @@ impl SharedState {
             live_status: Mutex::new(crate::live::LiveStatus::NotNegotiated),
             live_context: Mutex::new(None),
             inventory_diagnostics: Mutex::new(crate::inventory::Diagnostics::default()),
+            live_conflict_retry: Mutex::new(None),
             open_obsidian_on_start: AtomicBool::new(true),
             launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
@@ -134,6 +138,9 @@ impl SharedState {
     /// Measurement state remains separate from TCP/game presence.
     pub fn live_status(&self) -> crate::live::LiveStatus { *lock(&self.live_status) }
     pub fn set_live_status(&self, value: crate::live::LiveStatus) { *lock(&self.live_status) = value; }
+    /// Wait override for the `source_conflict` retry, read when a connection starts.
+    pub fn live_conflict_retry(&self) -> Option<std::time::Duration> { *lock(&self.live_conflict_retry) }
+    pub fn set_live_conflict_retry(&self, value: Option<std::time::Duration>) { *lock(&self.live_conflict_retry) = value; }
     /// Counters from the last bounded capture, without raw pointers or inventory rows.
     pub fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { *lock(&self.inventory_diagnostics) }
     pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics) { *lock(&self.inventory_diagnostics) = value; }

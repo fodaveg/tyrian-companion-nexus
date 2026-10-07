@@ -41,6 +41,11 @@ Version 0.7.0 adds the bag price block (`price1`) to the Labyrinth panel, stops 
 reading-age lines while measurement is normal, and adds two icons to Nexus's quick access bar.
 See "Bag price (`price1`)", "Lines that only appear with a problem" and "Quick access icons".
 
+Version 0.7.1 retries `live_open` every 30 s after the plugin answers `source_conflict`, so the
+inventory source recovers without a change of map. While it waits, the panel keeps saying that
+another source owns the session and the game is not read between attempts. `unsupported_build`
+and `not_gameplay` still block until the game context changes.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
