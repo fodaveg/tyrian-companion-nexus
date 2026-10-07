@@ -22,6 +22,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::farming::FarmingState;
+use crate::price::PriceState;
 
 /// Default port the plugin listens on. Matches the spec and the plugin's own default.
 pub const DEFAULT_PORT: u16 = 47823;
@@ -350,6 +351,14 @@ pub fn build_farming_sub_line(nonce: &str, seq: u64) -> Option<String> {
     })).ok()?)
 }
 
+/// Subscribes to `price1` only after an authenticated `price_cap` on this connection: an older
+/// host closes the connection with `unexpected_message` if it gets one it never announced.
+pub fn build_price_sub_line(nonce: &str, seq: u64) -> Option<String> {
+    finish_line(serde_json::to_string(&serde_json::json!({
+        "v": PROTOCOL_VERSION, "type": "price_sub", "nonce": nonce, "seq": seq, "tag": "price1"
+    })).ok()?)
+}
+
 /// The plugin's answer to an accepted `hello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
@@ -485,6 +494,8 @@ pub enum ServerLine {
     Alert(Alert),
     FarmingCapability(String),
     FarmingState(FarmingState),
+    PriceCapability(String),
+    PriceState(PriceState),
     Live(crate::live::Reply),
     Error(ErrorCode),
     /// `v` is greater than [`PROTOCOL_VERSION`]: ask for an update once, interpret nothing.
@@ -503,6 +514,9 @@ const ERROR_KEYS: &[&str] = &["v", "type", "code"];
 const FARMING_KEYS: &[&str] = &["v", "type", "tag", "nonce", "seq", "ttl", "phase", "err",
     "elapsed", "observed", "net", "lo", "hi", "age", "slots", "slotSrc", "slotAge", "goal",
     "target", "progress", "eta", "mf", "mfKind", "prep"];
+
+const PRICE_KEYS: &[&str] = &["v", "type", "tag", "nonce", "seq", "ttl", "st", "sell",
+    "sellStack", "list", "listStack", "age"];
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -559,6 +573,8 @@ pub fn parse_server_line(line: &str) -> ServerLine {
         "error" => parse_error(&record, version).map(ServerLine::Error),
         "farming_cap" => parse_farming_cap(line, &record).map(ServerLine::FarmingCapability),
         "farming_state" => parse_farming_state(line, &record).map(ServerLine::FarmingState),
+        "price_cap" => parse_price_cap(line, &record).map(ServerLine::PriceCapability),
+        "price_state" => parse_price_state(line, &record).map(ServerLine::PriceState),
         "live_cap" | "live_ready" | "live_ack" => crate::live::parse_reply(kind, line).map(ServerLine::Live),
         _ => return ServerLine::Ignored,
     };
@@ -577,6 +593,20 @@ fn parse_farming_state(line: &str, record: &Map<String, Value>) -> Option<Farmin
     if !has_exact_keys(record, FARMING_KEYS) { return None; }
     as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS)?;
     let state: FarmingState = serde_json::from_str(line).ok()?;
+    state.valid().then_some(state)
+}
+
+fn parse_price_cap(line: &str, record: &Map<String, Value>) -> Option<String> {
+    if !has_exact_keys(record, &["v", "type", "nonce", "tag"]) { return None; }
+    let cap: FarmingCapability = serde_json::from_str(line).ok()?;
+    if cap.v != 3 || cap.kind != "price_cap" || cap.tag != "price1" { return None; }
+    as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS && *nonce == cap.nonce)
+}
+
+fn parse_price_state(line: &str, record: &Map<String, Value>) -> Option<PriceState> {
+    if !has_exact_keys(record, PRICE_KEYS) { return None; }
+    as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS)?;
+    let state: PriceState = serde_json::from_str(line).ok()?;
     state.valid().then_some(state)
 }
 

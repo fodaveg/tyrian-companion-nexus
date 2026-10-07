@@ -37,6 +37,10 @@ item totals. It changes no frame of `live1`; a host that already accepts `curren
 needs nothing else. See "Wallet coverage" below for what a listed balance does and does not
 mean.
 
+Version 0.7.0 adds the bag price block (`price1`) to the Labyrinth panel, stops painting the
+reading-age lines while measurement is normal, and adds two icons to Nexus's quick access bar.
+See "Bag price (`price1`)", "Lines that only appear with a problem" and "Quick access icons".
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
@@ -406,6 +410,61 @@ QA limits for 0.4.0: portable parser/state and loopback tests cover the feed, an
 cross-build checks the ImGui code and DLL dependencies. These checks cannot certify panel
 placement, text contrast, keyboard navigation or Nexus load in a running Guild Wars 2
 session; Fedora/Wine/game runtime QA remains pending until measured on that client.
+
+### Bag price (`price1`)
+
+Between the rate (bags/hour) and the character's slots, the panel can show what one Labyrinth
+bag (item 36038) would fetch: **Instant** (sell to the best buy order) and **List** (post at the
+lowest sell offer), each for one bag and for a stack of 250. The figures are **net of the
+trading-post fee** (5 % listing plus 10 % sales, charged on the total, so a stack is not
+250 times the single net) and are written as `7g 33s 12c`. The block also says when there is no
+quote on a side (`—`), when the price has not been read yet, and, in the warning colour, when
+it expired (`Bag: price expired (11 min ago)`). When the quote is fine its age is not shown.
+
+The price comes from the public trading-post data and can be up to about **2 minutes** old,
+and older if the plugin's network fails (it expires after 10 minutes). It is not "live" and the
+panel never says so. Nothing is shown outside an active session, and nothing at all with a plugin
+older than `price1`: that plugin never announces the capability, the addon never subscribes, and
+the block simply does not appear.
+
+Wire: `price_cap` (`v,type,nonce,tag`) after authentication; the addon sends one `price_sub`
+only after receiving it on that connection, on the same outgoing sequence as `farming_sub`; then
+`price_state` frames (12 exact keys, `st` one of `ok`, `idle`, `pending`, `stale`, amounts int32
+or null, null whenever `st` is not `ok`). Same 512-byte cap, 22-character nonce, increasing
+sequence and 15-second monotonic transport expiry as `farm1`; disconnecting removes the figures
+at once. `farm1` and `live1` are unchanged. No item id, name or account travels in the feed.
+
+### Lines that only appear with a problem
+
+In normal measurement the panel no longer repeats "Last reading ago Xs", "Slot reading ago Xs"
+or the footer "Inventory: observations stored". The two age lines show only while a session is
+starting, active, stopping, provisional or in error **and** one of these holds: the transport is
+more than 15 s old, the host reports an error, there is no reading, or the reading is 15 s old
+or more. The inventory footer is hidden only while the status is "measuring"; every other
+status still shows. Nexus's Options keep all of these lines as diagnostics.
+
+### Quick access icons
+
+Two icons appear in Nexus's quick access bar (the row of addon icons beside the game menu):
+
+- **Labyrinth panel** shows or hides the "Tyrian · Laberinto" window. It is the same setting as
+  the Options checkbox "Show Labyrinth farming panel", saved the same way.
+- **Tyrian Companion options** brings up the addon's own Options window (Nexus gives addons no
+  call to show its Options window on their section, so this window paints exactly the same
+  content and closes with its cross).
+
+Each icon triggers a Nexus keybind, `KB_TYRIAN_COMPANION_TOGGLE_PANEL` and
+`KB_TYRIAN_COMPANION_OPEN_OPTIONS`, created **without a key**; assign one in Nexus's Input
+binds if you want. The click works without it. Tooltips follow the panel's language setting and
+are refreshed when you change it. If an icon's texture does not load, the failure is logged and
+that icon does not appear; nothing else is affected. Nothing here sends input to the game: it only
+shows and hides this addon's windows. All of it is removed when the addon unloads.
+
+The icons are four PNG files embedded in the DLL: `addon/assets/qa-panel.png`,
+`qa-panel-hover.png`, `qa-options.png` and `qa-options-hover.png`, 32x32 RGBA, full colour (the
+pumpkin for the panel, the monster for the options; the hover is the same drawing with a 1 px white
+halo). They are David's drawings, loaded as they are with no tint or conversion. Replacing them is
+changing those four files and rebuilding.
 
 ## Reconnecting
 

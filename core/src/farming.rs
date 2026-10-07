@@ -8,6 +8,15 @@ use serde::Deserialize;
 /// A transport snapshot expires independently of the source observation's own age.
 pub const FARMING_TTL: Duration = Duration::from_secs(15);
 
+/// A reading this many seconds old (or older) is worth telling the player about.
+pub const READING_AGE_NOTICE: u64 = 15;
+
+/// The panel footer "Inventory: observations stored" says nothing while measuring normally;
+/// every other status is shown. The Options window keeps all of them as diagnostics.
+pub fn show_inventory_status(status: crate::live::LiveStatus) -> bool {
+    status != crate::live::LiveStatus::Measuring
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase { Idle, Starting, Active, Stopping, Provisional, Complete, Error, Abandoned }
@@ -94,6 +103,17 @@ impl FarmingView {
     /// Source age is independent of transport refreshes. Exact age 5 is already stale.
     pub fn source_fresh(&self) -> bool {
         self.fresh && self.age.is_some_and(|age| age < 5)
+    }
+
+    /// Whether "last reading ago Xs" (and the slot reading's age) is worth painting. In normal
+    /// measurement it is noise, so it shows only when it reports a problem: the transport is
+    /// old, `err` is set, there is no reading, or the reading is 15 s old or more. Only while a
+    /// session is starting, active, stopping, provisional or in error. Not the 5 s freshness
+    /// threshold: that one would make the line blink.
+    pub fn show_reading_age(&self) -> bool {
+        let Some(reading) = self.reading.as_ref() else { return false };
+        matches!(reading.phase, Phase::Starting | Phase::Active | Phase::Stopping | Phase::Provisional | Phase::Error)
+            && (!self.fresh || reading.err.is_some() || self.age.is_none_or(|age| age >= READING_AGE_NOTICE))
     }
 
     /// Bags depend on a fresh observation; duration is the host's declared countdown and

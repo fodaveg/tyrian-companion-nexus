@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use crate::farming::{FarmingFeed, FarmingState, FarmingView};
+use crate::price::{PriceFeed, PriceState, PriceView};
 
 use crate::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{Alert, AlertKind, DEFAULT_PORT};
@@ -79,6 +80,7 @@ pub struct SharedState {
     warned_about_missing_token: AtomicBool,
     history: Mutex<VecDeque<HistoryEntry>>,
     farming: Mutex<FarmingFeed>,
+    price: Mutex<PriceFeed>,
     live_status: Mutex<crate::live::LiveStatus>,
     live_context: Mutex<Option<crate::protocol::GameContext>>,
     inventory_diagnostics: Mutex<crate::inventory::Diagnostics>,
@@ -116,6 +118,7 @@ impl SharedState {
             warned_about_missing_token: AtomicBool::new(false),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAPACITY)),
             farming: Mutex::new(FarmingFeed::default()),
+            price: Mutex::new(PriceFeed::default()),
             live_status: Mutex::new(crate::live::LiveStatus::NotNegotiated),
             live_context: Mutex::new(None),
             inventory_diagnostics: Mutex::new(crate::inventory::Diagnostics::default()),
@@ -224,6 +227,29 @@ impl SharedState {
 
     pub fn farming_view(&self, now: Instant) -> FarmingView {
         lock(&self.farming).view(now)
+    }
+
+    /// Starts a `price1` handshake for this connection.
+    pub fn begin_price_connection(&self, nonce: &str) {
+        lock(&self.price).begin(nonce);
+    }
+
+    /// Drops capability and figures at once.
+    pub fn disconnect_price(&self) {
+        lock(&self.price).disconnect();
+    }
+
+    pub fn enable_price(&self, nonce: &str) -> bool {
+        lock(&self.price).enable(nonce)
+    }
+
+    /// Independent of alert deduplication and of the farming sequence.
+    pub fn accept_price(&self, reading: PriceState, now: Instant) -> bool {
+        lock(&self.price).accept(reading, now)
+    }
+
+    pub fn price_view(&self, now: Instant) -> PriceView {
+        lock(&self.price).view(now)
     }
 
     /// `true` the first time it is called; `false` on every call after, for the lifetime of

@@ -40,7 +40,7 @@ use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
 use crate::obsidian_launch::{should_launch, FirstConnectOutcome, LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{
-    build_alert_ack_line, build_bye_line, build_context_line, build_farming_sub_line, build_heartbeat_line, build_hello_line, is_usable_token,
+    build_alert_ack_line, build_bye_line, build_context_line, build_farming_sub_line, build_heartbeat_line, build_price_sub_line, build_hello_line, is_usable_token,
     parse_server_line, ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE,
     TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE, UPDATE_PLUGIN_MESSAGE,
 };
@@ -188,6 +188,14 @@ impl Session {
         Some(line)
     }
 
+    /// Same for the `price1` subscription, sent once and only after its `price_cap`.
+    pub fn subscribe_price(&mut self, now: Instant) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
+        let line = build_price_sub_line(&self.nonce, self.next_seq)?;
+        self.take_seq(now);
+        Some(line)
+    }
+
     /// Serialize an entire bounded batch before advancing the shared TCP sequence.
     /// A framing/numbering failure sends none of the batch.
     fn live_lines(&mut self, frames: Vec<serde_json::Value>, now: Instant) -> Option<Vec<String>> {
@@ -314,6 +322,7 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             Err(_) => ConnectionEnd::default(),
         };
         state.disconnect_farming();
+        state.disconnect_price();
         if !matches!(state.live_status(), crate::live::LiveStatus::NotNegotiated | crate::live::LiveStatus::StorageUnavailable | crate::live::LiveStatus::Conflict) {
             state.set_live_status(crate::live::LiveStatus::Unavailable);
         }
@@ -368,6 +377,7 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
         state.set_status(Status::WaitingForPlugin);
     }
     state.disconnect_farming();
+    state.disconnect_price();
 }
 
 fn connect(port: u16) -> std::io::Result<TcpStream> {
@@ -507,6 +517,7 @@ fn handle_line(
             // keeps the nonce and sequence the plugin is actually checking.
             if session.is_none() {
                 state.begin_farming_connection(&welcome.nonce);
+                state.begin_price_connection(&welcome.nonce);
                 state.set_live_status(crate::live::LiveStatus::NotNegotiated);
                 let mut new = Session::new(welcome, Instant::now());
                 // Welcome's public DTO stays backward compatible; live is v3-only on the wire.
@@ -539,6 +550,17 @@ fn handle_line(
         }
         ServerLine::FarmingState(reading) => {
             if session.is_some() { state.accept_farming(reading, Instant::now()); }
+        }
+        ServerLine::PriceCapability(nonce) => {
+            let Some(session) = session.as_mut() else { return None };
+            if state.enable_price(&nonce) {
+                if let Some(line) = session.subscribe_price(Instant::now()) {
+                    outgoing.push(line);
+                }
+            }
+        }
+        ServerLine::PriceState(reading) => {
+            if session.is_some() { state.accept_price(reading, Instant::now()); }
         }
         ServerLine::Live(reply) => {
             let Some(session) = session.as_mut() else { return None; };

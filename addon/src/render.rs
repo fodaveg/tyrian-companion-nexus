@@ -17,7 +17,8 @@ use std::sync::{Mutex, OnceLock};
 
 use nexus::imgui::{Condition, ProgressBar, StyleColor, StyleVar, TreeNodeFlags, Ui, Window};
 
-use tyrian_companion_nexus_core::farming::{FarmingError, Goal, MagicFindKind, Phase, Preparation, SlotSource};
+use tyrian_companion_nexus_core::quick_access::{PanelWindows, Shortcut};
+use tyrian_companion_nexus_core::farming::{show_inventory_status, FarmingError, Goal, MagicFindKind, Phase, Preparation, SlotSource};
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
@@ -33,7 +34,8 @@ struct Pending {
     token: String,
     /// Why the last paste or save was refused, until the next one that goes through.
     notice: Option<&'static str>,
-    show_farming_panel: bool,
+    /// Which of the addon's own windows are open; the panel flag is the persisted setting.
+    windows: PanelWindows,
     farming_english: bool,
     reset_farming_position: bool,
 }
@@ -45,13 +47,13 @@ static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 /// an API key from `settings.json`.
 pub fn init_pending(settings: &Settings, notice: Option<&'static str>) {
     let _ = PENDING.set(Mutex::new(Pending { port: i32::from(settings.port), token: settings.token.clone(), notice,
-        show_farming_panel: settings.show_farming_panel, farming_english: settings.farming_english,
+        windows: PanelWindows::from_settings(settings), farming_english: settings.farming_english,
         reset_farming_position: false }));
 }
 
 fn pending() -> &'static Mutex<Pending> {
     PENDING.get_or_init(|| Mutex::new(Pending { port: i32::from(DEFAULT_PORT), token: String::new(), notice: None,
-        show_farming_panel: false, farming_english: false, reset_farming_position: false }))
+        windows: PanelWindows::default(), farming_english: false, reset_farming_position: false }))
 }
 
 const GREEN: [f32; 4] = [0.45, 0.85, 0.45, 1.0];
@@ -151,7 +153,7 @@ pub fn options_render(ui: &Ui) {
                     if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
                         if let Err(error) =
                             settings::save(&dir, &Settings { port, token, open_obsidian_on_start, launch_app,
-                                show_farming_panel: pending.show_farming_panel, farming_english: pending.farming_english })
+                                show_farming_panel: pending.windows.show_panel, farming_english: pending.farming_english })
                         {
                             log::error!("failed to save settings: {error}");
                         }
@@ -205,7 +207,7 @@ pub fn options_render(ui: &Ui) {
                     token: shared.token(),
                     open_obsidian_on_start: open_on_start,
                     launch_app,
-                    show_farming_panel: panel.show_farming_panel,
+                    show_farming_panel: panel.windows.show_panel,
                     farming_english: panel.farming_english,
                 };
                 if let Err(error) = settings::save(&dir, &settings) {
@@ -222,8 +224,11 @@ pub fn options_render(ui: &Ui) {
     ui.separator();
     {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut changed = ui.checkbox("Show Labyrinth farming panel / Mostrar panel de Laberinto", &mut panel.show_farming_panel);
-        changed |= ui.checkbox("Farming panel in English / Panel en inglés", &mut panel.farming_english);
+        let mut changed = ui.checkbox("Show Labyrinth farming panel / Mostrar panel de Laberinto", &mut panel.windows.show_panel);
+        if ui.checkbox("Farming panel in English / Panel en inglés", &mut panel.farming_english) {
+            changed = true;
+            crate::quick_access::refresh_tooltips(panel.farming_english);
+        }
         if ui.button("Reset farming panel position / Restablecer posición") {
             panel.reset_farming_position = true;
         }
@@ -250,7 +255,7 @@ fn save_panel_settings(panel: &Pending) {
         let settings = Settings {
             port: shared.port(), token: shared.token(),
             open_obsidian_on_start: shared.open_obsidian_on_start(), launch_app: shared.launch_app(),
-            show_farming_panel: panel.show_farming_panel, farming_english: panel.farming_english,
+            show_farming_panel: panel.windows.show_panel, farming_english: panel.farming_english,
         };
         if let Err(error) = settings::save(&dir, &settings) { log::error!("failed to save settings: {error}"); }
     }
@@ -336,14 +341,54 @@ fn wallet_status(status: tyrian_companion_nexus_core::live::LiveStatus, coverage
     format!("{} ({})", translated(english, "Monedas: sin cobertura", "Currencies: no coverage"), translated(english, es, en))
 }
 
+/// The bag price block, between the rate and the character's slots. It paints exactly what
+/// `price::panel_lines` returns, which is nothing in most states.
+fn price_block(ui: &Ui, view: &tyrian_companion_nexus_core::price::PriceView, english: bool) {
+    let lines = tyrian_companion_nexus_core::price::panel_lines(view, english);
+    if lines.is_empty() { return; }
+    ui.separator();
+    for line in lines {
+        if line.warning { text_colored_wrapped(ui, ORANGE, &line.text); } else { ui.text_wrapped(&line.text); }
+    }
+}
+
+/// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
+/// input thread; only flips a window flag and, for the panel, saves the shared setting.
+pub fn activate_shortcut(shortcut: Shortcut) {
+    let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    shortcut.activate(&mut panel.windows);
+    if shortcut == Shortcut::Panel { save_panel_settings(&panel); }
+}
+
+/// Per-frame housekeeping and the addon's own Options window, opened from the quick access bar.
+/// Nexus has no call to open its Options window on an addon's section, so this window paints
+/// the very same content (`options_render`) and closes with its cross.
+pub fn options_window_render(ui: &Ui) {
+    let (english, mut opened) = {
+        let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (panel.farming_english, panel.windows.show_options)
+    };
+    crate::quick_access::register_pending(english);
+    if !opened { return; }
+    let scale = (ui.current_font_size() / 13.0).max(1.0);
+    Window::new(translated(english, "Tyrian Companion · Opciones###TyrianOptions", "Tyrian Companion · Options###TyrianOptions"))
+        .opened(&mut opened)
+        .position([120.0 * scale, 120.0 * scale], Condition::FirstUseEver)
+        .size([420.0 * scale, 480.0 * scale], Condition::FirstUseEver)
+        .build(ui, || options_render(ui));
+    if !opened {
+        pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).windows.show_options = false;
+    }
+}
+
 /// Optional native window. It only renders validated host snapshots, never reads the API,
 /// sends game input, starts/stops a session, or extrapolates a counter from stale data.
 pub fn farming_render(ui: &Ui) {
     let (mut opened, english, reset) = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !panel.show_farming_panel { return; }
+        if !panel.windows.show_panel { return; }
         let reset = std::mem::take(&mut panel.reset_farming_position);
-        (panel.show_farming_panel, panel.farming_english, reset)
+        (panel.windows.show_panel, panel.farming_english, reset)
     };
     let shared = state::shared();
     let view = shared.farming_view(std::time::Instant::now());
@@ -386,19 +431,25 @@ pub fn farming_render(ui: &Ui) {
                 ui.text_wrapped(format!("{rate} {}", tr("bolsas/h", "bags/h")));
                 if reading.lo.is_none() { ui.text_wrapped(tr("Ritmo aún no disponible", "Rate not available yet")); }
                 if !view.source_fresh() { ui.text_wrapped(tr("Último ritmo registrado", "Last recorded rate")); }
-                ui.text_wrapped(view.age.map_or_else(
-                    || tr("Sin lectura", "No reading").to_string(),
-                    |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),
-                ));
+                // Only when it reports a problem (`FarmingView::show_reading_age`).
+                if view.show_reading_age() {
+                    ui.text_wrapped(view.age.map_or_else(
+                        || tr("Sin lectura", "No reading").to_string(),
+                        |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),
+                    ));
+                }
+                price_block(ui, &shared.price_view(std::time::Instant::now()), english);
                 ui.separator();
                 ui.text_wrapped(format!("{}: {} {}", tr("Huecos del personaje", "Character bag slots"),
                     number(reading.slots), tr("libres", "free")));
                 if reading.slot_source == SlotSource::Recent {
                     ui.text_wrapped(tr("Personaje reciente", "Recent character"));
                 }
-                if let Some(age) = view.slot_age {
-                    ui.text_wrapped(format!("{} {age}s", tr("Lectura de huecos hace", "Slot reading ago:")));
-                } else { ui.text_wrapped(tr("Sin lectura de huecos", "No slot reading")); }
+                if view.show_reading_age() {
+                    if let Some(age) = view.slot_age {
+                        ui.text_wrapped(format!("{} {age}s", tr("Lectura de huecos hace", "Slot reading ago:")));
+                    } else { ui.text_wrapped(tr("Sin lectura de huecos", "No slot reading")); }
+                }
 
                 if reading.goal != Goal::None {
                     ui.separator();
@@ -459,7 +510,9 @@ pub fn farming_render(ui: &Ui) {
                 ui.text_wrapped(tr("Sin lectura", "No reading"));
             }
             ui.separator();
-            ui.text_wrapped(inventory_status(shared.live_status(), english));
+            if show_inventory_status(shared.live_status()) {
+                ui.text_wrapped(inventory_status(shared.live_status(), english));
+            }
             ui.text_wrapped(wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, english));
             ui.text_wrapped(tr("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"));
             ui.text_wrapped(if shared.connected() { tr("Conexión al host: conectado", "Host connection: connected") }
@@ -474,7 +527,7 @@ pub fn farming_render(ui: &Ui) {
     padding.pop();
     if !opened {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        panel.show_farming_panel = false;
+        panel.windows.show_panel = false;
         save_panel_settings(&panel);
     }
 }

@@ -27,6 +27,8 @@ mod inventory;
 #[cfg(windows)]
 mod obsidian_launch;
 #[cfg(windows)]
+mod quick_access;
+#[cfg(windows)]
 mod render;
 
 #[cfg(windows)]
@@ -109,6 +111,10 @@ fn load() {
     )
     .revert_on_unload();
     register_render(RenderType::Render, render!(|ui| render::farming_render(ui))).revert_on_unload();
+    register_render(RenderType::Render, render!(|ui| render::options_window_render(ui))).revert_on_unload();
+    // Icons in Nexus's quick access bar; the render callback above retries them until their
+    // textures are in. `unload` removes them.
+    quick_access::register_pending(settings.farming_english);
     register_wnd_proc(game_wnd_proc).revert_on_unload();
 
     let config = ClientConfig { client_version: CLIENT_VERSION.to_string(), instance: instance::new_instance_id() };
@@ -124,6 +130,7 @@ fn load() {
 #[cfg(windows)]
 fn unload() {
     log::info!("Tyrian Companion addon unloading");
+    quick_access::unregister();
     // Safety: see the comment in `load`. Stopping here blocks until the background thread
     // has sent its `bye` and exited, which is what makes it safe for the DLL to be unmapped
     // right after: no thread is left holding an `AddonApi` pointer from an unloaded module.
