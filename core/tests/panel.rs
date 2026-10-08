@@ -104,6 +104,9 @@ const REASONS: [Uncovered; 10] = [
 struct Case {
     /// The frame's instant. Tests that follow the reader over time move it; the rest leave it.
     now: Instant,
+    /// When the reader ran the cycle `bags` and `magic_find` are from. The frame's own instant
+    /// unless a test says the reading is older.
+    read_at: Option<Instant>,
     connection: Status,
     farming: FarmingView,
     price: PriceView,
@@ -116,8 +119,10 @@ struct Case {
 impl Case {
     /// Connected, measuring, a fresh price, and the frame of a live session of today.
     fn measuring() -> Self {
+        let now = Instant::now();
         Self {
-            now: Instant::now(),
+            now,
+            read_at: Some(now),
             connection: Status::Connected,
             farming: farming(Some(&farming_frame()), Duration::ZERO),
             price: price(Some(&price_frame("ok")), Duration::ZERO),
@@ -147,6 +152,7 @@ impl Case {
         panel::view(
             &PanelInput {
                 now: self.now,
+                read_at: self.read_at,
                 connection: self.connection,
                 farming: &self.farming,
                 price: &self.price,
@@ -320,22 +326,209 @@ fn a_reading_of_the_addon_only_counts_while_its_reader_is_sampling() {
         let view = case.view(false);
         assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 41 libres", "MF: 333%"), "{live:?}");
     }
-    for live in [LiveStatus::NotNegotiated, LiveStatus::UnsupportedBuild, LiveStatus::Unavailable, LiveStatus::Conflict, LiveStatus::StorageUnavailable] {
+    // The reader stopped: no negotiated source, an unsupported build, a source conflict, storage
+    // down. And whatever the live status says, no connection or the game closing.
+    let stopped = [
+        (Status::Connected, LiveStatus::NotNegotiated),
+        (Status::Connected, LiveStatus::UnsupportedBuild),
+        (Status::Connected, LiveStatus::Conflict),
+        (Status::Connected, LiveStatus::StorageUnavailable),
+        (Status::WaitingForPlugin, LiveStatus::Unavailable),
+        (Status::WaitingForPlugin, LiveStatus::Measuring),
+        (Status::GameExiting, LiveStatus::Measuring),
+    ];
+    for (connection, live) in stopped {
         let mut case = Case::sketch();
+        case.connection = connection;
         case.live = live;
         case.bags = bags(41, 160);
         case.magic_find = verified(300, 30.0, 53.0);
         let mut memory = PanelMemory::default();
         let view = case.view_with(&mut memory, false);
         // Back to the plugin's figures, and the tooltip says the reader is not sampling.
-        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{connection:?} {live:?}");
         assert_eq!(view.magic_find.tone, Tone::Muted);
         for cell in [&view.slots, &view.magic_find] {
-            assert!(has(cell, "Lectura del addon: sin muestreo en curso") && !has(cell, "verificado por el addon"), "{live:?}: {cell:?}");
+            assert!(has(cell, "Lectura del addon: sin muestreo en curso") && !has(cell, "verificado por el addon"), "{connection:?} {live:?}: {cell:?}");
         }
         assert_eq!(memory.magic_find_peak(), None, "a figure that is not painted is not a peak either");
         assert!(has(&case.view(true).slots, "Addon reading: not sampling now"));
     }
+}
+
+/// A reading is as old as the cycle that read it, not as the frame that paints it. The reader's
+/// diagnostics stay as they are until another cycle replaces them: across a plugin that is slow
+/// to confirm, and across a reconnection.
+#[test]
+fn a_reading_is_as_old_as_its_own_cycle() {
+    // The plugin is slow: no new cycle, the diagnostics still say `Read`, frame after frame.
+    let mut case = Case::sketch();
+    case.bags = bags(41, 160);
+    case.magic_find = verified(300, 30.0, 53.0);
+    let mut memory = PanelMemory::default();
+    let read_at = case.now;
+    let at = |case: &mut Case, memory: &mut PanelMemory, millis: u64| {
+        case.now = read_at + Duration::from_millis(millis);
+        case.view_with(memory, false)
+    };
+    for millis in [0, 500, 1_000, 1_999] {
+        let view = at(&mut case, &mut memory, millis);
+        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 41 libres", "MF: 383%"), "+{millis} ms");
+        assert!(!has(&view.slots, "Última lectura hace") && !has(&view.magic_find, "Última lectura hace"), "+{millis} ms");
+    }
+    // From two seconds on a cycle is missing: the same cells, and the tooltip says the age.
+    for (millis, seconds) in [(2_000, 2), (3_400, 3), (5_000, 5)] {
+        let view = at(&mut case, &mut memory, millis);
+        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 41 libres", "MF: 383%"), "+{millis} ms");
+        for cell in [&view.slots, &view.magic_find] {
+            assert!(has(cell, &format!("Última lectura hace {seconds} s")) && !has(cell, "sin cobertura"), "+{millis} ms: {cell:?}");
+        }
+    }
+    // Past the hold it is not painted, although the diagnostics have not changed.
+    let late = at(&mut case, &mut memory, 5_001);
+    assert_eq!((late.slots.text.as_str(), late.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    assert!(!has(&late.magic_find, "verificado por el addon"));
+
+    // After a reconnection the diagnostics are still those of the connection before, a minute
+    // old: neither painted as verified nor offered to the session's highest.
+    let mut reconnected = Case::sketch();
+    reconnected.bags = bags(41, 160);
+    reconnected.magic_find = verified(300, 30.0, 53.0);
+    reconnected.read_at = Some(reconnected.now);
+    reconnected.now += Duration::from_secs(60);
+    let mut memory = PanelMemory::default();
+    let view = reconnected.view_with(&mut memory, false);
+    assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    assert_eq!(memory.magic_find_peak(), None);
+    // And a `Read` with no instant at all is not a reading: nothing says when it was read.
+    reconnected.read_at = None;
+    assert_eq!(reconnected.view_with(&mut memory, false).magic_find.text, "MF: 333% parcial");
+    assert_eq!(memory.magic_find_peak(), None);
+}
+
+fn session(phase: &str, elapsed: i32) -> FarmingView {
+    let mut frame = sketch_frame();
+    frame["phase"] = json!(phase);
+    frame["elapsed"] = json!(elapsed);
+    farming(Some(&frame), Duration::ZERO)
+}
+
+/// Case A of the review: session A reaches 383, the panel is closed, A ends and B starts, and
+/// the panel is reopened in B with 333. Closed, the panel only observes; that has to be enough
+/// for B not to inherit A's highest.
+#[test]
+fn a_session_that_starts_while_the_panel_is_closed_does_not_inherit_the_highest() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 100);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // Closed: nothing is painted, the memory is only kept up to date.
+    let observe = |panel: &mut Follow, seconds: u64, farming: FarmingView| {
+        panel.case.farming = farming;
+        panel.case.now = panel.start + Duration::from_secs(seconds);
+        panel.case.read_at = Some(panel.case.now);
+        panel.case.magic_find = verified(300, 30.0, 3.0);
+        panel::observe(
+            &PanelInput {
+                now: panel.case.now,
+                read_at: panel.case.read_at,
+                connection: panel.case.connection,
+                farming: &panel.case.farming,
+                price: &panel.case.price,
+                live: panel.case.live,
+                wallet: panel.case.wallet,
+                bags: panel.case.bags,
+                magic_find: panel.case.magic_find,
+            },
+            &mut panel.memory,
+        );
+    };
+    observe(&mut panel, 5, session("complete", 105));
+    observe(&mut panel, 10, session("active", 2));
+    observe(&mut panel, 15, session("active", 7));
+    // Reopened an hour into B, longer than A ever was: only what was observed tells them apart.
+    panel.case.farming = session("active", 3600);
+    let reopened = panel.at(3600, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((reopened.text.as_str(), reopened.tone), ("MF: 333%", Tone::Normal), "{reopened:?}");
+    assert!(!has(&reopened, "Bajó") && !has(&reopened, "383"), "{reopened:?}");
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
+}
+
+/// Case B of the review: the host sends a frame every 5 s, so a `starting` shorter than that is
+/// never seen. Another session is one that starts running after one that was not, or one whose
+/// declared duration goes back.
+#[test]
+fn another_session_is_noticed_without_a_starting_frame() {
+    // `complete` and then `active`.
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 1800);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    panel.case.farming = session("complete", 1805);
+    panel.at(5, bags(41, 160), verified(300, 30.0, 53.0));
+    panel.case.farming = session("active", 3);
+    let next = panel.at(10, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((next.text.as_str(), next.tone), ("MF: 333%", Tone::Normal), "{next:?}");
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
+
+    // `active` and then `active`: one stopped and the other started between two frames. Only the
+    // declared duration says so, whether the one before was long or short.
+    for before in [1800, 40] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.case.farming = session("active", before);
+        panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+        panel.case.farming = session("active", 4);
+        let next = panel.at(5, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+        assert_eq!((next.text.as_str(), next.tone), ("MF: 333%", Tone::Normal), "after {before} s: {next:?}");
+        assert_eq!(panel.memory.magic_find_peak(), Some(333.0), "after {before} s");
+    }
+
+    // A duration that is only corrected back a little is the same session: the highest stays.
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 1800);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    panel.case.farming = session("active", 1790);
+    let same = panel.at(5, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!(same.tone, Tone::Warning, "{same:?}");
+    assert!(has(&same, "Bajó 50 puntos respecto al máximo de la sesión (383%)"));
+
+    // A lost connection: what happened meanwhile is not known, so the highest is not kept.
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    panel.case.connection = Status::WaitingForPlugin;
+    panel.at(5, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    panel.case.connection = Status::Connected;
+    assert_eq!(panel.at(10, bags(41, 160), verified(300, 30.0, 3.0)).magic_find.tone, Tone::Normal);
+}
+
+/// The highest is the session's while it measures: a reading after it is complete is compared
+/// with it and does not become it.
+#[test]
+fn a_complete_session_does_not_feed_the_highest() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 1800);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
+    for phase in ["complete", "abandoned", "error"] {
+        panel.case.farming = session(phase, 1805);
+        let after = panel.at(5, bags(41, 160), verified(300, 30.0, 70.0)).magic_find;
+        assert_eq!((after.text.as_str(), after.tone), ("MF: 400%", Tone::Normal), "{phase}");
+        assert_eq!(panel.memory.magic_find_peak(), Some(333.0), "{phase}");
+    }
+    // It is still what a later reading of that session is compared with.
+    panel.case.farming = session("complete", 1805);
+    let lower = panel.at(6, bags(41, 160), verified(300, 0.0, 3.0)).magic_find;
+    assert_eq!(lower.tone, Tone::Warning);
+    assert!(has(&lower, "Bajó 30 puntos respecto al máximo de la sesión (333%)"), "{lower:?}");
+    // And it only goes up: a fall too small to write does not lower it step by step.
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    for (step, effects) in [2.97f32, 2.94, 2.91, 2.88].into_iter().enumerate() {
+        panel.at(1 + step as u64, bags(41, 160), verified(300, 30.0, effects));
+        assert_eq!(panel.memory.magic_find_peak(), Some(333.0), "{effects}");
+    }
+    let drifted = panel.at(6, bags(41, 160), verified(300, 30.0, 2.85)).magic_find;
+    assert_eq!(drifted.tone, Tone::Warning, "0.15 below the highest in steps of 0.03: {drifted:?}");
 }
 
 /// The plugin's Magic Find is a value declared when the session started, or a partial one. It
@@ -482,6 +675,8 @@ impl Follow {
     /// The panel `seconds` after the start, with this cycle's output of the two readers.
     fn at(&mut self, seconds: u64, bags: BagCoverage, magic_find: MagicFindCoverage) -> PanelView {
         self.case.now = self.start + Duration::from_secs(seconds);
+        // The reader ran a cycle in this second, and this is what it returned.
+        self.case.read_at = Some(self.case.now);
         self.case.bags = bags;
         self.case.magic_find = magic_find;
         self.case.view_with(&mut self.memory, false)
@@ -567,22 +762,72 @@ fn six_seconds_without_a_reading_let_go_of_it() {
 /// what was held does not come back when sampling does.
 #[test]
 fn outside_sampling_a_held_reading_is_let_go_at_once() {
-    for live in [LiveStatus::NotNegotiated, LiveStatus::UnsupportedBuild, LiveStatus::Unavailable, LiveStatus::Conflict, LiveStatus::StorageUnavailable] {
+    // The reader really stopped: by its own status, or because the connection is gone or the
+    // game is closing, whatever that status still says.
+    let stopped = [
+        (Status::Connected, LiveStatus::NotNegotiated),
+        (Status::Connected, LiveStatus::UnsupportedBuild),
+        (Status::Connected, LiveStatus::Conflict),
+        (Status::Connected, LiveStatus::StorageUnavailable),
+        (Status::WaitingForPlugin, LiveStatus::Unavailable),
+        (Status::GameExiting, LiveStatus::Measuring),
+    ];
+    for (connection, live) in stopped {
         let mut panel = Follow::new(Case::sketch());
         panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
         let (no_bags, no_magic_find) = failed(Uncovered::Changed);
         assert_eq!(panel.at(1, no_bags, no_magic_find).magic_find.text, "MF: 383%", "held while sampling");
+        panel.case.connection = connection;
         panel.case.live = live;
         let stopped = panel.at(1, no_bags, no_magic_find);
-        assert_eq!((stopped.slots.text.as_str(), stopped.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+        assert_eq!((stopped.slots.text.as_str(), stopped.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{connection:?} {live:?}");
         assert!(has(&stopped.magic_find, "Lectura del addon: sin muestreo en curso") && !has(&stopped.magic_find, "Última lectura hace"));
         // Even the reader's own last figures are not painted then, and are not kept either.
         let stale = panel.at(2, bags(41, 160), verified(300, 30.0, 53.0));
-        assert_eq!(stale.magic_find.text, "MF: 333% parcial", "{live:?}");
+        assert_eq!(stale.magic_find.text, "MF: 333% parcial", "{connection:?} {live:?}");
+        panel.case.connection = Status::Connected;
         panel.case.live = LiveStatus::Measuring;
         let resumed = panel.at(2, no_bags, no_magic_find);
-        assert_eq!((resumed.slots.text.as_str(), resumed.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+        assert_eq!((resumed.slots.text.as_str(), resumed.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{connection:?} {live:?}");
     }
+}
+
+/// The cycle that fails as a whole. When the copy of the inventory fails (it changed under the
+/// copy, could not be read, or ran out of time) the cycle ends before the bags and the Magic
+/// Find are read: the reader reports neither, and the live status is `Unavailable` for the
+/// second until the next capture. That is one failed capture, not a reader that stopped, and the
+/// two lines hold through it like through any other failed cycle.
+#[test]
+fn a_capture_that_fails_as_a_whole_changes_neither_cell() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(8, 160), verified(300, 30.0, 53.0));
+    let before = panel.at(1, bags(8, 160), verified(300, 30.0, 3.0));
+    assert_eq!((before.slots.text.as_str(), before.slots.tone), ("Huecos: 8 libres", Tone::Warning));
+    assert_eq!((before.magic_find.text.as_str(), before.magic_find.tone), ("MF: 333%", Tone::Warning));
+    // What `Channel::capture` leaves after `Err(ReadError::Changed)`, and what the adapter
+    // publishes for a cycle that never reached the two readers.
+    panel.case.live = LiveStatus::Unavailable;
+    let during = panel.at(2, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    for (held, was) in [(&during.slots, &before.slots), (&during.magic_find, &before.magic_find)] {
+        assert_eq!((held.text.as_str(), held.tone), (was.text.as_str(), was.tone), "{held:?}");
+        assert!(has(held, "Última lectura hace 1 s") && has(held, "Lectura del addon: la última captura falló"), "{held:?}");
+        assert!(was.tooltip.iter().all(|line| held.tooltip.contains(line)), "{held:?}");
+        assert!(!has(held, "plugin") && !has(held, "sin muestreo"), "{held:?}");
+    }
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // The next capture opens a new epoch and the readers are back.
+    panel.case.live = LiveStatus::Waiting;
+    let after = panel.at(3, bags(8, 160), verified(300, 30.0, 3.0));
+    assert_eq!((after.slots.clone(), after.magic_find.clone()), (before.slots.clone(), before.magic_find.clone()));
+    // If the captures keep failing the hold runs out like any other, and says the capture failed.
+    panel.case.live = LiveStatus::Unavailable;
+    for seconds in 4..=8 {
+        assert_eq!(panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead).magic_find.text, "MF: 333%", "+{seconds} s");
+    }
+    let gone = panel.at(9, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((gone.slots.text.as_str(), gone.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    assert!(has(&gone.magic_find, "Lectura del addon: la última captura falló") && !has(&gone.magic_find, "Última lectura hace"), "{:?}", gone.magic_find);
+    assert!(has(&panel.case.view(true).slots, "Addon reading: the last capture failed"));
 }
 
 #[test]
@@ -623,6 +868,20 @@ fn a_held_reading_does_not_move_the_session_peak() {
     let held = idle.at(1, no_bags, no_magic_find).magic_find;
     assert_eq!((held.text.as_str(), held.tone), ("MF: 383%", Tone::Normal));
     assert_eq!(idle.memory.magic_find_peak(), None);
+    // A held reading HIGHER than the highest does not become it. Read while the session was
+    // still preparing, which has no highest; held into the first measuring frame, where a
+    // reading the reader had just returned would have been taken.
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("starting", 0);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 70.0));
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    panel.case.farming = session("active", 1);
+    let held = panel.at(1, no_bags, no_magic_find).magic_find;
+    assert_eq!((held.text.as_str(), held.tone), ("MF: 400%", Tone::Normal));
+    assert_eq!(panel.memory.magic_find_peak(), None, "a held 400 is not the session's highest");
+    let read = panel.at(2, bags(41, 160), verified(300, 30.0, 20.0)).magic_find;
+    assert_eq!((read.text.as_str(), read.tone), ("MF: 350%", Tone::Normal), "{read:?}");
+    assert_eq!(panel.memory.magic_find_peak(), Some(350.0));
 }
 
 #[test]
@@ -1111,8 +1370,10 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                             if read > 0 && connection != Status::Connected {
                                 continue;
                             }
+                            let frame_now = Instant::now();
                             let case = Case {
-                                now: Instant::now(),
+                                now: frame_now,
+                                read_at: Some(frame_now),
                                 connection,
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },

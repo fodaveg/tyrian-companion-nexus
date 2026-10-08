@@ -114,21 +114,25 @@ pub fn options_render(ui: &Ui) {
     let (color, text) = status_line(shared.status());
     text_colored_wrapped(ui, color, text);
     ui.text_wrapped(panel::inventory_status(shared.live_status(), true));
-    ui.text_wrapped(panel::wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, true));
-    ui.text_wrapped("Verified Magic Find: no coverage");
+    let (diagnostics, read_at) = shared.inventory_reading();
+    ui.text_wrapped(panel::wallet_status(shared.live_status(), diagnostics.wallet, true));
+    // What the addon's two readers got in their last pass, always in sight: the outcome with
+    // its exact reason and what it read, and how long ago that pass was. This is the reader's
+    // raw output; the panel may still be painting a reading it holds.
+    ui.text_wrapped(panel::bags_diagnostic(diagnostics.bags, diagnostics.bag_bytes, diagnostics.bag_reads));
+    ui.text_wrapped(panel::magic_find_diagnostic(diagnostics.magic_find, diagnostics.magic_find_bytes, diagnostics.magic_find_reads));
+    ui.text_wrapped(match read_at {
+        Some(at) => format!("Reader: last pass {} s ago", at.elapsed().as_secs()),
+        None => "Reader: no pass yet".to_string(),
+    });
     if ui.collapsing_header("Reader diagnostics", TreeNodeFlags::empty()) {
         ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
         ui.text_wrapped(format!("Supported build SHA-256: {}", tyrian_companion_nexus_core::inventory::BUILD_SHA256));
-        let diagnostics = shared.inventory_diagnostics();
         ui.text_wrapped(if diagnostics.owner_verified { "Inventory owner: verified" } else { "Inventory owner: not verified" });
         ui.text_wrapped(format!("Own threads: {} / 128; positions: {} / 640", diagnostics.threads, diagnostics.positions));
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
         ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
             tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
-        // The last pass of the two readers the panel takes its slots and Magic Find from: the
-        // outcome with its exact reason, and what it read. The readers do not time themselves.
-        ui.text_wrapped(panel::bags_diagnostic(diagnostics.bags, diagnostics.bag_bytes, diagnostics.bag_reads));
-        ui.text_wrapped(panel::magic_find_diagnostic(diagnostics.magic_find, diagnostics.magic_find_bytes, diagnostics.magic_find_reads));
         if let Some(context) = shared.live_context() {
             ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
         }
@@ -382,35 +386,37 @@ struct BarClicks {
 /// button. Its width, and so the window's, is reserved from `panel::width_samples`, not from
 /// what the cells say now, so nothing moves when a text changes.
 pub fn farming_render(ui: &Ui) {
-    let (windows, english, reset) = {
-        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !panel.windows.show_panel { return; }
-        let reset = std::mem::take(&mut panel.reset_farming_position);
-        (panel.windows, panel.farming_english, reset)
-    };
     let shared = state::shared();
     let now = std::time::Instant::now();
     let (farming, price) = (shared.farming_view(now), shared.price_view(now));
-    let diagnostics = shared.inventory_diagnostics();
-    let view = {
-        let mut memory = PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        panel::view(
-            &PanelInput {
-                now,
-                connection: shared.status(),
-                farming: &farming,
-                price: &price,
-                live: shared.live_status(),
-                wallet: diagnostics.wallet,
-                // What the addon's own reader got in its last cycle. Only a `Read` is painted
-                // as verified; otherwise the lines use what the plugin sends in `farm1`.
-                bags: diagnostics.bags,
-                magic_find: diagnostics.magic_find,
-            },
-            &mut memory,
-            english,
-        )
+    let (diagnostics, read_at) = shared.inventory_reading();
+    let input = PanelInput {
+        now,
+        // The instant of the reader's cycle these diagnostics are from: a reading is as old as
+        // that, not as this frame.
+        read_at,
+        connection: shared.status(),
+        farming: &farming,
+        price: &price,
+        live: shared.live_status(),
+        wallet: diagnostics.wallet,
+        // What the addon's own reader got in its last cycle. Only a `Read` is painted as
+        // verified; otherwise the lines use what the plugin sends in `farm1`.
+        bags: diagnostics.bags,
+        magic_find: diagnostics.magic_find,
     };
+    let (windows, english, reset) = {
+        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !panel.windows.show_panel {
+            // Closed, the panel still follows the session: a session that ends and another
+            // that starts meanwhile must not be one session to its memory when it is reopened.
+            panel::observe(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            return;
+        }
+        let reset = std::mem::take(&mut panel.reset_farming_position);
+        (panel.windows, panel.farming_english, reset)
+    };
+    let view = panel::view(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), english);
     let samples = panel::width_samples(english);
     let scale = (ui.current_font_size() / 13.0).max(1.0);
     let tr = |es, en| translated(english, es, en);

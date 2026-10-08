@@ -83,7 +83,10 @@ pub struct SharedState {
     price: Mutex<PriceFeed>,
     live_status: Mutex<crate::live::LiveStatus>,
     live_context: Mutex<Option<crate::protocol::GameContext>>,
-    inventory_diagnostics: Mutex<crate::inventory::Diagnostics>,
+    /// The last capture's diagnostics and when that capture ran. They only change when a
+    /// capture runs, so the instant is what tells a reading of now from one that is still here
+    /// because nothing replaced it.
+    inventory_diagnostics: Mutex<(crate::inventory::Diagnostics, Option<Instant>)>,
     /// Override of the wait before `live_open` is retried after a `source_conflict`; `None` keeps
     /// `live::CONFLICT_RETRY_INTERVAL`. Only tests set it.
     live_conflict_retry: Mutex<Option<std::time::Duration>>,
@@ -124,7 +127,7 @@ impl SharedState {
             price: Mutex::new(PriceFeed::default()),
             live_status: Mutex::new(crate::live::LiveStatus::NotNegotiated),
             live_context: Mutex::new(None),
-            inventory_diagnostics: Mutex::new(crate::inventory::Diagnostics::default()),
+            inventory_diagnostics: Mutex::new((crate::inventory::Diagnostics::default(), None)),
             live_conflict_retry: Mutex::new(None),
             open_obsidian_on_start: AtomicBool::new(true),
             launch_app: Mutex::new(LaunchApp::default()),
@@ -142,8 +145,12 @@ impl SharedState {
     pub fn live_conflict_retry(&self) -> Option<std::time::Duration> { *lock(&self.live_conflict_retry) }
     pub fn set_live_conflict_retry(&self, value: Option<std::time::Duration>) { *lock(&self.live_conflict_retry) = value; }
     /// Counters from the last bounded capture, without raw pointers or inventory rows.
-    pub fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { *lock(&self.inventory_diagnostics) }
-    pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics) { *lock(&self.inventory_diagnostics) = value; }
+    pub fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { lock(&self.inventory_diagnostics).0 }
+    /// The same diagnostics with the instant of the capture they describe; `None` before the
+    /// first one. Read together, so the pair is always of one capture.
+    pub fn inventory_reading(&self) -> (crate::inventory::Diagnostics, Option<Instant>) { *lock(&self.inventory_diagnostics) }
+    /// `at` is when the capture ran, on the caller's monotonic clock.
+    pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics, at: Instant) { *lock(&self.inventory_diagnostics) = (value, Some(at)); }
 
     pub fn port(&self) -> u16 {
         self.port.load(Ordering::Relaxed)

@@ -470,7 +470,7 @@ fn serve(
                 else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) {
                     let sample = host.read_inventory(stop);
                     if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
-                    state.set_inventory_diagnostics(host.inventory_diagnostics());
+                    state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());
                     let captured_at = Instant::now();
                     let reading = host.read_game();
                     let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
