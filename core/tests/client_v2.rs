@@ -360,13 +360,60 @@ fn start_client_launching(
     (state, host, handle)
 }
 
-/// A loopback port with nobody listening on it: binding then dropping the listener frees the
-/// port back to the OS, so a `connect()` to it comes back refused almost at once, the same
-/// signal H18.27 measured for "Obsidian is closed" (see `docs/audit/sonda-h18-27-...` in the
-/// `tyrian-companion` repo).
+/// The range this host serves a `bind` to port 0 from, which is where every [`FakePlugin`] gets
+/// its port. Linux says it in `/proc`; elsewhere it is taken to be the IANA dynamic range, which
+/// is what Windows and macOS use.
+fn ephemeral_ports() -> (u16, u16) {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|text| {
+            let mut bounds = text.split_whitespace().map(str::parse::<u16>);
+            Some((bounds.next()?.ok()?, bounds.next()?.ok()?))
+        })
+        .unwrap_or((49152, 65535))
+}
+
+/// A loopback port with nobody listening on it, so a `connect()` to it comes back refused almost
+/// at once, the same signal H18.27 measured for "Obsidian is closed" (see
+/// `docs/audit/sonda-h18-27-...` in the `tyrian-companion` repo).
+///
+/// It is the first port outside [`ephemeral_ports`] that refuses a connection. It used to be a
+/// port of that range, bound and freed at once, and four tests leave a client retrying theirs:
+/// the OS was free to give that same port to the [`FakePlugin`] of another test, here or in
+/// another run of this binary at the same time. Then the retrying client walked into a plugin
+/// that expected nobody, and, the other way round, a "refused" first connection was accepted
+/// and launched nothing. A port the OS never gives to a `bind` to port 0 cannot collide in
+/// either direction; two tests sharing it only see each other's refusals.
 fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    listener.local_addr().unwrap().port()
+    let (low, high) = ephemeral_ports();
+    let refuses = |port: &u16| {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
+        matches!(TcpStream::connect_timeout(&address, Duration::from_secs(1)), Err(error) if error.kind() == ErrorKind::ConnectionRefused)
+    };
+    // The unprivileged ports just under the range first, then the ones over it. A port
+    // something of this machine listens on is skipped; 64 of them are more than enough.
+    (1024..low)
+        .rev()
+        .chain(high.saturating_add(1)..=u16::MAX)
+        .filter(|port| !(low..=high).contains(port))
+        .take(64)
+        .find(refuses)
+        .unwrap_or_else(|| panic!("no closed loopback port next to the ephemeral range {low}-{high}"))
+}
+
+/// The control for [`closed_port`]: the port a client is left retrying must not be one the OS
+/// can hand to a [`FakePlugin`], of this test binary or of another run of it.
+#[test]
+fn a_closed_port_is_never_one_a_fake_plugin_can_be_given() {
+    let (low, high) = ephemeral_ports();
+    let closed = closed_port();
+    assert!(!(low..=high).contains(&closed), "closed port {closed} is inside {low}-{high}, where bind(0) is served from");
+    // And the range is the right one for this host: that is where the plugins really land.
+    for _ in 0..64 {
+        let port = FakePlugin::start().port();
+        assert!((low..=high).contains(&port), "a fake plugin got {port}, outside {low}-{high}");
+        assert_ne!(port, closed);
+    }
 }
 
 // --- Scenarios ---
