@@ -232,6 +232,31 @@ fn stack_quantity<M: Memory>(r: &mut Reader<M>, base: u64, stack: u64) -> Result
     Ok(value as u32)
 }
 
+/// The rule of [`Reader::pointer`] for a pointer that arrived inside a wider copy.
+fn pointer_value(value: u64) -> Result<u64, ReadError> {
+    if value != 0 && !(0x10000..=MAX_POINTER).contains(&value) {
+        return Err(ReadError::Bounds);
+    }
+    Ok(value)
+}
+/// A little-endian field of an owned copy. A copy too short for its field fails closed.
+fn qword(bytes: &[u8], offset: usize) -> Result<u64, ReadError> {
+    bytes
+        .get(offset..)
+        .and_then(|rest| rest.first_chunk::<8>())
+        .map(|field| u64::from_le_bytes(*field))
+        .ok_or(ReadError::Bounds)
+}
+/// Copy the whole position matrix in exact reads of whole pointers, at most 512 of them a
+/// read. The caller has already held `count` to [`MAX_POSITIONS`].
+fn positions<M: Memory>(r: &mut Reader<M>, array: u64, count: u64) -> Result<Vec<u8>, ReadError> {
+    let mut bytes = vec![0u8; count as usize * 8];
+    for (index, part) in bytes.chunks_mut(4096).enumerate() {
+        r.read_into(array + (index * 4096) as u64, part)?;
+    }
+    Ok(bytes)
+}
+
 /// Read only the owner's location3 matrix (C8/D0/D4), never the location4 A8 matrix.
 /// Sparse itemcontext is resolved by instance index, never scanned to find an item.
 pub fn inventory_snapshot<M: Memory>(
@@ -275,16 +300,18 @@ pub fn inventory_snapshot<M: Memory>(
         return Err(ReadError::Bounds);
     }
     let item_array = r.pointer(itemctx + 0x30)?;
-    let mut slots = Vec::with_capacity(count as usize);
+    // The matrix is copied whole before any item is followed and whole again once they have
+    // all been read: every position, occupied or not, must hold at the end what it held
+    // before the first item was read.
+    let matrix = positions(r, array, count)?;
     let mut checked = Vec::with_capacity(count as usize);
     let mut excluded = Vec::with_capacity(count as usize);
     let mut seen = BTreeSet::new();
     let mut quantities: BTreeMap<u32, u32> = BTreeMap::new();
     let mut unsupported = BTreeSet::new();
     let mut unknown = 0;
-    for slot in 0..count {
-        let item = r.pointer(array + slot * 8)?;
-        slots.push(item);
+    for position in matrix.chunks_exact(8) {
+        let item = pointer_value(qword(position, 0)?)?;
         if item == 0 {
             continue;
         }
@@ -340,8 +367,9 @@ pub fn inventory_snapshot<M: Memory>(
             return Err(ReadError::Changed);
         }
     }
-    for (slot, item) in slots.into_iter().enumerate() {
-        if r.pointer(array + slot as u64 * 8)? != item {
+    let again = positions(r, array, count)?;
+    for (now, before) in again.chunks_exact(8).zip(matrix.chunks_exact(8)) {
+        if pointer_value(qword(now, 0)?)? != qword(before, 0)? {
             return Err(ReadError::Changed);
         }
     }

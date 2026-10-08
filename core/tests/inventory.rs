@@ -472,7 +472,10 @@ fn a_position_that_changes_after_its_copy_rejects_the_capture() {
     let m = fixture(570).racing(SLOTS + 8, 2, 0x1234, 8);
     assert_eq!(snapshot(m), Err(ReadError::Bounds));
     // The change may come at any moment of the pass: here while the item's quantity is read.
-    for (target, value) in [(SLOTS, 0), (SLOTS, 0x117000)] {
+    // The last one is a position the pass has not reached yet. The matrix is copied whole
+    // before the first item, so it is a change like any other; a reader that took each
+    // position in its turn would have followed the new pointer instead.
+    for (target, value) in [(SLOTS, 0), (SLOTS, 0x117000), (SLOTS + 8 * 520, 0x117000)] {
         let mut m = fixture(570);
         m.race = Some(Race {
             on: ITEM + 0xa0,
@@ -483,6 +486,33 @@ fn a_position_that_changes_after_its_copy_rejects_the_capture() {
         });
         assert_eq!(snapshot(m), Err(ReadError::Changed), "{target:x}");
     }
+}
+#[test]
+fn the_matrix_is_copied_whole_in_two_reads_and_a_part_that_fails_gives_no_sample() {
+    // 570 positions do not fit one read: the stack in the last one is still found.
+    let mut m = fixture(570);
+    m.put(SLOTS, 0, 8);
+    m.put(SLOTS + 8 * 569, ITEM, 8);
+    let mut r = Reader::new(&mut m);
+    let s = inventory_snapshot(&mut r, profile(), CTX).unwrap();
+    assert_eq!(s.quantities, BTreeMap::from([(12147, 3)]));
+    assert_eq!(s.positions, 570);
+    let copies: Vec<_> = (m.calls.iter())
+        .filter(|(address, _)| (SLOTS..SLOTS + 570 * 8).contains(address))
+        .collect();
+    assert_eq!(
+        copies,
+        [
+            &(SLOTS, 4096),
+            &(SLOTS + 4096, 464),
+            &(SLOTS, 4096),
+            &(SLOTS + 4096, 464)
+        ]
+    );
+    // Nothing is readable where the second read of this matrix starts.
+    let mut m = fixture(570);
+    m.put(INV + 0xc8, 0x7ff800, 8);
+    assert_eq!(snapshot(m), Err(ReadError::ReadFailed));
 }
 #[test]
 fn conditional_profiles_true_and_certified_false() {
@@ -602,10 +632,10 @@ fn observed_size_dense_conditional_inventory_fits_cycle_budget_and_excess_fails_
 #[test]
 fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
     for (occupied, branch, reads, bytes) in [
-        (0, Branch::Common, 1_057, 8_416),
-        (313, Branch::Common, 12_638, 82_910),
-        (512, Branch::Common, 20_001, 130_272),
-        (313, Branch::Conditional, 17_646, 112_958),
+        (0, Branch::Common, 35, 8_416),
+        (313, Branch::Common, 11_616, 82_910),
+        (512, Branch::Common, 18_979, 130_272),
+        (313, Branch::Conditional, 16_624, 112_958),
     ] {
         let (result, asked_reads, asked_bytes) = pass(dense(512, occupied, branch));
         let snapshot = result.unwrap();
