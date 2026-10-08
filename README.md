@@ -662,25 +662,53 @@ A cycle of the reader that comes back without a figure does not make the line bl
 **holds the last verified reading for 5 seconds** (`panel::READING_HOLD`): while the reader
 keeps returning none, the cell stays exactly as it was, the same figure in the same colour,
 and only its tooltip changes, adding "Last reading N s ago" and the reason there is no new
-one. After 5 seconds without a reading the line falls back as above. The hold only applies
-while the reader is sampling: outside sampling it is dropped at once and does not come back,
-and a session that starts holds nothing of what was read before it. The session's highest
-Magic Find is fed only by readings the reader returned, never by one that is being held.
+one. After 5 seconds without a reading the line falls back as above. Two kinds of failed
+cycle are held through:
 
-In Options, under "Reader diagnostics", two lines give each reader's last pass, for a
-screenshot when a figure is missing:
+- one of the two readers has no figure (`Changed`, `Deadline`, `ReadFailed`…), and
+- the whole capture fails before they run, because the copy of the inventory changed under
+  it, could not be read or ran out of time. The inventory status is then "reading unavailable"
+  for the second until the next capture, and the tooltip says "the last capture failed".
+
+A reading is as old as the cycle that read it, not as the frame that paints it. The reader's
+output only changes when a cycle runs, so the instant of that cycle travels with it
+(`SharedState::inventory_reading`): the 5 seconds count from there, and from 2 seconds on the
+tooltip says the age even though the reader's last word was a figure. That is what a plugin
+slow to confirm a sample looks like, and it is why the figures of a connection before the
+current one, still in the reader's output after a reconnection, are not painted.
+
+When the reader has really stopped the reading is dropped at once and does not come back: no
+connection, the game closing, no negotiated source, a source conflict, an unsupported build or
+storage down. A session that starts holds nothing of what was read before it.
+
+The session's highest Magic Find, the one a fall is measured against:
+
+- is fed only by a reading the reader has just returned, never by one that is being held, and
+  only while the session measures: not while it prepares, and not once it is complete;
+- only goes up;
+- is the session's. `farm1` carries no session id, so another session is one that starts
+  running after one that was not, or one whose declared duration goes back by more than a
+  minute or to under a minute; the host sends a frame every 5 seconds, so a short `starting`
+  may never be seen. A lost connection also ends it: what happened meanwhile is not known;
+- is followed while the panel is closed too, so reopening it in a later session does not show
+  a fall from an earlier one's highest.
+
+In Options, three lines give the two readers' last pass, always in sight, for a screenshot
+when a figure is missing:
 
 ```
 Bags: read, 97 used of 160, 63 free (5 bags in 8 bag slots); bytes: 1480 / 16384; reads: 37
 Magic Find: no coverage, Deadline (the read ran out of time); bytes: 41200 / 65536; reads: 603
+Reader: last pass 1 s ago
 ```
 
-They show the outcome with its exact reason and the bytes and reads of that pass against its
-budget, taken from the reader's own constants. These lines are the reader's raw last pass:
-they do not hold anything, so they show a failed cycle the panel is painting over. The readers
-do not time themselves, so there is no duration, but a pass cut by the clock has its own
-reason: `Deadline` means the 250 ms the two readers share, or the cycle's 750 ms, ran out,
-and `Bounds` that a pass asked for more than its byte budget.
+They show the outcome with its exact reason, the bytes and reads of that pass against its
+budget, taken from the reader's own constants, and how long ago the pass ran. These lines are
+the reader's raw last pass: they do not hold anything, so they show a failed cycle the panel
+is painting over, and "not read" for a capture that failed as a whole. The readers do not time
+themselves, so there is no duration, but a pass cut by the clock has its own reason: `Deadline`
+means the 250 ms the two readers share, or the cycle's 750 ms, ran out, and `Bounds` that a
+pass asked for more than its byte budget.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -813,8 +841,10 @@ Still to be looked at in the game; none of the panel's painting has been seen th
 - That the two readers work in this DLL at all: they have only run against fixtures. The
   tooltip of Slots against the inventory window's counter (used of total, and free), MF
   against the hero panel, and removing an effect to see MF fall, turn orange and name the
-  addend. If either line says `—` or `partial`, the two "Reader diagnostics" lines of Options
-  say why.
+  addend. If either line says `—` or `partial`, the "Bags", "Magic Find" and "Reader" lines
+  of Options say why.
+- How often a whole capture fails in normal play. The panel holds through it, but the
+  inventory status in the Status tooltip, and the dot while a session measures, do show it.
 - Whether the two readers fit the 250 ms they share. That figure is an estimate: if it is
   short, the diagnostics line of Magic Find says `Deadline`, and if it stays short for more
   than the 5 seconds the panel holds a reading, MF falls back to the plugin's figure or `—`.
@@ -908,10 +938,12 @@ covers what does not need a running game:
   alternate between them, slots and Magic Find from the addon's reader, from the plugin and
   from neither, every no-coverage reason of both readers with and without the plugin's
   figure, the fall of a verified Magic Find from the session's highest, the hold of the last
-  verified reading (one failed cycle changes neither cell, six seconds let go, outside
-  sampling at once, a new session, and that a held reading does not move the highest), the two
-  diagnostics lines of Options, and that every text the panel produces is covered by a width
-  reserved for its own cell. None of the painting itself is tested;
+  verified reading (one failed cycle or one capture that fails as a whole changes neither
+  cell, six seconds let go, a stopped reader at once, a new session, and that a held reading
+  does not move the highest), a reading being as old as its own cycle, another session noticed
+  with the panel closed and without a `starting` frame, a complete session not feeding the
+  highest, the two diagnostics lines of Options, and that every text the panel produces is
+  covered by a width reserved for its own cell. None of the painting itself is tested;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the
