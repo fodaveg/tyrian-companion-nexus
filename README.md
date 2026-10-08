@@ -356,7 +356,11 @@ without the position array, which adds 4 KiB per copy for 512 positions) and 29 
 Cadence is the cycle's: once per second, in this order — inventory, wallet, bags, Magic Find.
 The last two run **before** the cycle hands the inventory sample to the client, which then
 reads the game context again and seals the sample or, if the context changed meanwhile,
-discards it. So they cannot change what an inventory sample contains, but the time they take
+discards it, and with it what the two readers said in that cycle: the diagnostics the panel
+and Options read stay those of the cycle before. They used to be put there before that second
+look, so the bags and the Magic Find of a cycle during which the character changed were
+painted, and its Magic Find taken for the highest of the session, as a reading of the
+character the panel still had. So they cannot change what an inventory sample contains, but the time they take
 does widen the window in which a context change discards that copy. To bound it they share a
 deadline of their own: 250 ms from the moment they start, and never past the cycle's 750 ms.
 A pass cut by that clock is no coverage with the reason "deadline", distinct from a failed
@@ -371,6 +375,17 @@ pushed value is applied to every pushed record, not only to the two Magic Find t
 out-of-range record of another type leaves Magic Find without coverage; the display cap is
 not read, so the total is uncapped; a negative total is refused as out of bounds, although a
 negative addend is accepted.
+
+A known limit of both readers that does not fail closed: **whose** a reading is. Nothing in
+what they read names the character. The panel attributes a reading to the character the game
+context names (`NexusLink` and the Mumble Link), and the client keeps a cycle only if that
+context was the same before it and after it. That catches a change that falls inside a cycle.
+It does not catch a context that names one character while the memory is still, or already,
+another's for a whole cycle, before and after agreeing: such a reading would be painted as
+the named character's, and its Magic Find could become that character's highest of the
+session. Whether the game ever shows that, and for how long, has not been observed: it needs
+a character change in a running game with both in sight. No margin of time was put in for it,
+there being nothing to size one from.
 
 The evidence is the external read-only probes of
 `tyrian-companion/docs/audit/loot-bag-capacity-probe` and `loot-mf-probe`, run on Fedora with
@@ -813,7 +828,9 @@ The session's highest Magic Find, the one a fall is measured against:
   different character, the highest of the one that was being played is put away under its
   name and the one that comes in gets back its own, or starts one if it has none: A's
   highest is still there after playing B, and B's is never A's. Nothing read of the
-  character before is painted as the new one's. Going to character select and coming back
+  character before is painted as the new one's, and a cycle during which the context changed
+  feeds nobody's: the client discards what the readers said in it (see the limit on whose a
+  reading is, under "Bag slots and Magic Find"). Going to character select and coming back
   with the same character changes nothing. It is kept for 80 characters
   (`panel::CHARACTER_PEAKS`), the one not played for longest going first, and all of it ends
   with the session;
@@ -838,7 +855,9 @@ budget, taken from the reader's own constants, and how long ago the pass ran. Th
 the reader's raw last pass: they do not hold anything, so they show a failed cycle the panel
 is painting over, and "not read" for a capture that failed as a whole. A pass cut by the clock
 has its own reason: `Deadline` means the 250 ms the two readers share, or the cycle's 750 ms,
-ran out, and `Bounds` that a pass asked for more than its byte budget.
+ran out, and `Bounds` that a pass asked for more than its byte budget. The one pass they do
+not show is a cycle the client discarded because the game context changed during it: the
+lines stay those of the pass before, and its age goes on counting.
 
 Under **Reader diagnostics**, four more lines say what the cycles and the panel take, counted
 since the addon loaded:
@@ -1173,7 +1192,10 @@ covers what does not need a running game:
   character not becoming the highest, another session noticed
   with the panel closed and without a `starting` frame, a complete session not feeding the
   highest, the two diagnostics lines of Options, and that every text the panel produces is
-  covered by a width reserved for its own cell. None of the painting itself is tested;
+  covered by a width reserved for its own cell. None of the painting itself is tested. On the
+  real loop (`core/tests/client_live.rs`), with the panel following every frame: a cycle
+  during which the character changes leaves nothing of the readers' output for the panel and
+  no highest, and a cycle whose context held leaves it, dated, also when its capture failed;
 - the panel that is kept between frames (`core/tests/panel_cache.rs`): the same view and the
   same memory as a panel computed on every frame, frame by frame through a whole session, a
   folded panel leaving the memory a painted one would, and every setter of what the panel

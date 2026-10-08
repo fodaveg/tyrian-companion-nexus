@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tyrian_companion_nexus_core::client::{spawn, ClientConfig, ClientHandle, GameReading, Host, Readiness};
 use tyrian_companion_nexus_core::game_context::MumbleSnapshot;
-use tyrian_companion_nexus_core::inventory::{InventorySnapshot, ReadError};
+use tyrian_companion_nexus_core::inventory::{Diagnostics, InventorySnapshot, ReadError};
+use tyrian_companion_nexus_core::magic_find::{MagicFind, MagicFindCoverage};
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::state::SharedState;
 use tyrian_companion_nexus_core::wallet::WalletSnapshot;
@@ -40,6 +41,14 @@ struct FakeHost {
     block_prepare: Arc<AtomicBool>,
     /// The game window is closing.
     exiting: Arc<AtomicBool>,
+    /// A capture that has started does not go on until the test lets it.
+    hold_capture: Arc<AtomicBool>,
+    /// After the capture during which the character changes, the next ones block.
+    block_after_change: Arc<AtomicBool>,
+    /// The Magic Find the reader's diagnostics show for a capture, in whole points; 0 is none.
+    magic_find: Arc<AtomicU32>,
+    /// What the reader says about its last capture.
+    diagnostics: Arc<Mutex<Diagnostics>>,
 }
 impl FakeHost {
     fn new() -> Self {
@@ -57,6 +66,10 @@ impl FakeHost {
             verdict: Arc::new(Mutex::new(None)),
             block_prepare: Arc::new(AtomicBool::new(false)),
             exiting: Arc::new(AtomicBool::new(false)),
+            hold_capture: Arc::new(AtomicBool::new(false)),
+            block_after_change: Arc::new(AtomicBool::new(false)),
+            magic_find: Arc::new(AtomicU32::new(0)),
+            diagnostics: Arc::new(Mutex::new(Diagnostics::default())),
             game: Arc::new(Mutex::new(GameReading {
                 is_gameplay: Some(true),
                 mumble: Some(MumbleSnapshot {
@@ -96,6 +109,9 @@ impl Host for FakeHost {
     fn read_inventory(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.capture_started.store(true, Ordering::Relaxed);
+        while self.hold_capture.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         // What the adapter answers to a sample asked for while its verdict is pending: it does
         // its slice and has no sample. That answer is a failed reading to whoever takes it for
         // one, which is why the loop asks `prepare_inventory` first.
@@ -116,6 +132,15 @@ impl Host for FakeHost {
             self.game.lock().unwrap().mumble.as_mut().unwrap().character =
                 Some("Changed Character".into());
             self.quantity.store(2, Ordering::Relaxed);
+            if self.block_after_change.load(Ordering::Relaxed) {
+                self.block_capture.store(true, Ordering::Relaxed);
+            }
+        }
+        // The reader's own account of this cycle, as the adapter leaves it for the diagnostics.
+        let points = self.magic_find.load(Ordering::Relaxed);
+        if points != 0 {
+            self.diagnostics.lock().unwrap().magic_find =
+                MagicFindCoverage::Read(MagicFind { total: points as f32, luck: points, pushed: 0.0, buffs: 0.0, boon: false });
         }
         Ok(InventorySnapshot {
             owner: (0x10a000, 0x10b000),
@@ -125,6 +150,9 @@ impl Host for FakeHost {
             free_slots: None,
             wallet: self.wallet.lock().unwrap().clone(),
         })
+    }
+    fn inventory_diagnostics(&self) -> Diagnostics {
+        *self.diagnostics.lock().unwrap()
     }
     fn game_exiting(&self) -> bool {
         self.exiting.load(Ordering::Relaxed)
@@ -603,6 +631,93 @@ fn context_change_during_capture_discards_sample_before_live_open() {
     p.ready(&epoch);
     p.sample_ctx(&epoch, 0, 2, 1);
     p.ack(&epoch, 0, "stored");
+    handle.stop();
+}
+
+/// The reader's own account of a cycle (bags, Magic Find) was put where the panel reads it
+/// before the loop looked at the context again. A cycle during which the character changed was
+/// discarded for the plugin and still left its Magic Find there, dated with that cycle: until
+/// the next pass the panel painted it as a reading of the character it still had, and took it
+/// for that character's highest of the session, whichever of the two the bytes were.
+#[test]
+fn a_cycle_whose_context_changed_leaves_none_of_the_readers_output_for_the_panel() {
+    use tyrian_companion_nexus_core::panel::{self, PanelMemory, PanelSources};
+    use tyrian_companion_nexus_core::protocol::{parse_server_line, ServerLine};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    host.hold_capture.store(true, Ordering::Relaxed);
+    host.change_on_capture.store(true, Ordering::Relaxed);
+    host.block_after_change.store(true, Ordering::Relaxed);
+    host.magic_find.store(400, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    // A session that is measuring, as the plugin reports one: only then is there a highest.
+    let frame = json!({ "v":3, "type":"farming_state", "tag":"farm1", "nonce":NONCE, "seq":1, "ttl":15,
+        "phase":"active", "err":null, "elapsed":1716, "observed":143, "net":null,
+        "lo":37, "hi":37, "age":0, "slots":null, "slotSrc":"unknown", "slotAge":null,
+        "goal":"none", "target":null, "progress":null, "eta":null, "mf":null,
+        "mfKind":"unknown", "prep":"unknown" });
+    let ServerLine::FarmingState(reading) = parse_server_line(&frame.to_string()) else { panic!("{frame}") };
+    assert!(state.enable_farming(NONCE) && state.accept_farming(reading, std::time::Instant::now()));
+    let waiting = std::time::Instant::now();
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        while !done() {
+            assert!(waiting.elapsed() < Duration::from_secs(5), "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    // The first cycle is under way, on the first character.
+    wait_for("the first capture never started", &|| host.capture_started.load(Ordering::Relaxed));
+    let mut memory = PanelMemory::new();
+    // A frame of the panel, closed or open: what it remembers is the same.
+    let mut paint = || {
+        let sources = PanelSources::read(&state, std::time::Instant::now());
+        panel::observe(&sources.input(), &mut memory);
+        memory.magic_find_peak()
+    };
+    assert_eq!(paint(), None, "nothing read yet");
+    // The cycle goes on and the character changes under it. Every frame from here until the
+    // next cycle, of the other character, has started: none of them sees a reading.
+    host.hold_capture.store(false, Ordering::Relaxed);
+    while host.calls.load(Ordering::Relaxed) < 2 {
+        assert!(waiting.elapsed() < Duration::from_secs(5), "the second capture never started");
+        assert_eq!(paint(), None, "the Magic Find of a discarded cycle became a highest");
+        assert!(state.inventory_reading().1.is_none(), "a discarded cycle was dated as a reading");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(paint(), None);
+    let (diagnostics, read_at) = state.inventory_reading();
+    assert!(read_at.is_none() && diagnostics.magic_find == MagicFindCoverage::NotRead, "{diagnostics:?} {read_at:?}");
+    // On the wire it is the change of context it always was, and no sample.
+    let changed = p.next();
+    assert_eq!((changed["type"].as_str(), changed["character"].as_str()), (Some("context"), Some("Changed Character")), "{changed}");
+    assert_eq!(state.live_epochs_opened(), 0);
+    handle.stop();
+}
+
+/// The other side of it: a cycle whose context held is what the panel reads, dated with that
+/// cycle, whether its sample was good or the capture failed.
+#[test]
+fn a_cycle_whose_context_held_puts_the_readers_output_where_the_panel_reads_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    host.magic_find.store(333, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let epoch = p.open();
+    let (diagnostics, first) = state.inventory_reading();
+    assert!(matches!(diagnostics.magic_find, MagicFindCoverage::Read(read) if read.total == 333.0), "{diagnostics:?}");
+    assert!(first.is_some());
+    // The next capture fails: no sample, and still a pass of the reader, with its own date.
+    *host.verdict.lock().unwrap() = Some(ReadError::ReadFailed);
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    p.ack(&epoch, 0, "stored");
+    let status = p.next();
+    assert_eq!((status["type"].as_str(), status["reason"].as_str()), (Some("live_status"), Some("read_failed")), "{status}");
+    assert!(state.inventory_reading().1 > first);
     handle.stop();
 }
 

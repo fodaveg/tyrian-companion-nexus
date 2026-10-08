@@ -85,7 +85,8 @@ pub struct SharedState {
     live_context: Mutex<Option<crate::protocol::GameContext>>,
     /// The last capture's diagnostics and when that capture ran. They only change when a
     /// capture runs, so the instant is what tells a reading of now from one that is still here
-    /// because nothing replaced it.
+    /// because nothing replaced it. A capture during which the game context changed is not
+    /// one of them: the client discards it whole and leaves these as they were.
     inventory_diagnostics: Mutex<(crate::inventory::Diagnostics, Option<Instant>)>,
     /// Override of the wait before `live_open` is retried after a `source_conflict`; `None` keeps
     /// `live::CONFLICT_RETRY_INTERVAL`. Only tests set it.

@@ -541,16 +541,22 @@ fn serve(
                         Readiness::Ready => {
                             let sample = host.read_inventory(stop);
                             if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
-                            state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());
+                            let diagnostics = host.inventory_diagnostics();
                             let captured_at = Instant::now();
                             let reading = host.read_game();
                             let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
                             if after != context {
-                                // The context changed while copying the inventory: discard it entirely.
+                                // The context changed while copying the inventory: discard it
+                                // entirely, and with it what the reader says of that cycle. Its
+                                // bags and its Magic Find are of a character that was changing,
+                                // and the panel would take them, dated with this cycle, for a
+                                // reading of the one it has, and for its highest of the session.
                                 if let Some(line) = session.next_outgoing(captured_at, &after) {
                                     if stream.write_all(line.as_bytes()).is_err() { return end; }
                                 }
                             } else {
+                                // Only now: the context was the same before and after the cycle.
+                                state.set_inventory_diagnostics(diagnostics, captured_at);
                                 let opened = session.live.epochs_opened();
                                 frames.extend(session.live.capture(sample, ctx, captured_at));
                                 // For the Options window only: how often the source starts an epoch.
