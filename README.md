@@ -864,6 +864,14 @@ covers what does not need a running game:
   compatibility, nonce and sequence isolation, no farming ACKs, independent observation
   ages, monotonic TTL and immediate disconnect invalidation;
 
+- the Labyrinth panel as data (`core/tests/panel.rs`): the sketch itself, every state of
+  every cell, the same cells in every state, the rate's two thresholds and that it does not
+  alternate between them, slots and Magic Find from the addon's reader, from the plugin and
+  from neither, every no-coverage reason of both readers with and without the plugin's
+  figure, the fall of a verified Magic Find from the session's highest, the two diagnostics
+  lines of Options, and that every text the panel produces is covered by a width reserved for
+  its own cell. None of the painting itself is tested;
+
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the
   character-name and map-id bounds);
