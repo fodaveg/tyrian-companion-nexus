@@ -73,6 +73,10 @@ fixtures: the count of used positions and the 250 ms they share have not been se
 game. See "Labyrinth farming panel" and "Bag slots and Magic Find (read by the addon, not on
 the wire)".
 
+Version 0.8.1 draws the button that removes the panel's background as the usual contrast sign,
+a ring with its left half filled, instead of a square that read as "stop". Nothing else
+changes.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
