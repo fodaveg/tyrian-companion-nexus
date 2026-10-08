@@ -17,6 +17,12 @@
 //! a state condition, or another formula, makes the whole value [`Uncovered::Unsupported`]:
 //! never a partial total. The display cap is a content number and is not read, so the total is
 //! the uncapped sum.
+//!
+//! Each object on the route is copied once per look, as one block from its vtable to the last
+//! field used here, and the vtable slots are copied one run per vtable. A block is only a way
+//! to ask for less: the fields interpreted and compared are the ones named below, and no other
+//! byte of a block is. A pass over the live shape of 2026-10-08 (91 buffs) asked 557 times for
+//! 22620 bytes when every field was its own copy; in blocks it asks 349 times for 29328.
 
 use crate::inventory::{BuildProfile, Memory, Reader, TLS_INDEX_RVA};
 use crate::passive::{
@@ -54,6 +60,21 @@ const BUCKET: usize = 24;
 const PUSHED: usize = 12;
 const MODIFIER: usize = 72;
 const HASH_TABLE: &str = "hash_table";
+/// One copy per object, from its vtable to the end of the last field read: the character
+/// context to the player pointer at `+0xa0`, the character to the cached player id at `+0x220`,
+/// the player stats to the luck record at `+0x18`, the buff manager to its mode at `+0xf0`, and
+/// a table node to its key at `+0x18`.
+const CHAR_CONTEXT_BLOCK: usize = 0xa8;
+const CHARACTER_BLOCK: usize = 0x224;
+const STATS_BLOCK: usize = 0x28;
+const MANAGER_BLOCK: usize = 0xf4;
+const NODE_BLOCK: usize = 0x1c;
+/// A buff instance is copied from its effect id at `+0x28` to the end of its definition
+/// reference at `+0x68`.
+const INSTANCE_FROM: u64 = 0x28;
+const INSTANCE_BLOCK: usize = 0x40;
+/// The longest run of [`SLOTS`] on one vtable: `CHAR_CONTEXT_VTABLE`, slots `0x68` to `0x118`.
+const SLOT_SPAN: usize = 0xb8;
 
 /// The route getters, the widget's case, the modifier sum and its helpers, and the hash table.
 pub const GUARDS: [Guard; 19] = [
@@ -385,22 +406,110 @@ fn pushed_total(records: &[u8], wanted: u32) -> f32 {
         .fold(0.0, |total, record| total + f32::from_bits(dword(record, 4)))
 }
 
-/// Context -> controlled character, local player and the character's buff manager.
-fn owner_route<M: Memory>(
+/// A little-endian field of a copied block. A block too short for it is a bound, not a panic.
+fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Uncovered> {
+    match bytes.get(offset..).and_then(|rest| rest.get(..4)) {
+        Some(&[a, b, c, d]) => Ok(u32::from_le_bytes([a, b, c, d])),
+        _ => Err(Uncovered::Bounds),
+    }
+}
+fn u64_at(bytes: &[u8], offset: usize) -> Result<u64, Uncovered> {
+    match bytes.get(offset..).and_then(|rest| rest.get(..8)) {
+        Some(&[a, b, c, d, e, f, g, h]) => Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h])),
+        _ => Err(Uncovered::Bounds),
+    }
+}
+fn field<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], Uncovered> {
+    bytes
+        .get(offset..)
+        .and_then(|rest| rest.get(..N))
+        .and_then(|part| part.try_into().ok())
+        .ok_or(Uncovered::Bounds)
+}
+/// [`object`] for a pointer that is already in a copied block: NULL is that owner's absence.
+fn owned(value: u64) -> Result<u64, Uncovered> {
+    if value == 0 {
+        return Err(Uncovered::Root);
+    }
+    heap(value)
+}
+/// [`identity`] for a vtable pointer or slot that is already in a copied block.
+fn certified(found: u64, expected: u64) -> Result<(), Uncovered> {
+    if found != expected {
+        return Err(Uncovered::Profile);
+    }
+    Ok(())
+}
+
+/// The owners and every field of theirs that the second look compares.
+#[derive(PartialEq)]
+struct Route {
+    /// Character context, controlled character, local player and the character's buff manager.
+    owner: (u64, u64, u64, u64),
+    /// `stats+0x18`: the luck record, whose last dword is the account luck level.
+    luck: [u8; 16],
+    /// `manager+0x20`: capacity, count and buckets of the buff table.
+    table_header: [u8; 16],
+    /// `manager+0xd8`: the table of records the server pushed.
+    pushed_header: [u8; 16],
+    /// `manager+0xf0`.
+    hidden_mode: u32,
+}
+
+/// Context -> controlled character, local player and the character's buff manager, with the
+/// identity of each. Returns the route and the character context and character as copied, for
+/// the checks only the first look makes.
+fn route<M: Memory>(
     r: &mut Reader<M>,
     b: u64,
     context: u64,
-) -> Result<(u64, u64, u64, u64), Uncovered> {
+) -> Result<(Route, [u8; CHAR_CONTEXT_BLOCK], [u8; CHARACTER_BLOCK]), Uncovered> {
     let char_context = object(r, context + 0x98)?;
-    identity(r, char_context, b + CHAR_CONTEXT_VTABLE)?;
-    let character = object(r, char_context + 0x98)?;
-    identity(r, character, b + CHARACTER_VTABLE)?;
-    let player = object(r, char_context + 0xa0)?;
+    let context_block: [u8; CHAR_CONTEXT_BLOCK] = r.read(char_context)?;
+    certified(u64_at(&context_block, 0)?, b + CHAR_CONTEXT_VTABLE)?;
+    let character = owned(u64_at(&context_block, 0x98)?)?;
+    let character_block: [u8; CHARACTER_BLOCK] = r.read(character)?;
+    certified(u64_at(&character_block, 0)?, b + CHARACTER_VTABLE)?;
+    let player = owned(u64_at(&context_block, 0xa0)?)?;
     identity(r, player, b + PLAYER_VTABLE)?;
-    identity(r, player + 0x9700, b + PLAYER_STATS_VTABLE)?;
-    let manager = object(r, character + 0xd0)?;
-    identity(r, manager, b + BUFF_MANAGER_VTABLE)?;
-    Ok((char_context, character, player, manager))
+    let stats: [u8; STATS_BLOCK] = r.read(player + 0x9700)?;
+    certified(u64_at(&stats, 0)?, b + PLAYER_STATS_VTABLE)?;
+    let manager = owned(u64_at(&character_block, 0xd0)?)?;
+    let manager_block: [u8; MANAGER_BLOCK] = r.read(manager)?;
+    certified(u64_at(&manager_block, 0)?, b + BUFF_MANAGER_VTABLE)?;
+    Ok((
+        Route {
+            owner: (char_context, character, player, manager),
+            luck: field(&stats, 0x18)?,
+            table_header: field(&manager_block, 0x20)?,
+            pushed_header: field(&manager_block, 0xd8)?,
+            hidden_mode: u32_at(&manager_block, 0xf0)?,
+        },
+        context_block,
+        character_block,
+    ))
+}
+
+/// Every slot of [`SLOTS`] must select its guarded code. The slots of one vtable are copied
+/// together, from the lowest to the highest.
+fn slots<M: Memory>(r: &mut Reader<M>, b: u64) -> Result<(), Uncovered> {
+    let mut rest: &[(u64, u64, u64)] = &SLOTS;
+    while let Some(&(vtable, ..)) = rest.first() {
+        let run = rest.iter().take_while(|slot| slot.0 == vtable).count();
+        let (group, later) = rest.split_at_checked(run).ok_or(Uncovered::Bounds)?;
+        let low = group.iter().map(|slot| slot.1).min().ok_or(Uncovered::Bounds)?;
+        let high = group.iter().map(|slot| slot.1).max().ok_or(Uncovered::Bounds)?;
+        let mut block = [0u8; SLOT_SPAN];
+        let part = block
+            .get_mut(..(high - low) as usize + 8)
+            .ok_or(Uncovered::Bounds)?;
+        r.read_into(b + vtable + low, part)?;
+        for &(_, slot, target) in group {
+            certified(u64_at(part, (slot - low) as usize)?, b + target)?;
+        }
+        rest = later;
+    }
+    Ok(())
 }
 
 /// Read the three stored addends of the controlled character's Magic Find, then read every
@@ -412,22 +521,20 @@ pub fn magic_find<M: Memory>(
 ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
     context_checked(context)?;
     let b = profile.base;
-    let owner = owner_route(r, b, context)?;
-    let (char_context, character, player, manager) = owner;
-    for (vtable, slot, target) in SLOTS {
-        identity(r, b + vtable + slot, b + target)?;
-    }
+    let (first, context_block, character_block) = route(r, b, context)?;
+    let (_, character, player, _) = first.owner;
+    slots(r, b)?;
     // The widget resolves the player from the character's id; it must be the local one.
-    if r.scalar(character + 0x178, 4)? & 0x10 == 0 {
+    if u32_at(&character_block, 0x178)? & 0x10 == 0 {
         return Err(Uncovered::Root);
     }
-    identity(r, character + 8, b + CHARACTER_AGENT_VTABLE)?;
-    identity(r, character + 0x40, b + COMBATANT_VTABLE)?;
-    let agent = r.scalar(character + 0xa0, 4)? as u32;
+    certified(u64_at(&character_block, 8)?, b + CHARACTER_AGENT_VTABLE)?;
+    certified(u64_at(&character_block, 0x40)?, b + COMBATANT_VTABLE)?;
+    let agent = u32_at(&character_block, 0xa0)?;
     if agent & 0xf000_0000 != 0x3000_0000 {
         return Err(Uncovered::Root);
     }
-    let cached = r.scalar(character + 0x220, 4)? as u32;
+    let cached = u32_at(&character_block, 0x220)?;
     let player_id = if cached != 0 {
         cached
     } else {
@@ -435,23 +542,21 @@ pub fn magic_find<M: Memory>(
     };
     if player_id == 0
         || player_id > MAX_PLAYER_ID
-        || u64::from(player_id) >= r.scalar(char_context + 0x8c, 4)?
+        || player_id >= u32_at(&context_block, 0x8c)?
     {
         return Err(Uncovered::Bounds);
     }
-    let players = object(r, char_context + 0x80)?;
+    let players = owned(u64_at(&context_block, 0x80)?)?;
     if r.scalar(players + 8 * u64::from(player_id), 8)? != player {
         return Err(Uncovered::Profile);
     }
 
-    let luck: [u8; 16] = r.read(player + 0x9700 + 0x18)?;
-    let level = dword(&luck, 12);
+    let level = dword(&first.luck, 12);
     if level > MAX_LUCK_LEVEL {
         return Err(Uncovered::Bounds);
     }
-    let table_header: [u8; 16] = r.read(manager + 0x20)?;
-    let pushed_header: [u8; 16] = r.read(manager + 0xd8)?;
-    let hidden_mode = r.scalar(manager + 0xf0, 4)?;
+    let (table_header, pushed_header) = (first.table_header, first.pushed_header);
+    let hidden_mode = first.hidden_mode;
 
     // RVA 0x12C2520 returns 0 for an empty table without dereferencing it.
     let pushed_count = dword(&pushed_header, 12);
@@ -505,18 +610,18 @@ pub fn magic_find<M: Memory>(
         }
         occupied += 1;
         let node = heap(node)?;
-        identity(r, node, b + BUFF_NODE_VTABLE)?;
-        let link: [u8; 12] = r.read(node + 0x10)?;
-        if dword(&link, 8) != key {
+        let link: [u8; NODE_BLOCK] = r.read(node)?;
+        certified(u64_at(&link, 0)?, b + BUFF_NODE_VTABLE)?;
+        if u32_at(&link, 0x18)? != key {
             return Err(Uncovered::Integrity);
         }
-        let instance = content(qword(&link, 0))?;
-        let effect = r.scalar(instance + 0x28, 4)? as u32;
-        let reference: [u8; 16] = r.read(instance + 0x58)?;
-        if dword(&reference, 0) != 1 {
+        let instance = content(u64_at(&link, 0x10)?)?;
+        let applied: [u8; INSTANCE_BLOCK] = r.read(instance + INSTANCE_FROM)?;
+        let effect = u32_at(&applied, 0x28 - INSTANCE_FROM as usize)?;
+        if u32_at(&applied, 0x58 - INSTANCE_FROM as usize)? != 1 {
             return Err(Uncovered::Integrity);
         }
-        let definition = qword(&reference, 8);
+        let definition = u64_at(&applied, 0x60 - INSTANCE_FROM as usize)?;
         if !definitions.contains_key(&definition) {
             definitions.insert(definition, read_definition(r, definition)?);
         }
@@ -541,11 +646,9 @@ pub fn magic_find<M: Memory>(
         from_buffs += buff_total(&buffs, &definitions, MAGIC_FIND_BOON)?;
     }
 
-    if owner_route(r, b, context)? != owner
-        || r.read::<16>(player + 0x9700 + 0x18)? != luck
-        || r.read::<16>(manager + 0x20)? != table_header
-        || r.read::<16>(manager + 0xd8)? != pushed_header
-        || r.scalar(manager + 0xf0, 4)? != hidden_mode
+    // The second look: the route again, with its identities, then the two tables. Of the
+    // copied blocks it compares the owners and the fields of `Route`, nothing else.
+    if route(r, b, context)?.0 != first
         || (!pushed.is_empty() && table(r, pushed_at, pushed.len(), PUSHED)? != pushed)
         || (!buckets.is_empty() && table(r, entries, buckets.len(), BUCKET)? != buckets)
     {

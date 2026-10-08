@@ -16,6 +16,10 @@
 //! Heap objects are placed on 8 bytes and game content 4 past, as the live runs of 2026-10-08
 //! found them. `live_shapes_of_8_october` are the two states the external probe matched with
 //! the hero panel that day: 333.0 and, after a buff change, 363.0.
+//!
+//! `support/magic_find_field_by_field.rs` is the reader of 0.8.1 (`37e48df`), which copied
+//! every field on its own. It is the oracle here: what the reader gives, a value or a reason,
+//! is compared with what that one gives over the same bytes.
 use std::collections::{BTreeMap, BTreeSet};
 use tyrian_companion_nexus_core::inventory::{
     BuildProfile, Memory, ReadError, Reader, BUILD_SHA256,
@@ -24,6 +28,9 @@ use tyrian_companion_nexus_core::magic_find::*;
 use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 use tyrian_companion_nexus_core::wallet::currency_hash;
+
+#[path = "support/magic_find_field_by_field.rs"]
+mod field_by_field;
 
 const BASE: u64 = 0x140000000;
 const IMAGE: u64 = 0x2c48000;
@@ -106,6 +113,7 @@ struct Fixture {
     count: u32,
     used: BTreeSet<u32>,
     pushed: Vec<(u32, f32)>,
+    /// A copy that covers this address fails, wherever the copy starts.
     fail: Option<u64>,
     /// On the given visit of a read starting at `.0`, first write each `(address, value, size)`.
     race: Option<(u64, usize, Vec<(u64, u64, usize)>)>,
@@ -214,7 +222,7 @@ impl Fixture {
 }
 impl Memory for Fixture {
     fn read_exact(&mut self, address: u64, out: &mut [u8]) -> Result<(), ReadError> {
-        if self.fail == Some(address) {
+        if self.fail.is_some_and(|at| (address..address + out.len() as u64).contains(&at)) {
             return Err(ReadError::ReadFailed);
         }
         if let Some((trigger, visit, writes)) = self.race.clone() {
@@ -227,10 +235,18 @@ impl Memory for Fixture {
                 }
             }
         }
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = *self.bytes.get(&(address + i as u64)).unwrap_or(&0);
+        // Bytes no fixture wrote read as zero.
+        out.fill(0);
+        for (at, byte) in self.bytes.range(address..address + out.len() as u64) {
+            out[(at - address) as usize] = *byte;
         }
         Ok(())
+    }
+}
+/// For the tests that read the same memory more than once.
+impl Memory for &mut Fixture {
+    fn read_exact(&mut self, address: u64, out: &mut [u8]) -> Result<(), ReadError> {
+        (**self).read_exact(address, out)
     }
 }
 
@@ -351,6 +367,200 @@ fn live_shapes_of_8_october_give_333_and_363() {
         );
         assert!(bytes <= MAX_BYTES, "{bytes}");
     }
+}
+
+/// The guards of the fixtures, verified once; a pass needs nothing else from the first cycle.
+fn verified() -> MagicFindProfile {
+    let mut reader = Reader::bounded(empty(), MAX_BYTES);
+    MagicFindProfile::verified_against(&mut reader, profile(), &synthetic_guards()).unwrap()
+}
+type Outcome = Result<(MagicFind, (u64, u64)), Uncovered>;
+/// One pass of the reader over `m`: what it gives, how many copies it asked for and of how
+/// many bytes.
+fn pass(m: &mut Fixture, verified: &MagicFindProfile) -> (Outcome, usize, usize) {
+    let mut reader = Reader::bounded(m, MAX_BYTES);
+    let outcome = magic_find(&mut reader, verified, CTX);
+    (outcome, reader.reads, reader.bytes)
+}
+/// The same pass by the reader of 0.8.1, which copied every field on its own.
+fn pass_field_by_field(m: &mut Fixture, verified: &MagicFindProfile) -> (Outcome, usize, usize) {
+    let mut reader = Reader::bounded(m, MAX_BYTES);
+    let outcome = field_by_field::magic_find(&mut reader, BASE, |key| verified.key_hash(key), CTX);
+    (outcome, reader.reads, reader.bytes)
+}
+
+/// The fixtures' own generator: the same sequence on every run.
+struct Dice(u64);
+impl Dice {
+    fn roll(&mut self, sides: u64) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 33) % sides
+    }
+}
+/// Every address a fixture fills outside the guarded ranges: the route, the vtable slots, the
+/// tables, the nodes and the content.
+fn fields(m: &Fixture) -> Vec<u64> {
+    let guarded = |address: u64| {
+        GUARDS
+            .iter()
+            .any(|guard| (BASE + guard.rva..BASE + guard.rva + guard.size as u64).contains(&address))
+    };
+    m.bytes.keys().copied().filter(|address| !guarded(*address)).collect()
+}
+/// Fixtures that between them use every branch of the sum.
+fn shapes() -> Vec<Fixture> {
+    let mut boon = standard().0;
+    let boon_only = boon.plain(&[record(MAGIC_FIND_BOON, 40.0)]);
+    boon.buff(1002, 502, boon_only);
+    boon.push(MAGIC_FIND_BOON, 2.0);
+    let category_zero = boon.definition(&[record(14, 5.0)], 0, 0, 0);
+    boon.buff(1003, 503, category_zero);
+    let mut stacks = empty();
+    let duration = stacks.definition(&[record(MAGIC_FIND, 10.0)], 1, 1, 0);
+    let intensity = stacks.definition(&[record(MAGIC_FIND, 1.0)], 4, 1, 0);
+    for key in [1, 2, 3] {
+        stacks.buff(key, 700, duration);
+    }
+    for key in [11, 12, 13, 14] {
+        stacks.buff(key, 800, intensity);
+    }
+    let mut hidden = standard().0;
+    let flagged = hidden.definition(&[record(MAGIC_FIND, 50.0)], 0, 1, 0x40);
+    hidden.buff(1002, 502, flagged);
+    hidden.put(MANAGER + 0xf0, 1, 4);
+    let mut nothing_pushed = empty();
+    nothing_pushed.put(MANAGER + 0xd8, 0, 8);
+    vec![
+        standard().0,
+        live_shape(20.0),
+        live_shape(50.0),
+        empty(),
+        empty_at(4, 64, 0),
+        nothing_pushed,
+        boon,
+        stacks,
+        hidden,
+    ]
+}
+
+#[test]
+fn a_pass_over_the_live_shape_asks_for_349_copies_where_it_asked_for_557() {
+    let verified = verified();
+    let (outcome, reads, bytes) = pass_field_by_field(&mut live_shape(20.0), &verified);
+    assert_eq!(outcome.map(|(value, _)| value.total), Ok(333.0));
+    assert_eq!((reads, bytes), (557, 22_620));
+    let (outcome, reads, bytes) = pass(&mut live_shape(20.0), &verified);
+    assert_eq!(outcome.map(|(value, _)| value.total), Ok(333.0));
+    assert_eq!((reads, bytes), (349, 29_328));
+    // The two looks at the route take 6 copies each and the twelve slots take 7.
+    let (_, reads, bytes) = pass(&mut empty(), &verified);
+    assert_eq!((reads, bytes), (6 + 7 + 1 + 6, 2 * 1016 + 328 + 8));
+}
+
+#[test]
+fn blocks_give_what_field_by_field_copies_gave_on_every_fixture() {
+    let verified = verified();
+    for (index, mut shape) in shapes().into_iter().enumerate() {
+        let expected = pass_field_by_field(&mut shape.clone(), &verified).0;
+        assert!(expected.is_ok(), "{index}");
+        assert_eq!(pass(&mut shape, &verified).0, expected, "{index}");
+    }
+    for remainder in [0, 1, 2, 6] {
+        let mut m = standard_at(remainder).0;
+        let expected = pass_field_by_field(&mut m.clone(), &verified).0;
+        assert_eq!(expected.clone().map(|_| ()), Err(Uncovered::Alignment));
+        assert_eq!(pass(&mut m, &verified).0, expected);
+    }
+}
+
+#[test]
+fn blocks_reject_what_field_by_field_copies_rejected_and_for_the_same_reason() {
+    let verified = verified();
+    let shapes: Vec<(Fixture, Vec<u64>)> = shapes()
+        .into_iter()
+        .map(|shape| {
+            let fields = fields(&shape);
+            (shape, fields)
+        })
+        .collect();
+    let mut dice = Dice(0x7e48_df00_2026_1008);
+    let mut reasons = BTreeMap::new();
+    for round in 0..3000 {
+        let (shape, fields) = &shapes[dice.roll(shapes.len() as u64) as usize];
+        let mut m = shape.clone();
+        // One or two fields damaged: zeroed, replaced, off by one bit, moved by 4 or 8 bytes,
+        // or holding what another field holds.
+        for _ in 0..1 + dice.roll(2) {
+            let at = fields[dice.roll(fields.len() as u64) as usize] & !3;
+            match dice.roll(6) {
+                0 => m.put(at, 0, 4),
+                1 => m.put(at, dice.roll(1 << 31), 4),
+                2 => m.put(at, m.get(at) ^ 1 << dice.roll(32), 4),
+                3 => m.put(at & !7, m.get(at & !7).wrapping_add(4), 8),
+                4 => m.put(at & !7, m.get(at & !7).wrapping_add(8), 8),
+                _ => {
+                    let other = fields[dice.roll(fields.len() as u64) as usize] & !7;
+                    m.put(at & !7, m.get(other), 8);
+                }
+            }
+        }
+        let expected = pass_field_by_field(&mut m, &verified).0;
+        assert_eq!(pass(&mut m, &verified).0, expected, "round {round}");
+        let reason = match expected {
+            Ok(_) => "value".to_string(),
+            Err(reason) => format!("{reason:?}"),
+        };
+        *reasons.entry(reason).or_insert(0) += 1;
+    }
+    // The damage reached every closed reason a static memory can give, and left values too.
+    for reason in ["value", "Profile", "Root", "Bounds", "Alignment", "Integrity", "Unsupported"] {
+        assert!(reasons.get(reason).is_some_and(|count| *count >= 20), "{reason}: {reasons:?}");
+    }
+    // A copy that fails anywhere a fixture has a field is no value in both. The live shapes
+    // add no kind of field to the others, only more of each.
+    let mut failed = 0;
+    for (mut m, fields) in shapes {
+        if m.count > 8 {
+            continue;
+        }
+        for at in fields.into_iter().filter(|at| at & 3 == 0) {
+            m.fail = Some(at);
+            let expected = pass_field_by_field(&mut m, &verified).0;
+            assert_eq!(pass(&mut m, &verified).0, expected, "{at:x}");
+            failed += usize::from(expected == Err(Uncovered::ReadFailed));
+        }
+    }
+    assert!(failed > 400, "{failed}");
+}
+
+#[test]
+fn the_rest_of_a_block_is_neither_read_as_a_field_nor_compared() {
+    // Bytes between the fields of the character, its context, the stats, the manager, a node
+    // and an instance: other values there are the same Magic Find.
+    let gaps = |buff: (u64, u64, u64)| {
+        [
+            CHAR_CONTEXT + 0x10,
+            CHAR_CONTEXT + 0x88,
+            CHARACTER + 0x10,
+            CHARACTER + 0x100,
+            CHARACTER + 0x21c,
+            STATS + 0x10,
+            MANAGER + 0x30,
+            MANAGER + 0xe8,
+            buff.1 + 8,
+            buff.2 + 0x30,
+            buff.2 + 0x50,
+        ]
+    };
+    let (mut m, buff) = standard();
+    for at in gaps(buff) {
+        m.put(at, 0x1234_5678, 4);
+    }
+    assert_eq!(total(m), 337.0);
+    // The same bytes changing between the two looks are not a changed sample either.
+    let (mut m, buff) = standard();
+    m.race = Some((CTX + 0x98, 2, gaps(buff).map(|at| (at, 0x1234_5678, 4)).to_vec()));
+    assert_eq!(total(m), 337.0);
 }
 
 #[test]
@@ -785,9 +995,15 @@ fn a_count_without_its_table_is_bounds_not_an_absent_character() {
 
 #[test]
 fn failed_read_and_exhausted_budget_never_become_a_value() {
-    let (mut m, buff) = standard();
-    m.fail = Some(buff.1 + 0x10);
-    assert_eq!(read(m), Err(Uncovered::ReadFailed));
+    // The node's link, the instance's reference and the definition's group, each on its own.
+    let failing = |at: fn(&Fixture, (u64, u64, u64)) -> u64| {
+        let (mut m, buff) = standard();
+        m.fail = Some(at(&m, buff));
+        read(m)
+    };
+    assert_eq!(failing(|_, buff| buff.1 + 0x10), Err(Uncovered::ReadFailed));
+    assert_eq!(failing(|_, buff| buff.2 + 0x60), Err(Uncovered::ReadFailed));
+    assert_eq!(failing(|m, buff| m.get(m.get(buff.2 + 0x60) + 0x20) + 0x10), Err(Uncovered::ReadFailed));
     let mut reader = Reader::bounded(standard().0, GUARD_BYTES + 200);
     let verified =
         MagicFindProfile::verified_against(&mut reader, profile(), &synthetic_guards()).unwrap();
