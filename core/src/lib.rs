@@ -34,4 +34,5 @@ pub mod settings;
 pub mod sha256;
 pub mod state;
 pub mod token;
+pub mod verdict;
 pub mod wallet;

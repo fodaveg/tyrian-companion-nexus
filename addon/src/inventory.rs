@@ -32,6 +32,7 @@ use tyrian_companion_nexus_core::magic_find::{
     self, MagicFind, MagicFindCoverage, MagicFindProfile,
 };
 use tyrian_companion_nexus_core::passive::Uncovered;
+use tyrian_companion_nexus_core::verdict::Verdict;
 use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
@@ -149,7 +150,32 @@ struct NativeReader {
     bags: OnceLock<Option<BagProfile>>,
     magic_find: OnceLock<Option<MagicFindProfile>>,
 }
-static READER: OnceLock<Result<NativeReader, ReadError>> = OnceLock::new();
+
+/// How long after a verification of the executable that could not be finished the next one is
+/// tried. An attempt hashes the whole file on the bridge worker, for up to ten seconds in which
+/// that thread sends no heartbeat, so it is not repeated on every cycle. What a first attempt
+/// on a cold disk managed to read is in the system's cache for the next one.
+const VERIFY_RETRY: Duration = Duration::from_secs(30);
+
+/// Why the executable is not verified.
+enum Unverified {
+    /// Its SHA-256 was computed and is not the certified one: another build, for as long as
+    /// this process lives.
+    OtherBuild,
+    /// The verification could not be finished: the hash ran out of time or the file could not
+    /// be read, or a check after the hash could not be made. Not an answer about the build.
+    Failed(ReadError),
+}
+impl From<ReadError> for Unverified {
+    fn from(error: ReadError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// The verified build's reader, or `None` for an executable whose hash was computed and is
+/// another build's: the two final answers, kept for the whole load. A verification that could
+/// not be finished is not kept: it is tried again [`VERIFY_RETRY`] later.
+static READER: Verdict<Option<NativeReader>, ReadError> = Verdict::new(VERIFY_RETRY);
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     threads: 0,
     bytes: 0,
@@ -175,39 +201,50 @@ fn publish(d: Diagnostics) {
 
 /// Lazily verify the executable on the worker. Unknown build never reaches inventory offsets.
 /// One sample owns its entire read budget and returns no pointers over the bridge.
+///
+/// Only a final answer of that verification is kept for the load. One that could not be
+/// finished comes back as `ReadFailed`, not as `UnsupportedBuild`: the build is not known to
+/// be another, and `UnsupportedBuild` stops the source until the game context changes, which
+/// would leave the next attempt waiting for a change of map.
 pub fn sample(stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
     if stop.load(Ordering::Relaxed) {
         return Err(ReadError::ReadFailed);
     }
     publish(Diagnostics::default());
-    let native = READER
-        .get_or_init(|| NativeReader::new(stop))
+    let native = READER.get_or_try(Instant::now, || match NativeReader::new(stop) {
+        Ok(reader) => Ok(Some(reader)),
+        Err(Unverified::OtherBuild) => Ok(None),
+        Err(Unverified::Failed(ReadError::UnsupportedBuild)) => Err(ReadError::ReadFailed),
+        Err(Unverified::Failed(error)) => Err(error),
+    })?;
+    native
         .as_ref()
-        .map_err(|error| *error)?;
-    native.sample(stop)
+        .ok_or(ReadError::UnsupportedBuild)?
+        .sample(stop)
 }
 impl NativeReader {
-    fn new(stop: &AtomicBool) -> Result<Self, ReadError> {
+    fn new(stop: &AtomicBool) -> Result<Self, Unverified> {
         // Safety: these calls return OS module metadata; no game function is resolved or called.
         let module =
             unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|_| ReadError::UnsupportedBuild)?;
         let mut path = [0u16; 32768];
         let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
         if length == 0 || length >= path.len() {
-            return Err(ReadError::UnsupportedBuild);
+            return Err(ReadError::UnsupportedBuild.into());
         }
         let digest = executable_hash(
             File::open(OsString::from_wide(&path[..length]))
                 .map_err(|_| ReadError::UnsupportedBuild)?,
             stop,
         )?;
+        // The one final "no": the hash was computed, and it is another build's.
         if digest != inventory::BUILD_SHA256 {
-            return Err(ReadError::UnsupportedBuild);
+            return Err(Unverified::OtherBuild);
         }
         let base = module.0 as u64;
         let mut reader = Reader::new(ProcessMemory::new(stop));
         if reader.read::<2>(base)? != *b"MZ" {
-            return Err(ReadError::UnsupportedBuild);
+            return Err(ReadError::UnsupportedBuild.into());
         }
         let pe = reader.scalar(base + 0x3c, 4)?;
         if !(0x40..=4096).contains(&pe)
@@ -215,7 +252,7 @@ impl NativeReader {
             || reader.scalar(base + pe + 4, 2)? != 0x8664
             || reader.scalar(base + pe + 24, 2)? != 0x20b
         {
-            return Err(ReadError::UnsupportedBuild);
+            return Err(ReadError::UnsupportedBuild.into());
         }
         let image_size = reader.scalar(base + pe + 24 + 56, 4)?;
         let profile = BuildProfile::checked(&digest, base, image_size)?;

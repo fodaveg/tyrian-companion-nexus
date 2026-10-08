@@ -123,6 +123,14 @@ No session pointer or PID is hardcoded. The currently certified executable is
 `27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c`, profile
 `owned-bags-v3`. All other builds are unavailable until separately certified.
 
+That verification runs on the first cycle and its answer is kept for the whole load only when
+it is final: the certified build, or a hash that was computed and is another build's. One
+that could not be finished, because hashing the executable did not fit its 10 seconds or the
+file could not be read, used to be kept as well, and the source then said "unsupported game
+build" until the addon was loaded again. It is now reported as a reading that failed
+("reading unavailable", `read_failed` to the host) and tried again 30 seconds later, not on
+every cycle. Which builds are accepted, and how the hash is computed, are unchanged.
+
 Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
 including coherence rechecks and TEB discovery. The Windows adapter also checks a
 750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 128 own threads
