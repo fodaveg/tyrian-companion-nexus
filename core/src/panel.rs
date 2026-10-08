@@ -91,12 +91,17 @@ pub struct PanelMemory {
     /// session that starts, or a duration that goes back, is another session.
     session_running: bool,
     elapsed: Option<i32>,
+    /// The instant of the last capture of this connection that left the reader sampling. A
+    /// capture that fails is a lasting problem only once this is older than [`READING_HOLD`].
+    good_capture: Option<Instant>,
+    /// The same for the last capture that listed the wallet.
+    good_wallet: Option<Instant>,
 }
 
 impl PanelMemory {
     /// Nothing remembered: a range is a range and no reading has been seen.
     pub const fn new() -> Self {
-        Self { rate_averaged: false, magic_find_peak: None, bags: None, magic_find: None, session_running: false, elapsed: None }
+        Self { rate_averaged: false, magic_find_peak: None, bags: None, magic_find: None, session_running: false, elapsed: None, good_capture: None, good_wallet: None }
     }
 
     /// The highest verified Magic Find total of the current session, if any reading fed it.
@@ -213,6 +218,12 @@ struct Readings {
     source: Source,
     bags: Option<Taken<BagSlots>>,
     magic_find: Option<Taken<MagicFind>>,
+    /// The last capture failed, and the one before it that worked is no older than
+    /// [`READING_HOLD`]: one failed cycle, which the status does not change colour for.
+    capture_failed_briefly: bool,
+    /// The wallet was read well no more than [`READING_HOLD`] ago: if it has no coverage now,
+    /// that is one failed read of it, not a wallet without coverage.
+    wallet_failed_briefly: bool,
 }
 
 /// Moves the memory one frame on: whose session it is, what is held, and the session's highest
@@ -243,6 +254,25 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
         memory.magic_find_peak = None;
     }
     let source = source(input);
+    // When the reader last captured well, by the instant of that capture. A reader that has
+    // stopped has nothing to hold on to, and neither has a connection that never captured.
+    // The same for the wallet, which is read in the same capture and can fail on its own.
+    match source {
+        Source::Live { capture_failed: false } => {
+            memory.good_capture = input.read_at.or(memory.good_capture);
+            if matches!(input.wallet, WalletCoverage::Listed(_)) {
+                memory.good_wallet = input.read_at.or(memory.good_wallet);
+            }
+        }
+        Source::Live { capture_failed: true } => {}
+        Source::Stopped => {
+            memory.good_capture = None;
+            memory.good_wallet = None;
+        }
+    }
+    let recent = |at: Option<Instant>| at.is_some_and(|at| input.now.saturating_duration_since(at) <= READING_HOLD);
+    let capture_failed_briefly = source == Source::Live { capture_failed: true } && recent(memory.good_capture);
+    let wallet_failed_briefly = recent(memory.good_wallet);
     let (bags, bags_reason) = match input.bags {
         BagCoverage::Read(slots) => (Some(slots), None),
         BagCoverage::Unavailable(reason) => (None, Some(reason)),
@@ -264,7 +294,7 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
             memory.magic_find_peak = Some(value);
         }
     }
-    Readings { source, bags, magic_find }
+    Readings { source, bags, magic_find, capture_failed_briefly, wallet_failed_briefly }
 }
 
 /// Keeps `memory` up to date in a frame that paints nothing, which is every frame while the
@@ -881,10 +911,15 @@ fn connection_text(connection: Status, english: bool) -> Option<(&'static str, T
 /// - grey, connected with no session measuring, or the game closing.
 ///
 /// The transient inventory states (`waiting for confirmation`, `unresolved quantities`) are in
-/// the tooltip and do not change the colour: they come and go in normal measurement. The
-/// inventory status and the wallet coverage are in the tooltip in every branch, and so is an
-/// error the host had reported before the connection was lost.
-fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
+/// the tooltip and do not change the colour: they come and go in normal measurement. So does
+/// one capture that fails, and one read of the wallet that fails: `readings` says whether the
+/// reader captured well, and listed the wallet, no more than [`READING_HOLD`] ago, and until
+/// that runs out the dot and the text stay as they were and only the tooltip says what failed.
+/// A reader that has stopped changes them at once.
+/// The inventory status and the wallet coverage are in the tooltip in every branch, and so is
+/// an error the host had reported before the connection was lost.
+fn status_cell(input: &PanelInput<'_>, readings: &Readings, english: bool) -> (Tone, Cell) {
+    let (capture_failed_briefly, wallet_failed_briefly) = (readings.capture_failed_briefly, readings.wallet_failed_briefly);
     let view = input.farming;
     let mut tooltip = Vec::new();
     let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
@@ -925,11 +960,16 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
         tone = Tone::Warning;
     }
     let source_down = matches!(input.live, LiveStatus::NotNegotiated | LiveStatus::UnsupportedBuild | LiveStatus::Unavailable | LiveStatus::Conflict | LiveStatus::StorageUnavailable);
-    if measuring && source_down {
+    if measuring && source_down && !capture_failed_briefly {
         tone = Tone::Warning;
     }
     source(&mut tooltip);
-    if input.live.is_sampling() && matches!(input.wallet, WalletCoverage::Unavailable(_)) && measuring && tone == Tone::Good {
+    if input.live == LiveStatus::Unavailable {
+        tooltip.push(line("La última captura falló", "The last capture failed"));
+    }
+    // A wallet that has no coverage is a lasting problem; one read of it that fails, after one
+    // that worked, is not, and says so only in the tooltip line above.
+    if input.live.is_sampling() && matches!(input.wallet, WalletCoverage::Unavailable(_)) && measuring && tone == Tone::Good && !wallet_failed_briefly {
         tone = Tone::Warning;
     }
     match reading.phase {
@@ -954,7 +994,7 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
 pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> PanelView {
     let readings = advance(input, memory);
     let (stack_label, buy, sell) = stack_cells(input, english);
-    let (status_dot, status) = status_cell(input, english);
+    let (status_dot, status) = status_cell(input, &readings, english);
     PanelView {
         bags_label: cell(
             tr(english, "bolsas", "bags"),

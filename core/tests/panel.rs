@@ -659,6 +659,122 @@ fn magic_find_without_coverage_falls_back_to_the_plugin_or_a_dash_and_says_why()
     assert!(has(&live_state.view(false).magic_find, "Lectura del addon: sin cobertura (un efecto necesita estado en vivo)"));
 }
 
+/// The status dot is a cell like the others: one capture that fails, between two that work,
+/// changes neither its colour nor its text. Only the tooltip says so.
+#[test]
+fn one_failed_capture_between_two_good_ones_changes_neither_the_dot_nor_the_status_text() {
+    let mut panel = Follow::new(Case::sketch());
+    let before = panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!((before.status_dot, before.status.text.as_str(), before.status.tone), (Tone::Good, "Midiendo", Tone::Normal));
+    panel.case.live = LiveStatus::Unavailable;
+    let during = panel.at(1, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((during.status_dot, during.status.text.as_str(), during.status.tone), (Tone::Good, "Midiendo", Tone::Normal), "{:?}", during.status);
+    assert!(has(&during.status, "La última captura falló") && has(&during.status, "Inventario: lectura no disponible"), "{:?}", during.status);
+    panel.case.live = LiveStatus::Waiting;
+    let after = panel.at(2, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!((after.status_dot, after.status.text.as_str(), after.status.tone), (Tone::Good, "Midiendo", Tone::Normal));
+    assert!(!has(&after.status, "La última captura falló"));
+    assert!(has(&panel.case.view(true).status, "Host connection: connected"));
+    // In English, during the failed second.
+    panel.case.live = LiveStatus::Unavailable;
+    panel.at(3, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    let english = panel.case.view_with(&mut panel.memory, true).status;
+    assert_eq!((english.text.as_str(), english.tone), ("Measuring", Tone::Normal));
+    assert!(has(&english, "The last capture failed"));
+}
+
+/// Captures that keep failing are a lasting problem once the last good one is more than five
+/// seconds old: then the dot and the text turn orange, as they always did.
+#[test]
+fn six_seconds_of_failed_captures_turn_the_status_orange() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    panel.case.live = LiveStatus::Unavailable;
+    for seconds in 1..=5 {
+        let view = panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+        assert_eq!((view.status_dot, view.status.tone), (Tone::Good, Tone::Normal), "+{seconds} s");
+    }
+    let lasting = panel.at(6, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((lasting.status_dot, lasting.status.text.as_str(), lasting.status.tone), (Tone::Warning, "Midiendo", Tone::Warning));
+    assert!(has(&lasting.status, "La última captura falló"));
+    // It stays orange while they fail, and a capture that works brings the green back.
+    assert_eq!(panel.at(30, BagCoverage::NotRead, MagicFindCoverage::NotRead).status_dot, Tone::Warning);
+    panel.case.live = LiveStatus::Measuring;
+    assert_eq!(panel.at(31, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Good);
+    // The five seconds count from the last capture that worked: one failure right after it is
+    // brief again.
+    panel.case.live = LiveStatus::Unavailable;
+    assert_eq!(panel.at(32, BagCoverage::NotRead, MagicFindCoverage::NotRead).status_dot, Tone::Good);
+}
+
+/// A reader that has stopped is not a failed capture: the status changes at once, also right
+/// after a capture that worked. And with no good capture in this connection there is nothing
+/// to hold on to.
+#[test]
+fn a_stopped_reader_changes_the_status_at_once() {
+    for live in [LiveStatus::NotNegotiated, LiveStatus::UnsupportedBuild, LiveStatus::Conflict, LiveStatus::StorageUnavailable] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+        panel.case.live = live;
+        let stopped = panel.at(1, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+        assert_eq!((stopped.status_dot, stopped.status.tone), (Tone::Warning, Tone::Warning), "{live:?}");
+        assert!(!has(&stopped.status, "La última captura falló"), "{live:?}");
+        // What it had before it stopped does not make a later failure brief.
+        panel.case.live = LiveStatus::Unavailable;
+        assert_eq!(panel.at(2, BagCoverage::NotRead, MagicFindCoverage::NotRead).status_dot, Tone::Warning, "{live:?}");
+    }
+    // No connection, and the game closing.
+    for (connection, dot, text) in [(Status::WaitingForPlugin, Tone::Error, "Sin conexión"), (Status::GameExiting, Tone::Muted, "El juego se cierra")] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+        panel.case.connection = connection;
+        panel.case.live = LiveStatus::Unavailable;
+        let gone = panel.at(1, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+        assert_eq!((gone.status_dot, gone.status.text.as_str()), (dot, text), "{connection:?}");
+        // Back on a new connection whose first capture fails: nothing good to hold on to.
+        panel.case.connection = Status::Connected;
+        let first = panel.at(2, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+        assert_eq!((first.status_dot, first.status.tone), (Tone::Warning, Tone::Warning), "{connection:?}");
+    }
+    // Never a good capture at all: as it was painted before.
+    let mut never = Case::sketch();
+    never.live = LiveStatus::Unavailable;
+    never.read_at = None;
+    let view = never.view(false);
+    assert_eq!((view.status_dot, view.status.text.as_str(), view.status.tone), (Tone::Warning, "Midiendo", Tone::Warning));
+    // And outside a session a failed capture was never a problem of the session.
+    let mut idle = Follow::new(Case::measuring().with_frame(sketch_frame(), |frame| frame["phase"] = json!("complete")));
+    idle.case.live = LiveStatus::Unavailable;
+    assert_eq!(idle.at(10, BagCoverage::NotRead, MagicFindCoverage::NotRead).status_dot, Tone::Muted);
+}
+
+/// The wallet is read in the same capture and can fail on its own ("changed while reading").
+/// One such read between two that worked does not turn the dot orange; a wallet that keeps
+/// having no coverage, or never had any, does.
+#[test]
+fn one_failed_wallet_read_does_not_blink_the_status_either() {
+    let mut panel = Follow::new(Case::sketch());
+    let before = panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!((before.status_dot, before.status.tone), (Tone::Good, Tone::Normal));
+    panel.case.wallet = WalletCoverage::Unavailable(WalletError::Changed);
+    let during = panel.at(1, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!((during.status_dot, during.status.text.as_str(), during.status.tone), (Tone::Good, "Midiendo", Tone::Normal), "{:?}", during.status);
+    assert!(has(&during.status, "Monedas: sin cobertura (cambió durante la lectura)"));
+    panel.case.wallet = WalletCoverage::Listed(55);
+    assert_eq!(panel.at(2, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Good);
+    // Without coverage for longer than the hold, counted from the last read that listed it.
+    panel.case.wallet = WalletCoverage::Unavailable(WalletError::Changed);
+    for seconds in 3..=7 {
+        assert_eq!(panel.at(seconds, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Good, "+{seconds} s");
+    }
+    let lasting = panel.at(8, bags(41, 160), verified(300, 30.0, 3.0));
+    assert_eq!((lasting.status_dot, lasting.status.tone), (Tone::Warning, Tone::Warning));
+    // A wallet that never had coverage in this connection is orange from the first frame.
+    let mut never = Follow::new(Case::sketch());
+    never.case.wallet = WalletCoverage::Unavailable(WalletError::Guard);
+    assert_eq!(never.at(0, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Warning);
+}
+
 /// One panel followed over time: the same memory, a clock that the test moves, and whatever
 /// the reader returned in each cycle.
 struct Follow {

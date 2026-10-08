@@ -714,7 +714,7 @@ pass asked for more than its byte budget.
 |---|---|---|
 | green | connected, a session under way | the phase: "Measuring", "Preparing measurement"… |
 | grey | connected, nothing measuring; or the game closing | "Waiting for session", "Session complete"… |
-| orange | connected, something to read in the tooltip | the phase, in orange: old data, or an inventory source that cannot measure while a session needs it |
+| orange | connected, a lasting problem to read in the tooltip | the phase, in orange: old data, an inventory source that cannot measure while a session needs it, or captures failing for more than 5 seconds |
 | red | no connection, or a session error | "Offline", "Token missing", "Could not update"… |
 
 Every cell has a tooltip, and what used to be lines of the panel is in the tooltip of the cell
@@ -836,6 +836,16 @@ The inventory states that come and go in normal measurement ("waiting for confir
 "unresolved quantities") are in the status tooltip and do not change its colour. Nexus's
 Options show the inventory status and the wallet coverage always.
 
+The status dot does not blink either. One capture that fails as a whole, or one read of the
+wallet that fails, changes neither the dot nor the status text: for 5 seconds
+(`panel::READING_HOLD`) from the last capture that worked, or the last one that listed the
+wallet, they stay as they were and only the tooltip says "The last capture failed" or the
+wallet's reason. After that it is a lasting problem and they turn orange. It counts from the
+instant of that capture, the same one the readings are dated by. A reader that has stopped (no
+connection, the game closing, no negotiated source, a source conflict, an unsupported build,
+storage down) changes the status at once, and so does a failure when no capture of this
+connection has worked yet: there is nothing to hold on to.
+
 Still to be looked at in the game; none of the panel's painting has been seen there:
 
 - That the two readers work in this DLL at all: they have only run against fixtures. The
@@ -843,8 +853,10 @@ Still to be looked at in the game; none of the panel's painting has been seen th
   against the hero panel, and removing an effect to see MF fall, turn orange and name the
   addend. If either line says `—` or `partial`, the "Bags", "Magic Find" and "Reader" lines
   of Options say why.
-- How often a whole capture fails in normal play. The panel holds through it, but the
-  inventory status in the Status tooltip, and the dot while a session measures, do show it.
+- What the plugin does with one failed capture. The addon tells it the source is unavailable,
+  and if the plugin's next `farm1` frame, at most 5 s later, carries `err: observe`, the status
+  turns red with "Could not update" and the rate orange until the frame after. That would be
+  the host's own word in a frame, not something this panel holds through.
 - Whether the two readers fit the 250 ms they share. That figure is an estimate: if it is
   short, the diagnostics line of Magic Find says `Deadline`, and if it stays short for more
   than the 5 seconds the panel holds a reading, MF falls back to the plugin's figure or `—`.
