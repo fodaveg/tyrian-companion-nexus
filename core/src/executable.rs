@@ -22,11 +22,18 @@ use crate::sha256::hex;
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// How long the hash may go on in one call. It runs on the thread that keeps the connection
-/// to the plugin alive, which owes it a heartbeat every 5 s and is taken for lost after three
-/// that do not come: hashing the whole file in one go held that thread for as long as a cold,
-/// slow disk took, up to the 10 s the hash was given. A quarter of a second at a time it is
-/// never held for longer than one read of the file goes over that.
-pub const SLICE: Duration = Duration::from_millis(250);
+/// to the plugin alive, which owes it a heartbeat every 5 s and is taken for lost after 15 s
+/// without one: hashing the whole file in one go held that thread for as long as a cold, slow
+/// disk took, up to the 10 s the hash was given.
+///
+/// One second, done once on each pass of that thread while the verdict is pending. A pass is
+/// then this slice, the read of the file that was under way when it ran out (64 KiB, which
+/// cannot be cut short) and the 250 ms the thread waits on its socket: about a second and a
+/// quarter between two chances to send a heartbeat, against the 4 s it must never go without
+/// one. A heartbeat that is due goes out that much late at most, so the plugin sees one every
+/// six and a half seconds in the worst case. A longer slice would get the verdict no sooner:
+/// the thread already hashes four fifths of the time.
+pub const SLICE: Duration = Duration::from_secs(1);
 
 /// How one step of checking the executable ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -59,6 +59,12 @@ impl Host for NexusHost {
     }
     fn inventory_diagnostics(&self) -> tyrian_companion_nexus_core::inventory::Diagnostics { crate::inventory::diagnostics() }
 
+    /// The game's executable is verified before the first sample, a slice of its hash on each
+    /// pass: not ready, and nothing to tell the plugin, while that is under way.
+    fn prepare_inventory(&self, stop: &AtomicBool) -> bool {
+        crate::inventory::prepare(stop)
+    }
+
     fn game_exiting(&self) -> bool {
         GAME_EXITING.load(Ordering::Relaxed)
     }

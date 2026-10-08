@@ -129,22 +129,34 @@ build, or another one, by a size that cannot be the certified build's (no bytes,
 128 MiB), a hash that was computed and is not its, or a header in memory that is not its. A
 "no" of those is `unsupported_build` to the host and stops the source, as it always did.
 
-The hash is done a quarter of a second on each cycle (`executable::SLICE`), going on from
-where the cycle before left it, with the same calls to the system's SHA-256. It used to be
-done in one go, with 10 seconds for it, on the thread that keeps the connection to the plugin
-alive: on a cold, slow disk that thread sent no heartbeat for as long as the hash took, which
-is longer than the plugin waits before it takes the connection for lost. Now the hash holds
-that thread for a quarter of a second at a time, and has no time limit of its own: a disk
-however slow gets its verdict, some cycles later. Until then the source reports a reading
-that failed ("reading unavailable", `read_failed` to the host), which stops nothing, and the
-first sample comes a few seconds later than it did.
+The hash is done a second at a time (`executable::SLICE`), once on each pass of the thread
+that keeps the connection to the plugin alive, going on from where the pass before left it,
+with the same calls to the system's SHA-256. It used to be done in one go, with 10 seconds
+for it, on that thread: on a cold, slow disk it sent no heartbeat for as long as the hash
+took, and the plugin takes the connection for lost after 15 seconds without one. Now a pass
+of that thread is at most the second of the slice, the one read of the file that was under
+way when it ran out, and the quarter of a second it waits on its socket: about a second and
+a quarter between two chances to send a heartbeat. The hash has no time limit of its own: a
+disk however slow gets its verdict, some passes later.
+
+**While that verdict is pending the addon says nothing about it to the plugin.** It is not a
+reading that failed: the source is not ready to sample yet (`Host::prepare_inventory`), so the
+loop takes no sample, opens no epoch and sends no `live_status`, exactly as when it is not
+time to sample. A `live_status` would open a gap in the plugin's session on every load, and
+`docs/SPEC-live-loot.md` asks for nothing between `live_cap` and the first `live_open`: the
+plugin only starts expecting samples once it has answered a `live_open` with `ready`. On the
+wire there are heartbeats and then the `live_open` and its baseline, as on any load; the first
+sample comes those few seconds later than when the hash ran in one go. Meanwhile Options and
+the panel's status tooltip say "Inventory: waiting for confirmation", the state the source is
+in before its first capture.
 
 What the system fails to do is not a verdict: the file cannot be opened or read, it is
 written while it is hashed, or a copy of the header fails. That used to be kept as
-"unsupported game build" until the addon was loaded again. It is reported as a reading that
-failed too, and tried again 30 seconds later, from the start if it happened during the hash
-and without hashing again if the file was already known to be the certified build's. Which
-builds are accepted, and the hash they are told by, are unchanged.
+"unsupported game build" until the addon was loaded again. That one is a reading that
+failed, said as `read_failed` when it happens, and tried again 30 seconds later, from the
+start if it happened during the hash and without hashing again if the file was already known
+to be the certified build's. Which builds are accepted, and the hash they are told by, are
+unchanged.
 
 Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
 including coherence rechecks and TEB discovery. The Windows adapter also checks a
@@ -1124,8 +1136,11 @@ covers what does not need a running game:
   digest deciding the build, the hash going on across slices with every byte in it once, a
   header that is not the certified one decided for good, everything the system can fail at
   deciding nothing, and a verdict kept only when final, an unfinished slice neither kept nor
-  waited for and a failure tried again after its wait. The adapter that opens the real file
-  and calls the system's SHA-256 is not tested;
+  waited for and a failure tried again after its wait. On the real loop
+  (`core/tests/client_live.rs`), a source whose verdict is pending puts nothing but heartbeats
+  on the wire, then opens with its baseline as always, or says `unsupported_build` once, or
+  `read_failed` for a failure of the system. The adapter that opens the real file and calls
+  the system's SHA-256 is not tested;
 - the counters of the reader diagnostics (`core/src/perf.rs`): last and longest time of a
   pass, captures counted by how they ended with a copy refused by the clock kept apart from
   one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and

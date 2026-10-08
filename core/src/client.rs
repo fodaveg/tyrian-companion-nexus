@@ -104,6 +104,13 @@ pub trait Host: Send + 'static {
         Err(crate::inventory::ReadError::RootUnavailable)
     }
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
+    /// Does a bounded part of whatever the source has to do before it can take a sample at all,
+    /// and says whether that is done. Asked on this worker right before each sample. While it
+    /// says `false` there is no sample to take on this pass and nothing has failed: the loop
+    /// does not call [`Host::read_inventory`], opens no epoch and tells the plugin nothing, as
+    /// when it is not time to sample yet. The Windows adapter verifies the game's executable
+    /// here, a slice of its hash at a time. A host with nothing to prepare is always ready.
+    fn prepare_inventory(&self, _stop: &AtomicBool) -> bool { true }
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
@@ -497,7 +504,10 @@ fn serve(
                 let ctx = session.last_context_seq.unwrap_or(0);
                 let mut frames = session.live.gameplay_status();
                 if let Some(pending) = session.live.pending_frames(ctx, now) { frames.extend(pending); }
-                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) {
+                // A source that is still getting ready has no sample and no failure to report:
+                // the pass goes by like one in which it is not time to sample, and it is asked
+                // again on the next. Nothing about it is put on the wire.
+                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) && host.prepare_inventory(stop) {
                     let sample = host.read_inventory(stop);
                     if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
                     state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());

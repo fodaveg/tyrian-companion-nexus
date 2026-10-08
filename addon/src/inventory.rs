@@ -236,9 +236,10 @@ impl HashedFile for Executable {
     }
 }
 
-/// How far the verification of the executable has got. The hash is done a slice on each cycle
-/// (`executable::SLICE`), so the file and the hash object wait here in between; once the file
-/// is known to be the certified build it is not hashed again, whatever fails after that.
+/// How far the verification of the executable has got. The hash is done a slice on each pass
+/// of the bridge worker (`executable::SLICE`), so the file and the hash object wait here in
+/// between; once the file is known to be the certified build it is not hashed again, whatever
+/// fails after that.
 enum Check {
     Unstarted,
     Hashing(Hashing<Executable>),
@@ -255,39 +256,47 @@ pub fn release_executable() {
     }
 }
 
+/// Why there is no verdict on the executable yet. The two are not the same thing to the
+/// plugin, and are kept apart all the way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unverified {
+    /// The hash is still under way: nothing has failed and nothing is known. The source is not
+    /// ready to sample (`prepare`), and says nothing.
+    Pending,
+    /// The system failed to open or read the file, or to copy the image: a reading that
+    /// failed, reported as one and tried again [`VERIFY_RETRY`] later.
+    Failed,
+}
+
 /// The verified build's reader, or `None` for an executable that is another build by what the
 /// file or its loaded image says: the two final answers, kept for the whole load. A
 /// verification the system failed is not kept: it is tried again [`VERIFY_RETRY`] later.
-static READER: Verdict<Option<NativeReader>, ReadError> = Verdict::new(VERIFY_RETRY);
+static READER: Verdict<Option<NativeReader>, Unverified> = Verdict::new(VERIFY_RETRY);
 
 /// One step of verifying the executable: at most `executable::SLICE` of hashing, and once the
 /// file is the certified build's, the check of its loaded image.
-fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, ReadError> {
-    // What the source is told while there is no verdict: a reading that failed, which it
-    // tries again a second later. `UnsupportedBuild` is for the verdict alone, as it stops the
-    // source until the game context changes.
-    const NOT_YET: ReadError = ReadError::ReadFailed;
+fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, Unverified> {
     // Safety: OS module metadata; no game function is resolved or called.
     let Ok(module) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else {
-        return Attempt::Failed(NOT_YET);
+        return Attempt::Failed(Unverified::Failed);
     };
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
     if matches!(*check, Check::Unstarted) {
         let Some(file) = Executable::open(module) else {
-            return Attempt::Failed(NOT_YET);
+            return Attempt::Failed(Unverified::Failed);
         };
         match Hashing::start(file) {
             Ok(hashing) => *check = Check::Hashing(hashing),
             // Its size alone: not the certified build, and no byte of it was read.
             Err(Step::Decided(_)) => return Attempt::Settled(None),
-            Err(_) => return Attempt::Failed(NOT_YET),
+            Err(_) => return Attempt::Failed(Unverified::Failed),
         }
     }
     if let Check::Hashing(hashing) = &mut *check {
         let until = Instant::now() + executable::SLICE;
         let step = hashing.advance(|| stop.load(Ordering::Relaxed) || Instant::now() >= until);
         match step {
-            Step::Unfinished => return Attempt::Unfinished(NOT_YET),
+            Step::Unfinished => return Attempt::Unfinished(Unverified::Pending),
             Step::Decided(Build::Certified) => *check = Check::Certified,
             Step::Decided(Build::Other) => {
                 *check = Check::Unstarted;
@@ -295,14 +304,23 @@ fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, ReadError> {
             }
             Step::Failed => {
                 *check = Check::Unstarted;
-                return Attempt::Failed(NOT_YET);
+                return Attempt::Failed(Unverified::Failed);
             }
         }
     }
     match NativeReader::of_image(module.0 as u64, stop) {
         Step::Decided(reader) => Attempt::Settled(reader),
-        _ => Attempt::Failed(NOT_YET),
+        _ => Attempt::Failed(Unverified::Failed),
     }
+}
+
+/// Does one slice of the verification of the executable, if it is not over, and says whether
+/// the source can be asked for a sample: `false` only while the hash is still under way. The
+/// bridge worker asks this before every sample and takes none while it says no, so a verdict
+/// that is pending never reaches the plugin as a reading that failed. Once there is a verdict,
+/// or the system has failed, [`sample`] says which.
+pub fn prepare(stop: &AtomicBool) -> bool {
+    READER.get_or_try(Instant::now, || verify(stop)).err() != Some(Unverified::Pending)
 }
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     threads: 0,
@@ -336,17 +354,22 @@ fn publish(d: Diagnostics) {
 /// Lazily verify the executable on the worker. Unknown build never reaches inventory offsets.
 /// One sample owns its entire read budget and returns no pointers over the bridge.
 ///
-/// The verification takes several cycles: the executable is hashed a quarter of a second on
-/// each, so that this thread, which also keeps the connection alive, is never held by it.
-/// Until there is a verdict this comes back as `ReadFailed`, not as `UnsupportedBuild`: the
-/// build is not known to be another, and `UnsupportedBuild` stops the source until the game
-/// context changes. Only a final answer is kept for the load (`verify`).
+/// The verification takes several passes of the worker, a slice of the hash on each, so that
+/// this thread, which also keeps the connection alive, is never held by it. The worker asks
+/// [`prepare`] first and does not come here while the verdict is pending. A verification the
+/// system failed comes back as `ReadFailed`, not as `UnsupportedBuild`: the build is not known
+/// to be another, and `UnsupportedBuild` stops the source until the game context changes. Only
+/// a final answer is kept for the load (`verify`).
 pub fn sample(stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
     if stop.load(Ordering::Relaxed) {
         return Err(ReadError::ReadFailed);
     }
     publish(Diagnostics::default());
-    let native = READER.get_or_try(Instant::now, || verify(stop))?;
+    // `Pending` is only here for a caller that did not ask `prepare`: with no sample to give,
+    // the one answer left in `ReadError` that does not stop the source.
+    let native = READER
+        .get_or_try(Instant::now, || verify(stop))
+        .map_err(|_: Unverified| ReadError::ReadFailed)?;
     native
         .as_ref()
         .ok_or(ReadError::UnsupportedBuild)?
