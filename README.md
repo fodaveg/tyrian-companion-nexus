@@ -711,7 +711,14 @@ The session's highest Magic Find, the one a fall is measured against:
 
 - is fed only by a reading the reader has just returned, never by one that is being held, and
   only while the session measures: not while it prepares, and not once it is complete;
+- is fed only by a reading whose own cycle ran once the session was seen measuring. The
+  reader's last output stays in place until the next cycle, so the one that is there when a
+  session starts can be up to 5 seconds older than the session: it is painted, as the last
+  thing the reader verified, and it is not taken as the highest;
 - only goes up;
+- is one character's. A different character named by the game context starts it over, and
+  nothing read of the character before is painted or kept. Going to character select and
+  coming back with the same character changes nothing;
 - is the session's. `farm1` carries no session id, so another session is one that starts
   running after one that was not, or one whose declared duration goes back by more than a
   minute or to under a minute; the host sends a frame every 5 seconds, so a short `starting`
@@ -996,7 +1003,8 @@ covers what does not need a running game:
   verified reading (one failed cycle or one capture that fails as a whole changes neither
   cell, six seconds let go, a stopped reader at once, a new session, and that a held reading
   does not move the highest), a reading being as old as its own cycle, no character in a map
-  told apart from a capture that failed, another session noticed
+  told apart from a capture that failed, a reading from before the session or of another
+  character not becoming the highest, another session noticed
   with the panel closed and without a `starting` frame, a complete session not feeding the
   highest, the two diagnostics lines of Options, and that every text the panel produces is
   covered by a width reserved for its own cell. None of the painting itself is tested;

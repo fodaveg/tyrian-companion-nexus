@@ -113,6 +113,8 @@ struct Case {
     live: LiveStatus,
     /// The reported game context is gameplay. False at character select and on a loading screen.
     character_in_map: bool,
+    /// The character that context names, if it names one.
+    character: Option<String>,
     wallet: WalletCoverage,
     bags: BagCoverage,
     magic_find: MagicFindCoverage,
@@ -130,6 +132,7 @@ impl Case {
             price: price(Some(&price_frame("ok")), Duration::ZERO),
             live: LiveStatus::Measuring,
             character_in_map: true,
+            character: Some("Astra Uno".to_string()),
             wallet: WalletCoverage::Listed(55),
             bags: BagCoverage::NotRead,
             magic_find: MagicFindCoverage::NotRead,
@@ -161,6 +164,7 @@ impl Case {
             price: &self.price,
             live: self.live,
             character_in_map: self.character_in_map,
+            character: self.character.as_deref(),
             wallet: self.wallet,
             bags: self.bags,
             magic_find: self.magic_find,
@@ -491,6 +495,97 @@ fn another_session_is_noticed_without_a_starting_frame() {
     assert_eq!(panel.memory.magic_find_peak(), None);
     panel.case.connection = Status::Connected;
     assert_eq!(panel.at(10, bags(41, 160), verified(300, 30.0, 3.0)).magic_find.tone, Tone::Normal);
+}
+
+/// The reader's output stays `Read` until another cycle replaces it, so in the first frame of a
+/// session it can still be a reading of up to five seconds before: of the game as it was then,
+/// not of this session. It is painted, as the last thing the reader verified, and it is not the
+/// session's highest.
+#[test]
+fn a_reading_from_before_the_session_does_not_become_its_highest() {
+    for before in ["complete", "idle", "starting"] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.case.farming = session(before, 0);
+        panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+        assert_eq!(panel.memory.magic_find_peak(), None, "{before}: no session measuring yet");
+        // The session measures from here. The frame that says so comes four seconds later, and
+        // the plugin has been slow: no cycle has run since, the diagnostics still say `Read`.
+        panel.case.farming = session("active", 2);
+        panel.case.now = panel.start + Duration::from_secs(4);
+        let first = panel.case.view_with(&mut panel.memory, false).magic_find;
+        assert_eq!(first.text, "MF: 383%", "{before}: {first:?}");
+        assert!(has(&first, "Última lectura hace 4 s"), "{before}: {first:?}");
+        assert_eq!(panel.memory.magic_find_peak(), None, "{before}: read before the session measured");
+        // The next cycle is the session's first reading, and so its highest: no fall from a 383
+        // the session never had.
+        let next = panel.at(5, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+        assert_eq!((next.text.as_str(), next.tone), ("MF: 333%", Tone::Normal), "{before}: {next:?}");
+        assert!(!has(&next, "Bajó") && !has(&next, "383"), "{before}: {next:?}");
+        assert_eq!(panel.memory.magic_find_peak(), Some(333.0), "{before}");
+    }
+}
+
+/// Another character is another baseline: its Magic Find is not a fall from the highest of the
+/// one before, in the same session. Going through character select and coming back with the
+/// same character is not a change.
+#[test]
+fn another_character_does_not_inherit_the_highest() {
+    let character_select = |panel: &mut Follow, seconds: u64| {
+        panel.case.character = None;
+        panel.case.character_in_map = false;
+        panel.case.live = LiveStatus::Unavailable;
+        panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead)
+    };
+    let enters = |panel: &mut Follow, name: &str| {
+        panel.case.character = Some(name.to_string());
+        panel.case.character_in_map = true;
+        panel.case.live = LiveStatus::Measuring;
+    };
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // To character select and back with the same character: the highest is still the session's.
+    character_select(&mut panel, 10);
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0), "nobody named is not somebody else");
+    enters(&mut panel, "Astra Uno");
+    let same = panel.at(30, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!(same.tone, Tone::Warning, "{same:?}");
+    assert!(has(&same, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{same:?}");
+    // Another character, in the same session: 333 is its first reading, not a fall.
+    character_select(&mut panel, 40);
+    enters(&mut panel, "Bruma Dos");
+    let other = panel.at(60, bags(12, 80), verified(300, 30.0, 3.0));
+    assert_eq!((other.magic_find.text.as_str(), other.magic_find.tone), ("MF: 333%", Tone::Normal), "{:?}", other.magic_find);
+    assert!(!has(&other.magic_find, "Bajó") && !has(&other.magic_find, "383"), "{:?}", other.magic_find);
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
+    // And from there it is followed as any other: a fall from its own highest warns.
+    let fell = panel.at(61, bags(12, 80), verified(300, 0.0, 3.0)).magic_find;
+    assert_eq!(fell.tone, Tone::Warning, "{fell:?}");
+    assert!(has(&fell, "Bajó 30 puntos respecto al máximo de la sesión (333%)"), "{fell:?}");
+}
+
+/// The frame in which the new character is first named can come before the reader's first
+/// cycle on it: the reader's output is then still the last reading of the character before.
+/// It is neither painted as this one's nor taken as its highest.
+#[test]
+fn a_reading_of_the_character_before_is_not_this_ones() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    // Three seconds later the context names another character, and no cycle has run since.
+    panel.case.character = Some("Bruma Dos".to_string());
+    panel.case.now = panel.start + Duration::from_secs(3);
+    let stale = panel.case.view_with(&mut panel.memory, false);
+    assert_eq!((stale.slots.text.as_str(), stale.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "the plugin's, not the other character's");
+    assert!(!has(&stale.slots, "verificado por el addon") && !has(&stale.magic_find, "verificado por el addon"));
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    // Still the same output a frame later: it does not come back.
+    panel.case.now = panel.start + Duration::from_millis(3_250);
+    assert_eq!(panel.case.view_with(&mut panel.memory, false).magic_find.text, "MF: 333% parcial");
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    // The first cycle on the new character is its reading, and its highest.
+    let read = panel.at(4, bags(12, 80), verified(300, 30.0, 3.0));
+    assert_eq!((read.slots.text.as_str(), read.magic_find.text.as_str(), read.magic_find.tone), ("Huecos: 12 libres", "MF: 333%", Tone::Normal));
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
 }
 
 /// The highest is the session's while it measures: a reading after it is complete is compared
@@ -1537,6 +1632,7 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                                 live: if local == 0 { LiveStatus::Measuring } else { LiveStatus::Unavailable },
                                 // With and without a character in a map, across the states.
                                 character_in_map: index % 2 == 0,
+                                character: (index % 2 == 0).then(|| "Astra Uno".to_string()),
                                 wallet: WalletCoverage::Listed(55),
                                 bags: match read { 0 => BagCoverage::NotRead, 1 => bags(2, 160), _ => BagCoverage::Unavailable(Uncovered::Changed) },
                                 magic_find: match read { 0 => MagicFindCoverage::NotRead, 1 => verified(300, 30.5, 3.0), _ => MagicFindCoverage::Unavailable(Uncovered::Unsupported) },

@@ -435,6 +435,8 @@ pub fn farming_render(ui: &Ui) {
     let now = std::time::Instant::now();
     let (farming, price) = (shared.farming_view(now), shared.price_view(now));
     let (diagnostics, read_at) = shared.inventory_reading();
+    // The context the client last reported, for the character it names.
+    let context = shared.live_context();
     let input = PanelInput {
         now,
         // The instant of the reader's cycle these diagnostics are from: a reading is as old as
@@ -447,6 +449,8 @@ pub fn farming_render(ui: &Ui) {
         // By the context the client reports, from NexusLink and the Mumble Link: at character
         // select or on a loading screen the source is unavailable and nothing has failed.
         character_in_map: shared.character_in_map(),
+        // Only to notice that it is another: the session's highest Magic Find is per character.
+        character: context.as_ref().and_then(|context| context.character.as_deref()),
         wallet: diagnostics.wallet,
         // What the addon's own reader got in its last cycle. Only a `Read` is painted as
         // verified; otherwise the lines use what the plugin sends in `farm1`.

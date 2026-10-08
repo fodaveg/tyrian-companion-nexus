@@ -83,6 +83,15 @@ pub struct PanelMemory {
     /// The highest verified Magic Find of the current session, with its addends. Only readings
     /// the reader returned while the session measures feed it, and it only goes up.
     magic_find_peak: Option<MagicFind>,
+    /// From when a reading can be that highest: the frame in which this session, with this
+    /// character, was first seen measuring. The reader's output stays as it is until another
+    /// cycle replaces it, so without this a reading of up to [`READING_HOLD`] before the session
+    /// started, or of the character before this one, would still be taken.
+    peak_from: Option<Instant>,
+    /// The last character the game context named, and since when the readings are its own: the
+    /// frame in which a different one was first seen. Another character is another baseline.
+    character: Option<String>,
+    character_since: Option<Instant>,
     /// The last verified reading of each line and the instant of the reader's cycle that
     /// returned it, kept for [`READING_HOLD`].
     bags: Option<(BagSlots, Instant)>,
@@ -101,7 +110,19 @@ pub struct PanelMemory {
 impl PanelMemory {
     /// Nothing remembered: a range is a range and no reading has been seen.
     pub const fn new() -> Self {
-        Self { rate_averaged: false, magic_find_peak: None, bags: None, magic_find: None, session_running: false, elapsed: None, good_capture: None, good_wallet: None }
+        Self {
+            rate_averaged: false,
+            magic_find_peak: None,
+            peak_from: None,
+            character: None,
+            character_since: None,
+            bags: None,
+            magic_find: None,
+            session_running: false,
+            elapsed: None,
+            good_capture: None,
+            good_wallet: None,
+        }
     }
 
     /// The highest verified Magic Find total of the current session, if any reading fed it.
@@ -277,14 +298,30 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
     let another = (running && !memory.session_running) || restarted;
     memory.session_running = running;
     memory.elapsed = elapsed;
-    if another {
+    // Another character, as another session: nothing read of the one before is this one's. A
+    // context that names nobody (character select, or no link yet) is not a change, so the same
+    // character coming back keeps what it had.
+    let another_character = matches!((memory.character.as_deref(), input.character), (Some(before), Some(now)) if before != now);
+    if let Some(name) = input.character.filter(|name| memory.character.as_deref() != Some(*name)) {
+        memory.character = Some(name.to_string());
+    }
+    if another_character {
+        memory.character_since = Some(input.now);
+    }
+    if another || another_character {
         memory.bags = None;
         memory.magic_find = None;
     }
     // No highest without a session that has started measuring, nor across a lost connection:
     // what happened while the addon was not being told is not this session's as far as it knows.
-    if another || input.connection != Status::Connected || matches!(phase, None | Some(Phase::Idle | Phase::Starting)) {
+    if another || another_character || input.connection != Status::Connected || matches!(phase, None | Some(Phase::Idle | Phase::Starting)) {
         memory.magic_find_peak = None;
+        memory.peak_from = None;
+    }
+    // The highest counts from the first frame in which this session is seen measuring.
+    let measuring = matches!(phase, Some(Phase::Active | Phase::Stopping | Phase::Provisional));
+    if measuring && memory.peak_from.is_none() {
+        memory.peak_from = Some(input.now);
     }
     let source = source(input);
     // When the reader last captured well, by the instant of that capture. A reader that has
@@ -316,14 +353,19 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
         MagicFindCoverage::Unavailable(reason) => (None, Some(reason)),
         MagicFindCoverage::NotRead => (None, None),
     };
-    let bags = take(&mut memory.bags, source, bags, bags_reason, input.read_at, input.now);
-    let magic_find = take(&mut memory.magic_find, source, magic_find, magic_find_reason, input.read_at, input.now);
+    // A cycle that ran before this character was the one in the game read the one before: its
+    // output is still there until the next cycle, and is not a reading of this one.
+    let since = |from: Option<Instant>| input.read_at.is_some_and(|at| from.is_none_or(|from| at >= from));
+    let own = since(memory.character_since);
+    let bags = take(&mut memory.bags, source, bags.filter(|_| own), bags_reason, input.read_at, input.now);
+    let magic_find = take(&mut memory.magic_find, source, magic_find.filter(|_| own), magic_find_reason, input.read_at, input.now);
     // Only a reading the reader has just returned, while the session measures, can be its
     // highest; and the highest only goes up. A held reading is compared with it and never
-    // moves it, and neither does one read after the session is complete.
+    // moves it, and neither does one read after the session is complete, nor one whose cycle
+    // ran before this session was measuring: `read` only says the reader's output is a figure.
     if let Some(Taken { value, read: true, .. }) = magic_find {
-        let measuring = matches!(phase, Some(Phase::Active | Phase::Stopping | Phase::Provisional));
-        if measuring && memory.magic_find_peak.is_none_or(|peak| value.total > peak.total) {
+        let of_this_session = memory.peak_from.is_some() && since(memory.peak_from);
+        if measuring && of_this_session && memory.magic_find_peak.is_none_or(|peak| value.total > peak.total) {
             memory.magic_find_peak = Some(value);
         }
     }
@@ -357,6 +399,10 @@ pub struct PanelInput<'a> {
     /// memory readers). Without one the source says `Unavailable` because there is nothing to
     /// capture, which is not a capture that failed.
     pub character_in_map: bool,
+    /// The character the same game context names, `None` when it names none (character select,
+    /// or nothing read from the link yet). Only compared with the one before: a different one
+    /// starts the session's highest Magic Find over, and nothing read of the other is kept.
+    pub character: Option<&'a str>,
     pub wallet: WalletCoverage,
     /// What the addon's own reader says about the bags in its last cycle
     /// (`inventory::Diagnostics::bags`). Only `Read` is a verified figure; without it the line
