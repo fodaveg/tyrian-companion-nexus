@@ -78,7 +78,7 @@ fn reading_age_shows_only_when_it_reports_a_problem_in_a_measuring_phase() {
 fn without_any_reading_nothing_is_shown() {
     let state = SharedState::new();
     assert!(!state.farming_view(Instant::now()).show_reading_age());
-    assert!(state.farming_view(Instant::now()).rate_line(false).is_none());
+    assert!(state.farming_view(Instant::now()).rate_notes(false).is_empty());
 }
 
 /// The view `local` after `value` arrived, for times finer than a second.
@@ -94,32 +94,13 @@ fn view_after(value: &Value, local: Duration) -> FarmingView {
     state.farming_view(now + local)
 }
 
-#[test]
-fn the_rate_line_text_follows_the_band_in_both_languages() {
-    // (lo, hi, Spanish, English)
-    for (lo, hi, es, en) in [
-        (json!(480), json!(560), "480–560 bolsas/h", "480–560 bags/h"),
-        (json!(480), json!(480), "480 bolsas/h", "480 bags/h"),
-        (json!(480), Value::Null, "≥480 bolsas/h", "≥480 bags/h"),
-        (Value::Null, Value::Null, "— bolsas/h", "— bags/h"),
-        (Value::Null, json!(560), "— bolsas/h", "— bags/h"),
-    ] {
-        let mut value = frame("active", Value::Null, json!(0));
-        value["lo"] = lo;
-        value["hi"] = hi;
-        let view = view_after(&value, Duration::ZERO);
-        assert_eq!(view.rate_line(false).unwrap().text, es);
-        assert_eq!(view.rate_line(true).unwrap().text, en);
-    }
-}
-
 /// The host sends a frame every 5 s and the reader samples once a second, so a frame arrives
 /// with `age` 0, 1 or 2 and the next one 5 s later, give or take the 250 ms read poll. Across
-/// that whole cycle the rate line says nothing: no colour, no note. The 5 s freshness that
-/// used to paint "Last recorded rate" does flip inside the same cycle, which is why that line
-/// came and went.
+/// that whole cycle there is nothing to say about the rate: no note, so no colour. The 5 s
+/// freshness that used to paint "Last recorded rate" does flip inside the same cycle, which is
+/// why that line came and went.
 #[test]
-fn normal_measurement_never_colours_the_rate_line_between_two_frames() {
+fn normal_measurement_has_no_rate_note_between_two_frames() {
     let mut flips = 0;
     for emitted_age in [0, 1, 2] {
         let value = frame("active", Value::Null, json!(emitted_age));
@@ -127,8 +108,8 @@ fn normal_measurement_never_colours_the_rate_line_between_two_frames() {
         for millis in (0..=5_500).step_by(50) {
             let view = view_after(&value, Duration::from_millis(millis));
             for english in [false, true] {
-                let line = view.rate_line(english).unwrap();
-                assert!(!line.warning && line.notes.is_empty(), "age {emitted_age} +{millis} ms: {line:?}");
+                let notes = view.rate_notes(english);
+                assert!(notes.is_empty(), "age {emitted_age} +{millis} ms: {notes:?}");
             }
             let fresh = view.source_fresh();
             if *fresh_at_start.get_or_insert(fresh) != fresh {
@@ -167,12 +148,8 @@ fn normal_measurement_keeps_the_bags_eta_between_two_frames() {
 }
 
 #[test]
-fn the_rate_line_warns_with_what_used_to_be_lines_of_their_own() {
-    let notes = |value: &Value, local: u64, english: bool| {
-        let line = view_after(value, Duration::from_secs(local)).rate_line(english).unwrap();
-        assert_eq!(line.warning, !line.notes.is_empty());
-        line.notes
-    };
+fn the_rate_notes_are_what_used_to_be_lines_of_their_own() {
+    let notes = |value: &Value, local: u64, english: bool| view_after(value, Duration::from_secs(local)).rate_notes(english);
     let active = |age: Value| frame("active", Value::Null, age);
     // No rate yet.
     let mut no_rate = active(json!(0));
@@ -199,33 +176,4 @@ fn the_rate_line_warns_with_what_used_to_be_lines_of_their_own() {
     let mut all = frame("active", json!("observe"), Value::Null);
     all["lo"] = Value::Null;
     assert_eq!(notes(&all, 0, false), ["Ritmo aún no disponible", "Último ritmo registrado", "Sin lectura"]);
-}
-
-/// One line whatever the reading says: the block cannot grow or shrink.
-#[test]
-fn the_rate_block_is_one_line_in_every_state() {
-    let phases = ["idle", "starting", "active", "stopping", "provisional", "complete", "error", "abandoned"];
-    let errors = [Value::Null, json!("start"), json!("observe"), json!("stop"), json!("save"), json!("other")];
-    let ages = [Value::Null, json!(0), json!(4), json!(5), json!(14), json!(15), json!(900)];
-    let bands = [(Value::Null, Value::Null), (json!(480), Value::Null), (json!(480), json!(560))];
-    for phase in phases {
-        for err in &errors {
-            for age in &ages {
-                for (lo, hi) in &bands {
-                    let mut value = frame(phase, err.clone(), age.clone());
-                    value["lo"] = lo.clone();
-                    value["hi"] = hi.clone();
-                    for local in [0, 4, 5, 14, 15, 60] {
-                        let view = view_after(&value, Duration::from_secs(local));
-                        for english in [false, true] {
-                            let line = view.rate_line(english).expect("a reading always has its rate line");
-                            assert!(!line.text.is_empty() && !line.text.contains('\n'), "{value}");
-                            assert!(line.text.chars().count() <= 34, "{}", line.text);
-                            assert!(line.notes.iter().all(|note| !note.contains('\n')));
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

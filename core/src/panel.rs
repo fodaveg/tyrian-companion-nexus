@@ -7,11 +7,17 @@
 //! the free slots, the Magic Find and the status. Every cell exists in every state and says
 //! `—` without a figure, so the window never grows, shrinks or moves a line. What used to be
 //! lines of their own (duration, goal and ETA, net bags at close, stale data, inventory and
-//! wallet coverage, host connection) is in the tooltip of the cell it is about.
+//! wallet coverage, host connection, preparation) is in the tooltip of the cell it is about.
 //!
 //! Colour is never the only signal: the text states the status and the tooltip the detail.
+//!
+//! Free slots and Magic Find can come from two places, in this order: a reading the addon
+//! verified itself ([`VerifiedSlots`], [`VerifiedMagicFind`]), which no reader provides yet,
+//! and what the plugin sends in `farm1`. A Magic Find from the plugin is a value declared when
+//! the session started, or a partial one: it does not follow the game, so it is written and
+//! coloured apart and never warns about a drop.
 
-use crate::farming::{FarmingError, FarmingView, Goal, Phase};
+use crate::farming::{FarmingError, FarmingView, Goal, MagicFindKind, Phase, Preparation, SlotSource};
 use crate::live::LiveStatus;
 use crate::price::{format_coins, PriceStatus, PriceView};
 use crate::state::Status;
@@ -30,7 +36,7 @@ pub const SLOTS_ERROR: i32 = 3;
 pub enum Tone {
     /// The host's own text colour.
     Normal,
-    /// No figure, or nothing going on: grey.
+    /// No figure, a figure that is not a live reading, or nothing going on: grey.
     Muted,
     /// Connected and measuring: green. Only the status dot uses it.
     Good,
@@ -48,13 +54,39 @@ pub struct Cell {
     pub tooltip: Vec<String>,
 }
 
+/// The bags of the character as the addon itself read and verified them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedSlots {
+    pub free: i32,
+    /// Total slots of the equipped bags, when the reader has them.
+    pub capacity: Option<i32>,
+}
+
+/// One part of a verified Magic Find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MagicFindSource {
+    /// Account luck.
+    Luck,
+    /// The bonus the server applies.
+    Server,
+    /// Boosters, food and other effects on the character.
+    Effects,
+}
+
+/// Magic Find as the addon itself read and verified it: the total and what it is made of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedMagicFind {
+    pub total: i32,
+    pub parts: Vec<(MagicFindSource, i32)>,
+}
+
 /// What the panel remembers from one frame to the next.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PanelMemory {
     /// The rate is being shown as one averaged number instead of its range.
     rate_averaged: bool,
-    /// Highest Magic Find seen in the current session.
-    magic_find_peak: Option<i32>,
+    /// The highest verified Magic Find of the current session, with its parts.
+    magic_find_peak: Option<VerifiedMagicFind>,
 }
 
 impl PanelMemory {
@@ -72,11 +104,12 @@ pub struct PanelInput<'a> {
     pub price: &'a PriceView,
     pub live: LiveStatus,
     pub wallet: WalletCoverage,
-    /// Free bag slots of the character from a validated reader. There is none yet: the addon
-    /// passes `None` and the line says `—`.
-    pub slots: Option<i32>,
-    /// Magic Find percentage from a validated reader. None yet, as above.
-    pub magic_find: Option<i32>,
+    /// Free bag slots read and verified by the addon. No reader provides them yet, so the
+    /// addon passes `None` and the line falls back to the plugin's `slots`.
+    pub verified_slots: Option<VerifiedSlots>,
+    /// Magic Find read and verified by the addon. None yet either: the line falls back to the
+    /// plugin's `mf`, marked as not live.
+    pub verified_magic_find: Option<VerifiedMagicFind>,
 }
 
 /// The whole panel. Its shape is its type: there is no state in which a line is missing.
@@ -100,9 +133,6 @@ pub struct PanelView {
 }
 
 impl PanelView {
-    /// Lines of the body in every state: label, figure and rate, then slots, Magic Find, status.
-    pub const LINES: usize = 6;
-
     /// Every cell, for checks that hold for all of them.
     pub fn cells(&self) -> [&Cell; 9] {
         [
@@ -218,24 +248,25 @@ fn averaged(lo: i32, hi: i32, was: bool) -> bool {
     }
 }
 
+const RATE_UNIT: &str = "b/h";
+
 /// The rate. A band is shown as `lo–hi`, or as `~mean` while it is wide (see [`averaged`]),
 /// with the band itself in the tooltip. A band one unit wide is one number rounded down and
 /// up, which is what a live session sends, and is shown as that number. Notes about the rate
-/// ([`FarmingView::rate_line`]) go to the tooltip and paint it in the warning tone.
+/// ([`FarmingView::rate_notes`]) go to the tooltip and paint it in the warning tone.
 fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cell {
-    let unit = "b/h";
     let mut tooltip = vec![tr(english, "Bolsas por hora", "Bags per hour").to_string()];
     let Some(reading) = view.reading.as_ref() else {
         memory.rate_averaged = false;
         tooltip.push(tr(english, "Sin lectura", "No reading").to_string());
-        return cell(format!("{NO_DATA} {unit}"), Tone::Muted, tooltip);
+        return cell(format!("{NO_DATA} {RATE_UNIT}"), Tone::Muted, tooltip);
     };
     let figure = match (reading.lo, reading.hi) {
         (Some(lo), Some(hi)) if i64::from(hi) - i64::from(lo) > 1 => {
             memory.rate_averaged = averaged(lo, hi, memory.rate_averaged);
             if memory.rate_averaged {
                 let mean = (i64::from(lo) + i64::from(hi) + 1) / 2;
-                tooltip.push(format!("{}: {lo}–{hi} {unit}", tr(english, "Rango", "Range")));
+                tooltip.push(format!("{}: {lo}–{hi} {RATE_UNIT}", tr(english, "Rango", "Range")));
                 format!("~{mean}")
             } else {
                 format!("{lo}–{hi}")
@@ -250,10 +281,10 @@ fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cel
             NO_DATA.to_string()
         }
     };
-    let notes = view.rate_line(english).map(|line| line.notes).unwrap_or_default();
+    let notes = view.rate_notes(english);
     let tone = if notes.is_empty() { Tone::Normal } else { Tone::Warning };
     tooltip.extend(notes);
-    cell(format!("{figure} {unit}"), tone, tooltip)
+    cell(format!("{figure} {RATE_UNIT}"), tone, tooltip)
 }
 
 /// The observed bags. Its tooltip keeps what left the panel: duration, goal and ETA, the net at
@@ -307,13 +338,14 @@ fn bags_cell(view: &FarmingView, english: bool) -> Cell {
 }
 
 /// The right column: label, highest buy order and lowest sell offer for a stack of 250, gross.
-/// Figures only from a fresh `ok` reading; every other state says `—` and why in the tooltip.
+/// Figures only from a fresh `ok` reading; every other state says `—` and why in the tooltip,
+/// and so does one side alone without a quote.
 fn stack_cells(input: &PanelInput<'_>, english: bool) -> (Cell, Cell, Cell) {
     let view = input.price;
     let reading = view.reading.as_ref().filter(|_| view.capable && view.fresh);
     let figures = reading.filter(|reading| reading.st == PriceStatus::Ok);
     let idle = view.reading.as_ref().is_some_and(|reading| reading.st == PriceStatus::Idle);
-    // Why there is no figure, or nothing when there is one.
+    // Why there is no figure at all, or nothing when the reading has figures.
     let (state, tone): (Option<String>, Tone) = if input.connection != Status::Connected {
         (Some(tr(english, "Sin conexión", "Offline").to_string()), Tone::Muted)
     } else if !view.capable {
@@ -345,6 +377,13 @@ fn stack_cells(input: &PanelInput<'_>, english: bool) -> (Cell, Cell, Cell) {
             tooltip.push(format!("{}: {}", tr(english, "Unidad", "Unit"), format_coins(unit)));
         }
         tooltip.extend(state.clone());
+        // The reading has figures and this side has none: say which of the two reasons it is.
+        if state.is_none() && stack.is_none() {
+            tooltip.push(match unit {
+                None => tr(english, "Sin cotización en este lado", "No quote on this side").to_string(),
+                Some(_) => tr(english, "El stack no cabe en la trama", "The stack does not fit the frame").to_string(),
+            });
+        }
         let side_tone = match stack {
             Some(_) => Tone::Normal,
             None if tone == Tone::Warning => Tone::Warning,
@@ -369,47 +408,149 @@ fn stack_cells(input: &PanelInput<'_>, english: bool) -> (Cell, Cell, Cell) {
     )
 }
 
-/// Free bag slots: `—` until a validated reader provides them; then the warning tone at
-/// [`SLOTS_WARNING`] or fewer and the error tone at [`SLOTS_ERROR`] or fewer.
-fn slots_cell(slots: Option<i32>, english: bool) -> Cell {
+fn slots_text(free: Option<i32>, english: bool) -> String {
     let label = tr(english, "Huecos", "Slots");
-    let mut tooltip = vec![tr(english, "Huecos libres en las bolsas del personaje", "Free bag slots of the character").to_string()];
-    let Some(slots) = slots else {
-        tooltip.push(tr(english, "Dato aún no disponible", "Not available yet").to_string());
-        return cell(format!("{label}: {NO_DATA}"), Tone::Muted, tooltip);
+    match free {
+        Some(free) => format!("{label}: {free} {}", tr(english, "libres", "free")),
+        None => format!("{label}: {NO_DATA}"),
+    }
+}
+
+/// Free bag slots: the addon's own verified reading if there is one, else what the plugin
+/// sends, else `—`. The warning tone at [`SLOTS_WARNING`] or fewer and the error tone at
+/// [`SLOTS_ERROR`] or fewer. The plugin's figure says in the tooltip whose it is and how old,
+/// and is also in the warning tone when it is old.
+fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
+    let view = input.farming;
+    let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
+    let mut tooltip = vec![line("Huecos libres en las bolsas del personaje", "Free bag slots of the character")];
+    let mut old = false;
+    let free = if let Some(verified) = input.verified_slots {
+        tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
+        if let Some(capacity) = verified.capacity {
+            tooltip.push(format!("{}: {capacity}", tr(english, "Capacidad", "Capacity")));
+        }
+        verified.free
+    } else if let Some((reading, free)) = view.reading.as_ref().and_then(|reading| reading.slots.map(|free| (reading, free))) {
+        tooltip.push(line("Dato del plugin", "From the plugin"));
+        if reading.slot_source == SlotSource::Recent {
+            tooltip.push(line("Personaje reciente", "Recent character"));
+        }
+        tooltip.push(match view.slot_age {
+            Some(age) => format!("{} {age}s", tr(english, "Lectura de huecos hace", "Slot reading ago:")),
+            None => line("Sin lectura de huecos", "No slot reading"),
+        });
+        if !view.fresh {
+            tooltip.push(line("Datos antiguos · última lectura", "Stale data · last reading"));
+        }
+        old = !view.fresh || view.show_reading_age();
+        free
+    } else {
+        tooltip.push(line("Sin lectura de huecos", "No slot reading"));
+        return cell(slots_text(None, english), Tone::Muted, tooltip);
     };
-    let tone = if slots <= SLOTS_ERROR {
+    let tone = if free <= SLOTS_ERROR {
         Tone::Error
-    } else if slots <= SLOTS_WARNING {
+    } else if free <= SLOTS_WARNING || old {
         Tone::Warning
     } else {
         Tone::Normal
     };
-    if tone != Tone::Normal {
-        tooltip.push(tr(english, "Quedan pocos huecos", "Few slots left").to_string());
+    if free <= SLOTS_WARNING {
+        tooltip.push(line("Quedan pocos huecos", "Few slots left"));
     }
-    cell(format!("{label}: {slots} {}", tr(english, "libres", "free")), tone, tooltip)
+    cell(slots_text(Some(free), english), tone, tooltip)
 }
 
-/// Magic Find: `—` until a validated reader provides it; then the warning tone while it is
-/// below the highest value seen in the session, which the tooltip names.
-fn magic_find_cell(magic_find: Option<i32>, view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cell {
+/// How a Magic Find is written: a verified one bare, the plugin's with a word after it that
+/// says it is not a live reading, and `—` without one.
+fn magic_find_text(value: Option<i32>, from_plugin: bool, english: bool) -> String {
+    match value {
+        Some(value) if from_plugin => format!("MF: {value}% {}", tr(english, "parcial", "partial")),
+        Some(value) => format!("MF: {value}%"),
+        None => format!("MF: {NO_DATA}"),
+    }
+}
+
+fn magic_find_source(source: MagicFindSource, english: bool) -> &'static str {
+    match source {
+        MagicFindSource::Luck => tr(english, "Suerte", "Luck"),
+        MagicFindSource::Server => tr(english, "Servidor", "Server"),
+        MagicFindSource::Effects => tr(english, "Efectos", "Effects"),
+    }
+}
+
+/// Magic Find.
+///
+/// - Verified by the addon: the bare figure, its parts in the tooltip, and the warning tone
+///   while it is below the highest total of the session, with how much it fell and which parts.
+/// - From the plugin (`mf` with `mfKind: partial`): a value declared when the session started,
+///   or a partial one. It does not follow the game, so it is written `MF: 333% parcial`, in the
+///   muted tone, never warns about a drop and never feeds the session's peak.
+/// - Neither: `—`.
+///
+/// What the old "optional preparation" block said is at the end of the tooltip.
+fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> Cell {
+    let view = input.farming;
+    let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
     // A session that has not started, or none at all, has no peak to compare with.
     if view.reading.as_ref().is_none_or(|reading| matches!(reading.phase, Phase::Idle | Phase::Starting)) {
         memory.magic_find_peak = None;
     }
-    let mut tooltip = vec![tr(english, "Hallazgo mágico", "Magic Find").to_string()];
-    let Some(value) = magic_find else {
-        tooltip.push(tr(english, "Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage").to_string());
-        return cell(format!("MF: {NO_DATA}"), Tone::Muted, tooltip);
+    let mut tooltip = vec![line("Hallazgo mágico", "Magic Find")];
+    let no_coverage = line("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage");
+    let plugin = view.reading.as_ref().filter(|reading| reading.mf_kind == MagicFindKind::Partial).and_then(|reading| reading.mf);
+    let (text, tone) = if let Some(verified) = input.verified_magic_find.as_ref() {
+        tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
+        for (source, value) in &verified.parts {
+            tooltip.push(format!("{}: {value}%", magic_find_source(*source, english)));
+        }
+        if memory.magic_find_peak.as_ref().is_none_or(|peak| verified.total >= peak.total) {
+            memory.magic_find_peak = Some(verified.clone());
+        }
+        let peak = memory.magic_find_peak.as_ref().filter(|peak| verified.total < peak.total);
+        if let Some(peak) = peak {
+            let fall = peak.total - verified.total;
+            tooltip.push(if english {
+                format!("Down {fall} points from the session peak ({}%)", peak.total)
+            } else {
+                format!("Bajó {fall} puntos respecto al máximo de la sesión ({}%)", peak.total)
+            });
+            for (source, before) in &peak.parts {
+                let now = verified.parts.iter().find(|(part, _)| part == source).map_or(0, |(_, value)| *value);
+                if now < *before {
+                    tooltip.push(if english {
+                        format!("{}: from {before}% to {now}%", magic_find_source(*source, english))
+                    } else {
+                        format!("{}: de {before}% a {now}%", magic_find_source(*source, english))
+                    });
+                }
+            }
+        }
+        (magic_find_text(Some(verified.total), false, english), if peak.is_some() { Tone::Warning } else { Tone::Normal })
+    } else if let Some(value) = plugin {
+        tooltip.push(line(
+            "Dato del plugin: declarado al empezar la sesión, o parcial. No es una lectura en vivo.",
+            "From the plugin: declared when the session started, or partial. Not a live reading.",
+        ));
+        tooltip.push(no_coverage);
+        (magic_find_text(Some(value), true, english), Tone::Muted)
+    } else {
+        tooltip.push(no_coverage);
+        (magic_find_text(None, false, english), Tone::Muted)
     };
-    let peak = memory.magic_find_peak.map_or(value, |peak| peak.max(value));
-    memory.magic_find_peak = Some(peak);
-    let tone = if value < peak { Tone::Warning } else { Tone::Normal };
-    if tone == Tone::Warning {
-        tooltip.push(format!("{}: {peak}%", tr(english, "Máximo de la sesión", "Session peak")));
+    if let Some(reading) = view.reading.as_ref() {
+        tooltip.push(match reading.prep {
+            Preparation::Attention => line("Preparación: revisar en el host", "Preparation: check in the host"),
+            Preparation::Partial => line("Preparación parcial", "Partial preparation"),
+            Preparation::Unknown => line("Preparación desconocida", "Preparation unknown"),
+        });
+        tooltip.push(line(
+            "Buffs temporales sin verificar. Recordatorios manuales en el host.",
+            "Temporary buffs unverified. Manual reminders in the host.",
+        ));
     }
-    cell(format!("MF: {value}%"), tone, tooltip)
+    cell(text, tone, tooltip)
 }
 
 /// What the status says when there is no connection, or `None` when there is one.
@@ -434,17 +575,29 @@ fn connection_text(connection: Status, english: bool) -> Option<(&'static str, T
 /// - grey, connected with no session measuring, or the game closing.
 ///
 /// The transient inventory states (`waiting for confirmation`, `unresolved quantities`) are in
-/// the tooltip and do not change the colour: they come and go in normal measurement.
+/// the tooltip and do not change the colour: they come and go in normal measurement. The
+/// inventory status and the wallet coverage are in the tooltip in every branch, and so is an
+/// error the host had reported before the connection was lost.
 fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
     let view = input.farming;
     let mut tooltip = Vec::new();
     let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
+    let source = |tooltip: &mut Vec<String>| {
+        tooltip.push(inventory_status(input.live, english).to_string());
+        tooltip.push(wallet_status(input.live, input.wallet, english));
+    };
+    let check = || line("Revisa la sesión en Hebra u Obsidian", "Check the session in Hebra or Obsidian");
     if let Some((text, tone, detail)) = connection_text(input.connection, english) {
         tooltip.push(line("Conexión al host: sin conexión", "Host connection: offline"));
         tooltip.push(detail.to_string());
-        if view.reading.is_some() {
+        if let Some(reading) = view.reading.as_ref() {
             tooltip.push(line("Datos antiguos · última lectura", "Stale data · last reading"));
+            if let Some(error) = reading.err {
+                tooltip.push(format!("{}: {}", tr(english, "Error pendiente", "Pending error"), farming_error_label(error, english)));
+                tooltip.push(check());
+            }
         }
+        source(&mut tooltip);
         return (tone, cell(text, if tone == Tone::Muted { Tone::Normal } else { tone }, tooltip));
     }
     tooltip.push(line("Conexión al host: conectado", "Host connection: connected"));
@@ -455,7 +608,7 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
             tooltip.push(line("Panel no disponible en este host", "Panel unavailable in this host"));
             (line("Sin panel", "No panel"), Tone::Warning)
         };
-        tooltip.push(inventory_status(input.live, english).to_string());
+        source(&mut tooltip);
         return (tone, cell(text, if tone == Tone::Muted { Tone::Normal } else { tone }, tooltip));
     };
     let measuring = matches!(reading.phase, Phase::Starting | Phase::Active | Phase::Stopping | Phase::Provisional);
@@ -469,8 +622,7 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
     if measuring && source_down {
         tone = Tone::Warning;
     }
-    tooltip.push(inventory_status(input.live, english).to_string());
-    tooltip.push(wallet_status(input.live, input.wallet, english));
+    source(&mut tooltip);
     if input.live.is_sampling() && matches!(input.wallet, WalletCoverage::Unavailable(_)) && measuring && tone == Tone::Good {
         tone = Tone::Warning;
     }
@@ -484,7 +636,7 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
             text = farming_error_label(error, english);
             tooltip.insert(1, format!("{}: {}", tr(english, "Fase", "Phase"), phase_label(reading.phase, english)));
         }
-        tooltip.insert(1, line("Revisa la sesión en Hebra u Obsidian", "Check the session in Hebra or Obsidian"));
+        tooltip.insert(1, check());
         tone = Tone::Error;
     }
     let text_tone = if matches!(tone, Tone::Warning | Tone::Error) { tone } else { Tone::Normal };
@@ -492,7 +644,7 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
 }
 
 /// The panel for this frame. `memory` carries the rate's range-or-average choice and the
-/// session's Magic Find peak from the previous one.
+/// session's verified Magic Find peak from the previous one.
 pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> PanelView {
     let (stack_label, buy, sell) = stack_cells(input, english);
     let (status_dot, status) = status_cell(input, english);
@@ -507,8 +659,8 @@ pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> 
         stack_label,
         buy,
         sell,
-        slots: slots_cell(input.slots, english),
-        magic_find: magic_find_cell(input.magic_find, input.farming, memory, english),
+        slots: slots_cell(input, english),
+        magic_find: magic_find_cell(input, memory, english),
         status_label: tr(english, "Estado:", "Status:").to_string(),
         status_dot,
         status,
@@ -518,13 +670,19 @@ pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> 
 /// The widest text each part of the panel is expected to hold, for the addon to reserve its
 /// width once instead of following the content: a rate that turns from a range into an average,
 /// or a status that changes, then moves nothing.
+///
+/// Every shape a cell can take is here once, with its figures at their limit and written with
+/// 9s: a text of that cell is no wider than its sample if it is the sample with characters
+/// taken out and digits changed. The addon measures the samples with the widest digit of the
+/// host's font in place of the 9s, so that holds whatever the font. Beyond the limits (10 000
+/// bags an hour, a stack of 100 000 g) the window widens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidthSamples {
-    /// Left column, at the normal size: the label and the longest rate.
+    /// Left column, at the normal size: the label and the rate.
     pub left: Vec<String>,
     /// Left column, at the large size: the observed bags.
     pub left_large: Vec<String>,
-    /// Right column: the label and the longest price.
+    /// Right column: the label and a price.
     pub right: Vec<String>,
     /// Full-width lines: slots and Magic Find.
     pub lines: Vec<String>,
@@ -550,12 +708,21 @@ pub fn width_samples(english: bool) -> WidthSamples {
     status.push(tr(english, "Esperando sesión", "Waiting for session").to_string());
     status.push(tr(english, "Sin panel", "No panel").to_string());
     WidthSamples {
-        left: vec![tr(english, "bolsas", "bags").to_string(), "9999–9999 b/h".to_string(), "~9999 b/h".to_string()],
-        left_large: vec!["9999".to_string()],
-        right: vec!["stack".to_string(), "999g 99s 99c".to_string()],
+        left: vec![
+            tr(english, "bolsas", "bags").to_string(),
+            format!("9999–9999 {RATE_UNIT}"),
+            format!("~9999 {RATE_UNIT}"),
+            format!("≥9999 {RATE_UNIT}"),
+            format!("{NO_DATA} {RATE_UNIT}"),
+        ],
+        left_large: vec!["9999".to_string(), NO_DATA.to_string()],
+        right: vec!["stack".to_string(), "99999g 99s 99c".to_string(), NO_DATA.to_string()],
         lines: vec![
-            slots_cell(Some(9999), english).text,
-            magic_find_cell(Some(9999), &FarmingView { capable: false, reading: None, fresh: false, age: None, slot_age: None }, &mut PanelMemory::default(), english).text,
+            slots_text(Some(9999), english),
+            slots_text(None, english),
+            magic_find_text(Some(9999), false, english),
+            magic_find_text(Some(9999), true, english),
+            magic_find_text(None, false, english),
         ],
         status,
     }

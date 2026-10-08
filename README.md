@@ -61,8 +61,9 @@ the left, the gross price of a stack of 250 on the right, and three lines for fr
 Find and status, the last with a coloured dot for the connection. Every line is always there,
 the window keeps its size, and what used to be lines of the panel is in the tooltips. The
 panel has its own title bar, with a button that removes the window's background. Slots and
-Magic Find say `—` until the addon has a validated reader for them. No frame of the protocol
-changes. See "Labyrinth farming panel".
+Magic Find are the plugin's until the addon has a verified reader for them, and the plugin's
+Magic Find is written `MF: 333% partial` because it is not a live reading. No frame of the
+protocol changes. See "Labyrinth farming panel".
 
 ## What it does, and does not do
 
@@ -534,11 +535,24 @@ Estado: ● Midiendo
 - **Left column:** the positive **observed bags**, large, and under them the rate per hour.
 - **Right column:** the gross trading-post price of a **stack of 250 bags**: the highest buy
   order, then the lowest sell offer (see "Bag price (`price2`)").
-- **Slots** and **MF** (Magic Find): the addon has no validated reader for either yet, so
-  both say `—` in grey. The model is ready for them (`core/src/panel.rs`): slots turn orange
-  at 10 or fewer and red at 3 or fewer; Magic Find turns orange while it is below the highest
-  value seen in the session.
+- **Slots:** the free bag slots the plugin sends in `farm1`, orange at 10 or fewer and red at
+  3 or fewer. The tooltip says they are the plugin's, whether they are a recent character's,
+  and how old the reading is; an old one paints the line orange. Without a figure, which is
+  what a live session sends today, the line says `—` in grey.
+- **MF** (Magic Find): the plugin's `mf`, when it sends one, written **`MF: 333% partial`**
+  (`parcial`) and in grey. It is a value declared when the session started, or a partial one,
+  and does not follow the game: the word and the colour are there so it is never taken for a
+  live reading, and it never warns about a drop. The tooltip says where it comes from and
+  "Verified Magic Find: no coverage", and ends with what the old preparation block said
+  (preparation state, temporary buffs unverified). Without a value the line says `—`.
 - **Status:** a dot, a text and a tooltip. The colour is never the only signal.
+
+Slots and Magic Find take a reading the addon verified itself before the plugin's
+(`PanelInput::verified_slots` and `verified_magic_find` in `core/src/panel.rs`). No reader
+provides one yet, so the addon passes none; the model and its tests are ready for it. A
+verified Magic Find is written bare, `MF: 333%`, with its parts (luck, server, effects) in the
+tooltip, and turns orange while it is below the highest total of the session, saying how many
+points it fell and which parts. Verified slots add the bags' capacity to the tooltip.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -551,10 +565,10 @@ Every cell has a tooltip, and what used to be lines of the panel is in the toolt
 it is about: duration, goal, progress and ETA, and the signed **net bags at close**, on the
 observed bags; the range of an averaged rate and the notes about the rate, on the rate; which
 side each price is, its unit price and why there is none, on the prices; inventory status,
-wallet coverage, host connection, stale data and where to look after an error, on the status;
-"Verified Magic Find: no coverage" on MF. A cell whose tooltip reports a problem is painted
-orange, or red for an error; one with no figure is grey. The optional preparation block is gone from the panel: preparation is managed
-in Hebra or Obsidian.
+wallet coverage, host connection, stale data and where to look after an error, on the status,
+with or without a connection; "Verified Magic Find: no coverage" and the preparation notes on
+MF. A cell whose tooltip reports a problem is painted orange, or red for an error; one with no
+figure, or with a figure that is not a live reading, is grey.
 
 The window has no native title bar, because ImGui's cannot hold a button of ours. Its own bar
 keeps what the native one had and adds one button:
@@ -636,8 +650,9 @@ at once. `farm1` and `live1` are unchanged. No item id, name or account travels 
 The panel has the same lines in every state: each cell is always there and says `—` without a
 figure, so the window never grows or shrinks. Its width does not follow the content either:
 it is reserved once from the longest text each part can hold (`panel::width_samples`: a rate
-of `9999–9999 b/h`, a price of `999g 99s 99c`, the longest status text), so a text that
-changes moves nothing. Only a figure beyond those, such as a stack over 999 g, widens it.
+of `9999–9999 b/h`, a price of `99999g 99s 99c`, the longest status text), measured with the
+widest digit of the host's font, so a text that changes moves nothing. Only a figure beyond
+those, such as a stack of 100 000 g, widens it.
 
 The rate is a range when the host sends one, `480–560 b/h`. While the range is wide it is
 shown as one number, its average, with `~` in front and the range in the tooltip: it turns

@@ -93,22 +93,11 @@ pub struct FarmingView {
     pub slot_age: Option<u64>,
 }
 
-/// The one painted line of the rate block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RateLine {
-    /// `480–560 bolsas/h`, `≥480 bolsas/h`, `480 bolsas/h` or `— bolsas/h`.
-    pub text: String,
-    /// Painted in the warning colour: there is at least one note.
-    pub warning: bool,
-    /// What the line's tooltip says, one entry per line; empty when there is nothing to say.
-    pub notes: Vec<String>,
-}
-
 impl FarmingView {
     /// Source age is independent of transport refreshes. Exact age 5 is already stale.
     ///
     /// Nothing the panel paints follows this any more. It equals the host's 5 s send period, so
-    /// it turns false at the tail of every cycle in normal measurement (see [`Self::rate_line`]);
+    /// it turns false at the tail of every cycle in normal measurement (see [`Self::rate_notes`]);
     /// what is painted follows [`Self::observation_current`].
     pub fn source_fresh(&self) -> bool {
         self.fresh && self.age.is_some_and(|age| age < 5)
@@ -132,12 +121,13 @@ impl FarmingView {
             && (!self.fresh || reading.err.is_some() || self.age.is_none_or(|age| age >= READING_AGE_NOTICE))
     }
 
-    /// The rate block of the panel: always exactly one line, `None` only without any reading
-    /// (the panel paints another layout then).
+    /// What there is to say about the rate, one entry per line; empty when there is nothing,
+    /// and without any reading. The panel puts these in the rate's tooltip and paints the rate
+    /// in the warning colour while there is one (`crate::panel`).
     ///
     /// "Rate not available yet", "Last recorded rate" and "Last reading ago Xs" / "No reading"
     /// used to be lines of their own under the rate, so the rest of the window jumped every
-    /// time one came or went. They are `notes` now: they colour the line and are its tooltip.
+    /// time one came or went.
     ///
     /// "Last recorded rate" no longer follows [`Self::source_fresh`]. The host sends a frame
     /// every 5 s and `age` keeps ticking locally in between, so with that 5 s threshold a frame
@@ -145,15 +135,9 @@ impl FarmingView {
     /// `age` 0 for as long as the next frame is late: the note came and went in normal
     /// measurement. It follows [`Self::observation_current`], with the 15 s the reading's age
     /// already used.
-    pub fn rate_line(&self, english: bool) -> Option<RateLine> {
-        let reading = self.reading.as_ref()?;
+    pub fn rate_notes(&self, english: bool) -> Vec<String> {
+        let Some(reading) = self.reading.as_ref() else { return Vec::new() };
         let tr = |es: &'static str, en: &'static str| if english { en } else { es };
-        let rate = match (reading.lo, reading.hi) {
-            (Some(lo), Some(hi)) if hi != lo => format!("{lo}–{hi}"),
-            (Some(lo), None) => format!("≥{lo}"),
-            (Some(lo), Some(_)) => lo.to_string(),
-            _ => "—".into(),
-        };
         let mut notes = Vec::new();
         if reading.lo.is_none() {
             notes.push(tr("Ritmo aún no disponible", "Rate not available yet").to_string());
@@ -167,11 +151,7 @@ impl FarmingView {
                 |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),
             ));
         }
-        Some(RateLine {
-            text: format!("{rate} {}", tr("bolsas/h", "bags/h")),
-            warning: !notes.is_empty(),
-            notes,
-        })
+        notes
     }
 
     /// Bags depend on a current observation ([`Self::observation_current`], 15 s); duration is

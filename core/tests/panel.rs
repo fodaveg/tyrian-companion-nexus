@@ -1,12 +1,15 @@
 //! The Labyrinth panel as data: every cell in every state, the rate's range-or-average choice,
-//! and the texts at their limits. The addon paints exactly what `panel::view` returns.
+//! where slots and Magic Find come from, and the texts at their limits. The addon paints
+//! exactly what `panel::view` returns.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tyrian_companion_nexus_core::farming::FarmingView;
 use tyrian_companion_nexus_core::live::LiveStatus;
-use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, PanelView, Tone, NO_DATA};
+use tyrian_companion_nexus_core::panel::{
+    self, Cell, MagicFindSource, PanelInput, PanelMemory, PanelView, Tone, VerifiedMagicFind, VerifiedSlots, NO_DATA,
+};
 use tyrian_companion_nexus_core::price::PriceView;
 use tyrian_companion_nexus_core::protocol::{parse_server_line, ServerLine};
 use tyrian_companion_nexus_core::state::{SharedState, Status};
@@ -14,12 +17,26 @@ use tyrian_companion_nexus_core::wallet::{WalletCoverage, WalletError};
 
 const NONCE: &str = "Zk3m1Qw9Lr0aT7yUc2Vb5g";
 
+/// A live session as the plugin sends it today: no slots (the reader sends none) and no
+/// Magic Find (the session was started without one).
 fn farming_frame() -> Value {
     json!({ "v":3, "type":"farming_state", "tag":"farm1", "nonce":NONCE, "seq":1, "ttl":15,
         "phase":"active", "err":null, "elapsed":1716, "observed":143, "net":null,
         "lo":37, "hi":37, "age":0, "slots":null, "slotSrc":"unknown", "slotAge":null,
         "goal":"none", "target":null, "progress":null, "eta":null, "mf":null,
         "mfKind":"unknown", "prep":"unknown" })
+}
+
+/// The same session with the slots and the Magic Find of David's sketch in the frame.
+fn sketch_frame() -> Value {
+    let mut frame = farming_frame();
+    frame["slots"] = json!(63);
+    frame["slotSrc"] = json!("ingame");
+    frame["slotAge"] = json!(2);
+    frame["mf"] = json!(333);
+    frame["mfKind"] = json!("partial");
+    frame["prep"] = json!("partial");
+    frame
 }
 
 fn price_frame(st: &str) -> Value {
@@ -60,18 +77,25 @@ fn no_price() -> PriceView {
     SharedState::new().price_view(Instant::now())
 }
 
+fn verified(luck: i32, server: i32, effects: i32) -> VerifiedMagicFind {
+    VerifiedMagicFind {
+        total: luck + server + effects,
+        parts: vec![(MagicFindSource::Luck, luck), (MagicFindSource::Server, server), (MagicFindSource::Effects, effects)],
+    }
+}
+
 struct Case {
     connection: Status,
     farming: FarmingView,
     price: PriceView,
     live: LiveStatus,
     wallet: WalletCoverage,
-    slots: Option<i32>,
-    magic_find: Option<i32>,
+    verified_slots: Option<VerifiedSlots>,
+    verified_magic_find: Option<VerifiedMagicFind>,
 }
 
 impl Case {
-    /// Connected, measuring, a fresh price: the panel of the sketch.
+    /// Connected, measuring, a fresh price, and the frame of a live session of today.
     fn measuring() -> Self {
         Self {
             connection: Status::Connected,
@@ -79,16 +103,24 @@ impl Case {
             price: price(Some(&price_frame("ok")), Duration::ZERO),
             live: LiveStatus::Measuring,
             wallet: WalletCoverage::Listed(55),
-            slots: None,
-            magic_find: None,
+            verified_slots: None,
+            verified_magic_find: None,
         }
     }
 
-    fn with_farming(mut self, change: impl FnOnce(&mut Value)) -> Self {
-        let mut frame = farming_frame();
+    /// The same with the sketch's slots and Magic Find in the plugin's frame.
+    fn sketch() -> Self {
+        Self::measuring().with_frame(sketch_frame(), |_| {})
+    }
+
+    fn with_frame(mut self, mut frame: Value, change: impl FnOnce(&mut Value)) -> Self {
         change(&mut frame);
         self.farming = farming(Some(&frame), Duration::ZERO);
         self
+    }
+
+    fn with_farming(self, change: impl FnOnce(&mut Value)) -> Self {
+        self.with_frame(farming_frame(), change)
     }
 
     fn view_with(&self, memory: &mut PanelMemory, english: bool) -> PanelView {
@@ -99,8 +131,8 @@ impl Case {
                 price: &self.price,
                 live: self.live,
                 wallet: self.wallet,
-                slots: self.slots,
-                magic_find: self.magic_find,
+                verified_slots: self.verified_slots,
+                verified_magic_find: self.verified_magic_find.clone(),
             },
             memory,
             english,
@@ -118,21 +150,25 @@ fn has(cell: &Cell, text: &str) -> bool {
 
 #[test]
 fn the_sketch_itself() {
-    let mut case = Case::measuring();
-    case.slots = Some(63);
-    case.magic_find = Some(333);
-    let view = case.view(false);
+    let view = Case::sketch().view(false);
     assert_eq!((view.bags_label.text.as_str(), view.bags.text.as_str(), view.rate.text.as_str()), ("bolsas", "143", "37 b/h"));
     assert_eq!((view.stack_label.text.as_str(), view.buy.text.as_str(), view.sell.text.as_str()), ("stack", "7g 7s 62c", "8g 90s 37c"));
-    assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333%"));
+    assert_eq!(view.slots.text, "Huecos: 63 libres");
+    // The plugin's Magic Find is not a live reading, and says so in its own text.
+    assert_eq!(view.magic_find.text, "MF: 333% parcial");
     assert_eq!((view.status_label.as_str(), view.status_dot, view.status.text.as_str()), ("Estado:", Tone::Good, "Midiendo"));
     for cell in view.cells() {
-        assert_eq!(cell.tone, Tone::Normal, "{cell:?}");
+        let expected = if std::ptr::eq(cell, &view.magic_find) { Tone::Muted } else { Tone::Normal };
+        assert_eq!(cell.tone, expected, "{cell:?}");
     }
-    let english = case.view(true);
+    let english = Case::sketch().view(true);
     assert_eq!((english.bags_label.text.as_str(), english.stack_label.text.as_str()), ("bags", "stack"));
-    assert_eq!((english.slots.text.as_str(), english.magic_find.text.as_str()), ("Slots: 63 free", "MF: 333%"));
+    assert_eq!((english.slots.text.as_str(), english.magic_find.text.as_str()), ("Slots: 63 free", "MF: 333% partial"));
     assert_eq!((english.status_label.as_str(), english.status.text.as_str()), ("Status:", "Measuring"));
+    // With a verified reading the line is the sketch's, bare.
+    let mut read = Case::sketch();
+    read.verified_magic_find = Some(verified(300, 0, 33));
+    assert_eq!(read.view(false).magic_find.text, "MF: 333%");
     // The corn is not in the panel, and neither is any net-of-fee wording.
     for view in [&view, &english] {
         for cell in view.cells() {
@@ -144,52 +180,159 @@ fn the_sketch_itself() {
     }
 }
 
-/// What the addon ships today: no validated reader for slots or Magic Find, so both say `—`
-/// in the muted tone and their tooltips say why.
 #[test]
-fn slots_and_magic_find_say_a_dash_until_a_reader_provides_them() {
+fn slots_come_from_the_plugin_frame_and_say_whose_and_how_old() {
+    let view = Case::sketch().view(false);
+    assert_eq!((view.slots.text.as_str(), view.slots.tone), ("Huecos: 63 libres", Tone::Normal));
+    assert_eq!(view.slots.tooltip, ["Huecos libres en las bolsas del personaje", "Dato del plugin", "Lectura de huecos hace 2s"]);
+    assert_eq!(Case::sketch().view(true).slots.tooltip, ["Free bag slots of the character", "From the plugin", "Slot reading ago: 2s"]);
+    // The slots of the most recent character, and a reading without an age.
+    let recent = Case::measuring().with_frame(sketch_frame(), |frame| { frame["slotSrc"] = json!("recent"); frame["slotAge"] = Value::Null; }).view(false).slots;
+    assert_eq!(recent.text, "Huecos: 63 libres");
+    assert!(has(&recent, "Personaje reciente") && has(&recent, "Sin lectura de huecos"), "{recent:?}");
+    // An old reading in a session under way: the figure stays, in the warning tone.
+    let old = Case::measuring().with_frame(sketch_frame(), |frame| { frame["age"] = json!(20); frame["slotAge"] = json!(20); }).view(false).slots;
+    assert_eq!((old.text.as_str(), old.tone), ("Huecos: 63 libres", Tone::Warning));
+    assert!(has(&old, "Lectura de huecos hace 20s"));
+    let mut stale = Case::sketch();
+    stale.farming = farming(Some(&sketch_frame()), Duration::from_secs(15));
+    let stale = stale.view(false).slots;
+    assert_eq!(stale.tone, Tone::Warning);
+    assert!(has(&stale, "Datos antiguos") && has(&stale, "Lectura de huecos hace 17s"), "{stale:?}");
+    // No figure in the frame, which is what a live session sends today: a dash.
     for english in [false, true] {
-        let view = Case::measuring().view(english);
-        assert_eq!(view.slots.text, if english { "Slots: —" } else { "Huecos: —" });
-        assert_eq!(view.magic_find.text, "MF: —");
-        assert_eq!((view.slots.tone, view.magic_find.tone), (Tone::Muted, Tone::Muted));
-        assert!(has(&view.slots, if english { "Not available yet" } else { "Dato aún no disponible" }));
-        assert!(has(&view.magic_find, if english { "Verified Magic Find: no coverage" } else { "Hallazgo mágico verificado: sin cobertura" }));
+        let none = Case::measuring().view(english).slots;
+        assert_eq!((none.text.as_str(), none.tone), (if english { "Slots: —" } else { "Huecos: —" }, Tone::Muted));
+        assert!(has(&none, if english { "No slot reading" } else { "Sin lectura de huecos" }));
     }
+    let mut offline = Case::measuring();
+    offline.farming = farming(None, Duration::ZERO);
+    assert_eq!(offline.view(false).slots.text, "Huecos: —");
 }
 
 #[test]
-fn slots_warn_at_ten_and_turn_to_error_at_three() {
+fn slots_warn_at_ten_and_turn_to_error_at_three_whatever_their_source() {
     for (slots, tone) in [(250, Tone::Normal), (11, Tone::Normal), (10, Tone::Warning), (4, Tone::Warning), (3, Tone::Error), (0, Tone::Error)] {
+        let plugin = Case::measuring().with_frame(sketch_frame(), |frame| frame["slots"] = json!(slots)).view(false).slots;
         let mut case = Case::measuring();
-        case.slots = Some(slots);
-        let view = case.view(false);
-        assert_eq!(view.slots.text, format!("Huecos: {slots} libres"));
-        assert_eq!(view.slots.tone, tone, "{slots}");
-        assert_eq!(has(&view.slots, "Quedan pocos huecos"), tone != Tone::Normal, "{slots}");
+        case.verified_slots = Some(VerifiedSlots { free: slots, capacity: Some(250) });
+        let read = case.view(false).slots;
+        for cell in [&plugin, &read] {
+            assert_eq!(cell.text, format!("Huecos: {slots} libres"));
+            assert_eq!(cell.tone, tone, "{slots}");
+            assert_eq!(has(cell, "Quedan pocos huecos"), tone != Tone::Normal, "{slots}");
+        }
     }
 }
 
 #[test]
-fn magic_find_warns_while_it_is_below_the_peak_of_the_session() {
+fn a_verified_reading_of_the_slots_comes_before_the_plugin_one() {
+    let mut case = Case::sketch();
+    case.verified_slots = Some(VerifiedSlots { free: 41, capacity: Some(160) });
+    let view = case.view(false);
+    assert_eq!((view.slots.text.as_str(), view.slots.tone), ("Huecos: 41 libres", Tone::Normal));
+    assert_eq!(view.slots.tooltip, ["Huecos libres en las bolsas del personaje", "Leído y verificado por el addon", "Capacidad: 160"]);
+    assert!(!has(&view.slots, "plugin"));
+    // It does not depend on the plugin's frame being there, or fresh.
+    case.farming = farming(None, Duration::ZERO);
+    case.verified_slots = Some(VerifiedSlots { free: 41, capacity: None });
+    let view = case.view(true);
+    assert_eq!(view.slots.text, "Slots: 41 free");
+    assert_eq!(view.slots.tooltip, ["Free bag slots of the character", "Read and verified by the addon"]);
+}
+
+/// The plugin's Magic Find is a value declared when the session started, or a partial one. It
+/// is written apart, in the muted tone, and never as if it followed the game.
+#[test]
+fn the_plugin_magic_find_is_marked_as_not_live_and_never_warns() {
     let mut memory = PanelMemory::default();
-    let mut case = Case::measuring();
-    let step = |case: &mut Case, memory: &mut PanelMemory, value: Option<i32>| {
-        case.magic_find = value;
-        case.view_with(memory, false).magic_find
+    let step = |memory: &mut PanelMemory, mf: i32, english: bool| {
+        Case::measuring().with_frame(sketch_frame(), |frame| frame["mf"] = json!(mf)).view_with(memory, english).magic_find
     };
-    assert_eq!(step(&mut case, &mut memory, Some(320)).tone, Tone::Normal);
-    assert_eq!(step(&mut case, &mut memory, Some(333)).tone, Tone::Normal);
-    let dropped = step(&mut case, &mut memory, Some(301));
-    assert_eq!((dropped.text.as_str(), dropped.tone), ("MF: 301%", Tone::Warning));
-    assert!(has(&dropped, "Máximo de la sesión: 333%"));
-    assert_eq!(step(&mut case, &mut memory, Some(333)).tone, Tone::Normal, "back at the peak");
-    // A reading that goes missing does not forget the peak; a new session does.
-    assert_eq!(step(&mut case, &mut memory, None).tone, Tone::Muted);
-    assert_eq!(step(&mut case, &mut memory, Some(320)).tone, Tone::Warning);
-    let mut starting = Case::measuring().with_farming(|frame| frame["phase"] = json!("starting"));
-    assert_eq!(step(&mut starting, &mut memory, Some(300)).tone, Tone::Normal, "a new session has its own peak");
-    assert_eq!(step(&mut case, &mut memory, Some(310)).tone, Tone::Normal);
+    let first = step(&mut memory, 333, false);
+    assert_eq!((first.text.as_str(), first.tone), ("MF: 333% parcial", Tone::Muted));
+    assert_eq!(
+        first.tooltip,
+        [
+            "Hallazgo mágico",
+            "Dato del plugin: declarado al empezar la sesión, o parcial. No es una lectura en vivo.",
+            "Hallazgo mágico verificado: sin cobertura",
+            "Preparación parcial",
+            "Buffs temporales sin verificar. Recordatorios manuales en el host.",
+        ]
+    );
+    // A lower value later is not a drop: there is no peak for a value that is not read.
+    let lower = step(&mut memory, 250, false);
+    assert_eq!((lower.text.as_str(), lower.tone), ("MF: 250% parcial", Tone::Muted));
+    assert!(!has(&lower, "Bajó") && !has(&lower, "máximo"), "{lower:?}");
+    assert_eq!(memory, PanelMemory::default(), "it never feeds the session's peak");
+    let english = step(&mut memory, 333, true);
+    assert_eq!(english.text, "MF: 333% partial");
+    assert!(has(&english, "Not a live reading") && has(&english, "Verified Magic Find: no coverage"));
+    // Without a value in the frame: a dash, and the same two notes of the old block.
+    for english in [false, true] {
+        let none = Case::measuring().view(english).magic_find;
+        assert_eq!((none.text.as_str(), none.tone), ("MF: —", Tone::Muted));
+        assert!(has(&none, if english { "Verified Magic Find: no coverage" } else { "Hallazgo mágico verificado: sin cobertura" }));
+        assert!(has(&none, if english { "Preparation unknown" } else { "Preparación desconocida" }));
+        assert!(has(&none, if english { "Temporary buffs unverified" } else { "Buffs temporales sin verificar" }));
+    }
+    let attention = Case::measuring().with_frame(sketch_frame(), |frame| frame["prep"] = json!("attention")).view(false).magic_find;
+    assert!(has(&attention, "Preparación: revisar en el host"));
+    // `mfKind: unknown` with a number is not a value to show.
+    let unknown = Case::measuring().with_frame(sketch_frame(), |frame| frame["mfKind"] = json!("unknown")).view(false).magic_find;
+    assert_eq!(unknown.text, "MF: —");
+    // No reading at all: no preparation to tell either.
+    let mut offline = Case::measuring();
+    offline.farming = farming(None, Duration::ZERO);
+    assert_eq!(offline.view(false).magic_find.tooltip, ["Hallazgo mágico", "Hallazgo mágico verificado: sin cobertura"]);
+}
+
+/// The reading a reader inside the addon will provide: the total, its parts, and a warning
+/// while it is below the highest total of the session, saying how much it fell and which part.
+#[test]
+fn a_verified_magic_find_shows_its_parts_and_warns_when_it_falls_from_the_session_peak() {
+    let mut memory = PanelMemory::default();
+    let mut case = Case::sketch();
+    let mut step = |memory: &mut PanelMemory, reading: Option<VerifiedMagicFind>, english: bool| {
+        case.verified_magic_find = reading;
+        case.view_with(memory, english).magic_find
+    };
+    let first = step(&mut memory, Some(verified(300, 30, 3)), false);
+    assert_eq!((first.text.as_str(), first.tone), ("MF: 333%", Tone::Normal));
+    assert_eq!(
+        first.tooltip,
+        [
+            "Hallazgo mágico",
+            "Leído y verificado por el addon",
+            "Suerte: 300%",
+            "Servidor: 30%",
+            "Efectos: 3%",
+            "Preparación parcial",
+            "Buffs temporales sin verificar. Recordatorios manuales en el host.",
+        ]
+    );
+    assert!(!has(&first, "plugin") && !has(&first, "sin cobertura"), "a verified reading comes before the plugin's 333: {first:?}");
+    assert_eq!(step(&mut memory, Some(verified(300, 30, 53)), false).tone, Tone::Normal, "a rise is the new peak");
+    let fallen = step(&mut memory, Some(verified(300, 30, 3)), false);
+    assert_eq!((fallen.text.as_str(), fallen.tone), ("MF: 333%", Tone::Warning));
+    assert!(has(&fallen, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{fallen:?}");
+    assert!(has(&fallen, "Efectos: de 53% a 3%"));
+    assert!(!has(&fallen, "Suerte: de") && !has(&fallen, "Servidor: de"), "only the part that fell: {fallen:?}");
+    let english = step(&mut memory, Some(verified(300, 0, 3)), true);
+    assert_eq!((english.text.as_str(), english.tone), ("MF: 303%", Tone::Warning));
+    assert!(has(&english, "Down 80 points from the session peak (383%)") && has(&english, "Server: from 30% to 0%") && has(&english, "Effects: from 53% to 3%"));
+    assert_eq!(step(&mut memory, Some(verified(300, 30, 53)), false).tone, Tone::Normal, "back at the peak");
+    // A reading that goes missing falls back to the plugin's value and does not forget the peak.
+    let fallback = step(&mut memory, None, false);
+    assert_eq!((fallback.text.as_str(), fallback.tone), ("MF: 333% parcial", Tone::Muted));
+    assert_eq!(step(&mut memory, Some(verified(300, 30, 3)), false).tone, Tone::Warning);
+    // A new session has its own peak.
+    let mut starting = Case::measuring().with_frame(sketch_frame(), |frame| frame["phase"] = json!("starting"));
+    starting.verified_magic_find = Some(verified(250, 0, 0));
+    assert_eq!(starting.view_with(&mut memory, false).magic_find.tone, Tone::Normal);
+    assert_eq!(step(&mut memory, Some(verified(260, 0, 0)), false).tone, Tone::Normal);
+    assert_eq!(step(&mut memory, Some(verified(250, 0, 0)), false).tone, Tone::Warning);
 }
 
 fn rate_after(memory: &mut PanelMemory, lo: Value, hi: Value, english: bool) -> Cell {
@@ -367,15 +510,36 @@ fn the_stack_prices_are_the_gross_ones_and_name_themselves_in_the_tooltip() {
     let english = Case::measuring().view(true);
     assert_eq!(english.buy.tooltip, ["Highest buy order × 250", "Unit: 2s 83c"]);
     assert_eq!(english.sell.tooltip, ["Lowest sell offer × 250", "Unit: 3s 56c"]);
-    // One side without a quote: a dash on that side only.
-    let mut one_side = price_frame("ok");
-    one_side["list"] = Value::Null;
-    one_side["listStack"] = Value::Null;
+}
+
+/// One side quoted and the other not: the side without a figure says a dash and why, and the
+/// label does not, because the reading itself is fine.
+#[test]
+fn one_side_without_a_quote_says_why_in_its_own_tooltip() {
+    for (missing, present) in [("list", "sell"), ("sell", "list")] {
+        let mut one_side = price_frame("ok");
+        one_side[missing] = Value::Null;
+        one_side[format!("{missing}Stack")] = Value::Null;
+        let mut case = Case::measuring();
+        case.price = price(Some(&one_side), Duration::ZERO);
+        for english in [false, true] {
+            let view = case.view(english);
+            let (empty, full) = if missing == "list" { (&view.sell, &view.buy) } else { (&view.buy, &view.sell) };
+            assert_eq!((empty.text.as_str(), empty.tone), (NO_DATA, Tone::Muted), "{missing}");
+            assert!(has(empty, if english { "No quote on this side" } else { "Sin cotización en este lado" }), "{empty:?}");
+            assert_eq!(full.tone, Tone::Normal, "{present}");
+            assert_eq!(full.tooltip.len(), 2, "the quoted side has nothing to explain: {full:?}");
+            assert_eq!((view.stack_label.tone, view.stack_label.tooltip.len()), (Tone::Normal, 1));
+        }
+    }
+    // A unit price whose stack does not fit an int32 arrives without the stack.
+    let mut no_stack = price_frame("ok");
+    no_stack["listStack"] = Value::Null;
     let mut case = Case::measuring();
-    case.price = price(Some(&one_side), Duration::ZERO);
+    case.price = price(Some(&no_stack), Duration::ZERO);
     let view = case.view(false);
-    assert_eq!((view.buy.text.as_str(), view.buy.tone), ("7g 7s 62c", Tone::Normal));
-    assert_eq!((view.sell.text.as_str(), view.sell.tone), (NO_DATA, Tone::Muted));
+    assert_eq!(view.sell.text, NO_DATA);
+    assert_eq!(view.sell.tooltip, ["Oferta más baja × 250", "Unidad: 3s 56c", "El stack no cabe en la trama"]);
 }
 
 #[test]
@@ -408,6 +572,53 @@ fn the_status_dot_and_text_by_connection() {
     let view = waiting.view(false);
     assert_eq!((view.status_dot, view.status.text.as_str(), view.status.tone), (Tone::Warning, "Sin panel", Tone::Warning));
     assert!(has(&view.status, "Panel no disponible en este host"));
+}
+
+/// Inventory status and wallet coverage are in the status tooltip with or without a connection
+/// and with or without a reading, and an error reported before the connection was lost stays.
+#[test]
+fn no_notice_is_lost_without_a_connection_or_without_a_reading() {
+    let mut offline = Case::measuring().with_farming(|frame| frame["err"] = json!("observe"));
+    offline.connection = Status::WaitingForPlugin;
+    offline.live = LiveStatus::Partial;
+    offline.wallet = WalletCoverage::Unavailable(WalletError::Changed);
+    let status = offline.view(false).status;
+    assert_eq!(
+        status.tooltip,
+        [
+            "Conexión al host: sin conexión",
+            "Esperando a Tyrian Companion en Obsidian o Hebra",
+            "Datos antiguos · última lectura",
+            "Error pendiente: No se pudo actualizar",
+            "Revisa la sesión en Hebra u Obsidian",
+            "Inventario: cantidades sin resolver",
+            "Monedas: sin cobertura (cambió durante la lectura)",
+        ]
+    );
+    let english = offline.view(true).status;
+    assert!(has(&english, "Pending error: Could not update") && has(&english, "Currencies: no coverage (changed while reading)"));
+    // Without a pending error there is none to name.
+    let mut quiet = Case::measuring();
+    quiet.connection = Status::MissingToken;
+    let status = quiet.view(false).status;
+    assert!(!has(&status, "Error pendiente") && !has(&status, "Revisa la sesión"));
+    assert!(has(&status, "Inventario: observaciones guardadas") && has(&status, "Monedas cubiertas: 55"));
+    // No reading at all, offline and connected.
+    for connection in [Status::WaitingForPlugin, Status::Connected] {
+        let mut empty = Case::measuring();
+        empty.connection = connection;
+        empty.farming = farming(None, Duration::ZERO);
+        empty.live = LiveStatus::Unavailable;
+        let status = empty.view(false).status;
+        assert!(has(&status, "Inventario: lectura no disponible"), "{connection:?}: {status:?}");
+        assert!(has(&status, "Monedas: sin cobertura (sin lectura)"), "{connection:?}: {status:?}");
+        assert!(!has(&status, "Datos antiguos"), "{connection:?}");
+    }
+    // And a host without the panel feed.
+    let mut no_panel = Case::measuring();
+    no_panel.farming = SharedState::new().farming_view(Instant::now());
+    let status = no_panel.view(false).status;
+    assert!(has(&status, "Inventario: observaciones guardadas") && has(&status, "Monedas cubiertas: 55"), "{status:?}");
 }
 
 #[test]
@@ -468,40 +679,94 @@ fn the_status_tooltip_keeps_inventory_and_wallet_and_only_lasting_problems_chang
     assert!(has(&view.status, "Currencies: no coverage (changed while reading)"));
 }
 
-/// Every combination the panel can be in: the same nine cells, each one line of text with a
-/// tooltip. There is no state in which a line is missing or grows a second one.
+/// A text is covered by a sample when it is the sample with characters taken out and digits
+/// changed: then it cannot be wider, whatever the font, as long as the sample is measured with
+/// the widest digit, which is what the addon does.
+fn covered(text: &str, samples: &[String]) -> bool {
+    let shape = |text: &str| text.chars().map(|character| if character.is_ascii_digit() { '9' } else { character }).collect::<Vec<_>>();
+    let text = shape(text);
+    samples.iter().any(|sample| {
+        let mut rest = text.iter().peekable();
+        for character in shape(sample) {
+            if rest.peek() == Some(&&character) {
+                rest.next();
+            }
+        }
+        rest.peek().is_none()
+    })
+}
+
 #[test]
-fn the_panel_has_the_same_cells_in_every_state() {
-    assert_eq!(PanelView::LINES, 6);
+fn covered_means_no_wider_than_a_sample() {
+    let samples = panel::width_samples(false);
+    for text in ["7g 7s 62c", "45c", "2s 83c", "1000g 0s 0c", "99999g 99s 99c", NO_DATA, "stack"] {
+        assert!(covered(text, &samples.right), "{text}");
+    }
+    for text in ["100000g 0s 0c", "214748g 36s 47c", "stacks", "7g 7s 62c ·"] {
+        assert!(!covered(text, &samples.right), "{text}");
+    }
+    for text in ["37 b/h", "480–560 b/h", "9000–9999 b/h", "~1234 b/h", "≥480 b/h", "— b/h", "bolsas"] {
+        assert!(covered(text, &samples.left), "{text}");
+    }
+    for text in ["10000–12000 b/h", "~10000 b/h", "37 bolsas/h"] {
+        assert!(!covered(text, &samples.left), "{text}");
+    }
+}
+
+/// Every state the panel can be in: the same nine cells, each one line of text with a tooltip,
+/// and each text covered by a width the addon reserved for its own cell. There is no state in
+/// which a line is missing, grows a second one or pushes the window wider.
+#[test]
+fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
     let mut frames = vec![None];
     for phase in ["idle", "starting", "active", "stopping", "provisional", "complete", "error", "abandoned"] {
-        for err in [Value::Null, json!("observe"), json!("save")] {
-            for (lo, hi) in [(Value::Null, Value::Null), (json!(480), Value::Null), (json!(400), json!(1200))] {
-                let mut frame = farming_frame();
-                frame["phase"] = json!(phase);
-                frame["err"] = err.clone();
-                frame["lo"] = lo;
-                frame["hi"] = hi;
-                frames.push(Some(frame));
+        for err in [Value::Null, json!("start"), json!("observe"), json!("stop"), json!("save"), json!("other")] {
+            for (lo, hi, observed) in [
+                (Value::Null, Value::Null, Value::Null),
+                (json!(480), Value::Null, json!(0)),
+                (json!(400), json!(1200), json!(143)),
+                (json!(9000), json!(9999), json!(9999)),
+                (json!(37), json!(38), json!(1234)),
+            ] {
+                for (slots, mf) in [(Value::Null, Value::Null), (json!(0), json!(0)), (json!(250), json!(333)), (json!(9999), json!(9999))] {
+                    let mut frame = farming_frame();
+                    frame["phase"] = json!(phase);
+                    frame["err"] = err.clone();
+                    frame["lo"] = lo.clone();
+                    frame["hi"] = hi.clone();
+                    frame["observed"] = observed.clone();
+                    frame["slots"] = slots;
+                    frame["mfKind"] = if mf.is_null() { json!("unknown") } else { json!("partial") };
+                    frame["mf"] = mf;
+                    frames.push(Some(frame));
+                }
             }
         }
     }
-    let prices = [None, Some(price_frame("ok")), Some(price_frame("pending")), Some(price_frame("stale")), Some(price_frame("idle"))];
+    // A stack of exactly 1000 g, the dearest that is reserved for, one side alone, and the rest.
+    let mut thousand = price_frame("ok");
+    thousand["sellStack"] = json!(10_000_000);
+    thousand["listStack"] = json!(999_999_999);
+    let mut one_side = price_frame("ok");
+    one_side["sell"] = Value::Null;
+    one_side["sellStack"] = Value::Null;
+    let prices = [None, Some(price_frame("ok")), Some(thousand), Some(one_side), Some(price_frame("pending")), Some(price_frame("stale")), Some(price_frame("idle"))];
     let mut states = 0;
     for english in [false, true] {
+        let samples = panel::width_samples(english);
         for frame in &frames {
-            for local in [0, 5, 15, 60] {
+            for local in [0, 15] {
                 for (index, price_frame) in prices.iter().enumerate() {
-                    for connection in [Status::Connected, Status::WaitingForPlugin, Status::MissingToken, Status::GameExiting] {
-                        for (slots, magic_find) in [(None, None), (Some(2), Some(333))] {
+                    for connection in [Status::Connected, Status::WaitingForPlugin, Status::MissingToken, Status::TokenRejected, Status::UpdateRequired, Status::GameExiting] {
+                        for read in [false, true] {
                             let case = Case {
                                 connection,
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },
                                 live: if local == 0 { LiveStatus::Measuring } else { LiveStatus::Unavailable },
                                 wallet: WalletCoverage::Listed(55),
-                                slots,
-                                magic_find,
+                                verified_slots: read.then_some(VerifiedSlots { free: 2, capacity: Some(160) }),
+                                verified_magic_find: read.then(|| verified(300, 30, 3)),
                             };
                             let view = case.view(english);
                             for cell in view.cells() {
@@ -509,6 +774,15 @@ fn the_panel_has_the_same_cells_in_every_state() {
                                 assert!(!cell.tooltip.is_empty() && cell.tooltip.iter().all(|line| !line.is_empty() && !line.contains('\n')), "{cell:?}");
                             }
                             assert!(view.status_label.ends_with(':'));
+                            for (cell, group) in [
+                                (&view.bags_label, &samples.left), (&view.rate, &samples.left), (&view.bags, &samples.left_large),
+                                (&view.stack_label, &samples.right), (&view.buy, &samples.right), (&view.sell, &samples.right),
+                                (&view.slots, &samples.lines), (&view.magic_find, &samples.lines),
+                            ] {
+                                assert!(covered(&cell.text, group), "{:?} is not covered by {group:?}", cell.text);
+                            }
+                            // The status is one of the reserved texts, whole.
+                            assert!(samples.status.contains(&view.status.text), "{} is not reserved", view.status.text);
                             states += 1;
                         }
                     }
@@ -516,67 +790,29 @@ fn the_panel_has_the_same_cells_in_every_state() {
             }
         }
     }
-    assert!(states > 20_000, "{states}");
+    assert!(states > 100_000, "{states}");
 }
 
-fn widest(texts: &[String]) -> usize {
-    texts.iter().map(|text| text.chars().count()).max().unwrap()
-}
-
-/// The addon reserves the width of each part from `width_samples`. These are the contents at
-/// their limits; none is longer than what was reserved for its part.
+/// The figures of the request, by name: 9999 bags, a long range, an average of four digits,
+/// stacks over 100 g and of 1000 g, three digits of Magic Find.
 #[test]
-fn content_at_its_limits_fits_the_reserved_widths() {
-    for english in [false, true] {
-        let samples = panel::width_samples(english);
-        let mut memory = PanelMemory::default();
-        // 9999 bags, a long range, a wide one averaged to four digits, a stack over 100 g.
-        let mut limit = Case::measuring().with_farming(|frame| {
-            frame["observed"] = json!(9999);
-            frame["lo"] = json!(1234);
-            frame["hi"] = json!(1456);
-        });
-        let mut dear = price_frame("ok");
-        dear["sellStack"] = json!(1_234_567);
-        dear["listStack"] = json!(9_999_999);
-        limit.price = price(Some(&dear), Duration::ZERO);
-        limit.slots = Some(250);
-        limit.magic_find = Some(333);
-        let view = limit.view_with(&mut memory, english);
-        assert_eq!((view.bags.text.as_str(), view.rate.text.as_str()), ("9999", "1234–1456 b/h"));
-        assert_eq!((view.buy.text.as_str(), view.sell.text.as_str()), ("123g 45s 67c", "999g 99s 99c"));
-        assert_eq!(view.magic_find.text, "MF: 333%");
-        assert!(view.bags.text.chars().count() <= widest(&samples.left_large));
-        assert!(view.rate.text.chars().count() <= widest(&samples.left));
-        assert!(view.buy.text.chars().count() <= widest(&samples.right) && view.sell.text.chars().count() <= widest(&samples.right));
-        assert!(view.slots.text.chars().count() <= widest(&samples.lines) && view.magic_find.text.chars().count() <= widest(&samples.lines));
-        let wide = limit.with_farming(|frame| { frame["lo"] = json!(900); frame["hi"] = json!(1568); }).view_with(&mut memory, english).rate;
-        assert_eq!(wide.text, "~1234 b/h");
-        assert!(wide.text.chars().count() <= widest(&samples.left));
-        let extreme = rate_after(&mut PanelMemory::default(), json!(9000), json!(9999), english);
-        assert_eq!(extreme.text, "9000–9999 b/h");
-        assert!(extreme.text.chars().count() <= widest(&samples.left));
-        // Every text the status can show is one of the reserved ones, in both languages.
-        let mut texts = Vec::new();
-        for connection in [Status::Connected, Status::WaitingForPlugin, Status::MissingToken, Status::TokenRejected, Status::UpdateRequired, Status::GameExiting] {
-            for phase in ["idle", "starting", "active", "stopping", "provisional", "complete", "error", "abandoned"] {
-                for err in [Value::Null, json!("start"), json!("observe"), json!("stop"), json!("save"), json!("other")] {
-                    let mut case = Case::measuring().with_farming(|frame| { frame["phase"] = json!(phase); frame["err"] = err.clone(); });
-                    case.connection = connection;
-                    texts.push(case.view(english).status.text);
-                }
-            }
-            let mut empty = Case::measuring();
-            empty.connection = connection;
-            empty.farming = farming(None, Duration::ZERO);
-            texts.push(empty.view(english).status.text);
-            empty.farming = SharedState::new().farming_view(Instant::now());
-            texts.push(empty.view(english).status.text);
-        }
-        for text in texts {
-            assert!(samples.status.contains(&text), "{text} is not reserved");
-        }
-        // The longest status in each language, so a longer one added later is noticed here.
-        assert_eq!(widest(&samples.status), 21, "{:?}", samples.status);
-    }
+fn content_at_its_limits() {
+    let mut memory = PanelMemory::default();
+    let mut limit = Case::measuring().with_frame(sketch_frame(), |frame| {
+        frame["observed"] = json!(9999);
+        frame["lo"] = json!(1234);
+        frame["hi"] = json!(1456);
+        frame["slots"] = json!(250);
+    });
+    let mut dear = price_frame("ok");
+    dear["sellStack"] = json!(1_234_567);
+    dear["listStack"] = json!(10_000_000);
+    limit.price = price(Some(&dear), Duration::ZERO);
+    let view = limit.view_with(&mut memory, false);
+    assert_eq!((view.bags.text.as_str(), view.rate.text.as_str()), ("9999", "1234–1456 b/h"));
+    assert_eq!((view.buy.text.as_str(), view.sell.text.as_str()), ("123g 45s 67c", "1000g 0s 0c"));
+    assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 250 libres", "MF: 333% parcial"));
+    let wide = limit.with_frame(sketch_frame(), |frame| { frame["lo"] = json!(900); frame["hi"] = json!(1568); }).view_with(&mut memory, false).rate;
+    assert_eq!(wide.text, "~1234 b/h");
+    assert_eq!(rate_after(&mut PanelMemory::default(), json!(9000), json!(9999), true).text, "9000–9999 b/h");
 }

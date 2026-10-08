@@ -396,9 +396,10 @@ pub fn farming_render(ui: &Ui) {
                 price: &price,
                 live: shared.live_status(),
                 wallet: shared.inventory_diagnostics().wallet,
-                // No validated reader for either yet: the lines say `—` until one exists.
-                slots: None,
-                magic_find: None,
+                // The addon has no verified reader for either yet, so both lines use what the
+                // plugin sends in `farm1`. A reader plugs its reading in here.
+                verified_slots: None,
+                verified_magic_find: None,
             },
             &mut memory,
             english,
@@ -419,7 +420,15 @@ pub fn farming_render(ui: &Ui) {
         .bg_alpha(1.0)
         .build(ui, || {
             let draw = ui.get_window_draw_list();
-            let widest = |texts: &[String]| texts.iter().map(|text| ui.calc_text_size(text)[0]).fold(0.0, f32::max);
+            // The samples write their figures with 9s; measure them with whichever digit is
+            // widest in this font, so no figure can be wider than what was reserved for it.
+            let digit = ('0'..='9')
+                .map(|digit| (ui.calc_text_size(digit.to_string())[0], digit))
+                .fold((0.0, '9'), |widest, candidate| if candidate.0 > widest.0 { candidate } else { widest })
+                .1;
+            let widest = |texts: &[String]| {
+                texts.iter().map(|text| ui.calc_text_size(text.replace('9', &digit.to_string()))[0]).fold(0.0, f32::max)
+            };
             let (gap, button, line) = (16.0 * scale, ui.frame_height(), ui.text_line_height());
             let title = tr("Tyrian · Laberinto", "Tyrian · Labyrinth");
             let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
