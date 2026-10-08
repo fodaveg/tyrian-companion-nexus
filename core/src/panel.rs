@@ -11,14 +11,18 @@
 //!
 //! Colour is never the only signal: the text states the status and the tooltip the detail.
 //!
-//! Free slots and Magic Find can come from two places, in this order: a reading the addon
-//! verified itself ([`VerifiedSlots`], [`VerifiedMagicFind`]), which no reader provides yet,
+//! Free slots and Magic Find can come from two places, in this order: what the addon's own
+//! passive reader read and verified in the last cycle ([`BagCoverage`], [`MagicFindCoverage`]),
 //! and what the plugin sends in `farm1`. A Magic Find from the plugin is a value declared when
 //! the session started, or a partial one: it does not follow the game, so it is written and
-//! coloured apart and never warns about a drop.
+//! coloured apart and never warns about a drop. When the reader has no coverage the cell falls
+//! back to the plugin's figure, or to `—`, and its tooltip says why the addon has none.
 
+use crate::bags::BagCoverage;
 use crate::farming::{FarmingError, FarmingView, Goal, MagicFindKind, Phase, Preparation, SlotSource};
 use crate::live::LiveStatus;
+use crate::magic_find::{MagicFind, MagicFindCoverage};
+use crate::passive::Uncovered;
 use crate::price::{format_coins, PriceStatus, PriceView};
 use crate::state::Status;
 use crate::wallet::{WalletCoverage, WalletError};
@@ -54,39 +58,13 @@ pub struct Cell {
     pub tooltip: Vec<String>,
 }
 
-/// The bags of the character as the addon itself read and verified them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerifiedSlots {
-    pub free: i32,
-    /// Total slots of the equipped bags, when the reader has them.
-    pub capacity: Option<i32>,
-}
-
-/// One part of a verified Magic Find.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MagicFindSource {
-    /// Account luck.
-    Luck,
-    /// The bonus the server applies.
-    Server,
-    /// Boosters, food and other effects on the character.
-    Effects,
-}
-
-/// Magic Find as the addon itself read and verified it: the total and what it is made of.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedMagicFind {
-    pub total: i32,
-    pub parts: Vec<(MagicFindSource, i32)>,
-}
-
 /// What the panel remembers from one frame to the next.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct PanelMemory {
     /// The rate is being shown as one averaged number instead of its range.
     rate_averaged: bool,
-    /// The highest verified Magic Find of the current session, with its parts.
-    magic_find_peak: Option<VerifiedMagicFind>,
+    /// The highest verified Magic Find of the current session, with its addends.
+    magic_find_peak: Option<MagicFind>,
 }
 
 impl PanelMemory {
@@ -104,12 +82,13 @@ pub struct PanelInput<'a> {
     pub price: &'a PriceView,
     pub live: LiveStatus,
     pub wallet: WalletCoverage,
-    /// Free bag slots read and verified by the addon. No reader provides them yet, so the
-    /// addon passes `None` and the line falls back to the plugin's `slots`.
-    pub verified_slots: Option<VerifiedSlots>,
-    /// Magic Find read and verified by the addon. None yet either: the line falls back to the
-    /// plugin's `mf`, marked as not live.
-    pub verified_magic_find: Option<VerifiedMagicFind>,
+    /// What the addon's own reader says about the bags in its last cycle
+    /// (`inventory::Diagnostics::bags`). Only `Read` is a verified figure; without it the line
+    /// falls back to the plugin's `slots`.
+    pub bags: BagCoverage,
+    /// The same for Magic Find (`inventory::Diagnostics::magic_find`); without a verified
+    /// figure the line falls back to the plugin's `mf`, marked as not live.
+    pub magic_find: MagicFindCoverage,
 }
 
 /// The whole panel. Its shape is its type: there is no state in which a line is missing.
@@ -416,21 +395,107 @@ fn slots_text(free: Option<i32>, english: bool) -> String {
     }
 }
 
+/// Why the addon's own reader has no figure, in a few words. The Options window shows the
+/// English ones next to the reader's counters.
+pub fn uncovered_reason(reason: Uncovered, english: bool) -> &'static str {
+    let (es, en) = match reason {
+        Uncovered::Guard => ("esta versión del juego no es la auditada", "this game build is not the audited one"),
+        Uncovered::Profile => ("estructura no reconocida", "structure not recognised"),
+        Uncovered::Root => ("personaje no disponible", "character unavailable"),
+        Uncovered::Bounds => ("fuera de los límites de lectura", "outside the read limits"),
+        Uncovered::Alignment => ("puntero mal alineado", "misaligned pointer"),
+        Uncovered::Integrity => ("datos incoherentes", "inconsistent data"),
+        Uncovered::Unsupported => ("un efecto necesita estado en vivo", "an effect needs live state"),
+        Uncovered::Changed => ("cambió durante la lectura", "changed while reading"),
+        Uncovered::ReadFailed => ("lectura fallida", "read failed"),
+    };
+    tr(english, es, en)
+}
+
+/// The bag reader's last pass for the Options window: what it got, or the exact reason it got
+/// nothing, and what it cost. English, like the rest of that window; it is what a screenshot
+/// has to show when a reading is missing in the game.
+pub fn bags_diagnostic(coverage: BagCoverage, bytes: u32, reads: u32) -> String {
+    let outcome = match coverage {
+        BagCoverage::NotRead => "not read".to_string(),
+        BagCoverage::Read(slots) => format!(
+            "read, {} used of {}, {} free ({} bags in {} bag slots)",
+            slots.occupied, slots.capacity, slots.free, slots.bags, slots.bag_slots
+        ),
+        BagCoverage::Unavailable(reason) => format!("no coverage, {reason:?} ({})", uncovered_reason(reason, true)),
+    };
+    format!("Bags: {outcome}; bytes: {bytes} / {}; reads: {reads}", crate::bags::MAX_BYTES)
+}
+
+/// The same for the Magic Find reader, with its three addends and whether the boon-only
+/// modifiers counted.
+pub fn magic_find_diagnostic(coverage: MagicFindCoverage, bytes: u32, reads: u32) -> String {
+    let outcome = match coverage {
+        MagicFindCoverage::NotRead => "not read".to_string(),
+        MagicFindCoverage::Read(read) => format!(
+            "read, {}% = luck {} + server {} + effects {} (boon modifiers counted: {})",
+            points(read.total),
+            read.luck,
+            points(read.pushed),
+            points(read.buffs),
+            if read.boon { "yes" } else { "no" }
+        ),
+        MagicFindCoverage::Unavailable(reason) => format!("no coverage, {reason:?} ({})", uncovered_reason(reason, true)),
+    };
+    format!("Magic Find: {outcome}; bytes: {bytes} / {}; reads: {reads}", crate::magic_find::MAX_BYTES)
+}
+
+/// The tooltip line of a cell whose figure is not the addon's because its reader had none.
+/// Not having coverage is not the player's doing: it is said, and nothing turns red for it.
+fn no_coverage(reason: Uncovered, english: bool) -> String {
+    format!("{} ({})", tr(english, "Lectura del addon: sin cobertura", "Addon reading: no coverage"), uncovered_reason(reason, english))
+}
+
+/// The reader's output only describes the game while the reader is sampling: its diagnostics
+/// keep the last cycle's figures after the cycles stop (no session, a source conflict, an
+/// unsupported build), and a figure of then is not a reading of now. Outside sampling it
+/// counts as not read, the same rule the wallet coverage follows.
+fn current<T: Default>(live: LiveStatus, coverage: T) -> T {
+    if live.is_sampling() {
+        coverage
+    } else {
+        T::default()
+    }
+}
+
+fn not_sampling(english: bool) -> String {
+    tr(english, "Lectura del addon: sin muestreo en curso", "Addon reading: not sampling now").to_string()
+}
+
 /// Free bag slots: the addon's own verified reading if there is one, else what the plugin
 /// sends, else `—`. The warning tone at [`SLOTS_WARNING`] or fewer and the error tone at
-/// [`SLOTS_ERROR`] or fewer. The plugin's figure says in the tooltip whose it is and how old,
-/// and is also in the warning tone when it is old.
+/// [`SLOTS_ERROR`] or fewer. The verified figure names the counter of the inventory window in
+/// its tooltip (used of total); the plugin's says whose it is and how old, and is also in the
+/// warning tone when it is old.
 fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
     let view = input.farming;
     let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
     let mut tooltip = vec![line("Huecos libres en las bolsas del personaje", "Free bag slots of the character")];
     let mut old = false;
-    let free = if let Some(verified) = input.verified_slots {
+    let bags = current(input.live, input.bags);
+    let uncovered = match bags {
+        BagCoverage::Unavailable(reason) => Some(no_coverage(reason, english)),
+        _ if !input.live.is_sampling() => Some(not_sampling(english)),
+        _ => None,
+    };
+    let free = if let BagCoverage::Read(slots) = bags {
         tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
-        if let Some(capacity) = verified.capacity {
-            tooltip.push(format!("{}: {capacity}", tr(english, "Capacidad", "Capacity")));
-        }
-        verified.free
+        tooltip.push(if english {
+            format!("Inventory: {} used of {}", slots.occupied, slots.capacity)
+        } else {
+            format!("Inventario: {} usados de {}", slots.occupied, slots.capacity)
+        });
+        tooltip.push(if english {
+            format!("Bags: {} in {} bag slots", slots.bags, slots.bag_slots)
+        } else {
+            format!("Bolsas: {} en {} ranuras", slots.bags, slots.bag_slots)
+        });
+        i32::try_from(slots.free).unwrap_or(i32::MAX)
     } else if let Some((reading, free)) = view.reading.as_ref().and_then(|reading| reading.slots.map(|free| (reading, free))) {
         tooltip.push(line("Dato del plugin", "From the plugin"));
         if reading.slot_source == SlotSource::Recent {
@@ -443,10 +508,12 @@ fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
         if !view.fresh {
             tooltip.push(line("Datos antiguos · última lectura", "Stale data · last reading"));
         }
+        tooltip.extend(uncovered);
         old = !view.fresh || view.show_reading_age();
         free
     } else {
         tooltip.push(line("Sin lectura de huecos", "No slot reading"));
+        tooltip.extend(uncovered);
         return cell(slots_text(None, english), Tone::Muted, tooltip);
     };
     let tone = if free <= SLOTS_ERROR {
@@ -464,32 +531,42 @@ fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
 
 /// How a Magic Find is written: a verified one bare, the plugin's with a word after it that
 /// says it is not a live reading, and `—` without one.
-fn magic_find_text(value: Option<i32>, from_plugin: bool, english: bool) -> String {
-    match value {
-        Some(value) if from_plugin => format!("MF: {value}% {}", tr(english, "parcial", "partial")),
-        Some(value) => format!("MF: {value}%"),
+fn magic_find_text(figure: Option<&str>, from_plugin: bool, english: bool) -> String {
+    match figure {
+        Some(figure) if from_plugin => format!("MF: {figure}% {}", tr(english, "parcial", "partial")),
+        Some(figure) => format!("MF: {figure}%"),
         None => format!("MF: {NO_DATA}"),
     }
 }
 
-fn magic_find_source(source: MagicFindSource, english: bool) -> &'static str {
-    match source {
-        MagicFindSource::Luck => tr(english, "Suerte", "Luck"),
-        MagicFindSource::Server => tr(english, "Servidor", "Server"),
-        MagicFindSource::Effects => tr(english, "Efectos", "Effects"),
+/// Percentage points as the panel writes them: whole when they are, else with one decimal.
+pub fn points(value: f32) -> String {
+    let tenths = (f64::from(value) * 10.0).round() / 10.0;
+    if tenths.fract() == 0.0 {
+        format!("{tenths:.0}")
+    } else {
+        format!("{tenths:.1}")
     }
+}
+
+/// Two amounts of percentage points differ by something the panel would write.
+fn lower(now: f32, before: f32) -> bool {
+    before - now >= 0.05
 }
 
 /// Magic Find.
 ///
-/// - Verified by the addon: the bare figure, its parts in the tooltip, and the warning tone
-///   while it is below the highest total of the session, with how much it fell and which parts.
+/// - Read and verified by the addon: the bare figure, its three addends in the tooltip (luck,
+///   what the server pushed, the applied effects), and the warning tone while it is below the
+///   highest total of the session, with how much it fell and which addends. The reader's
+///   `boon` flag is not an addend: what it lets in is already inside the other two.
 /// - From the plugin (`mf` with `mfKind: partial`): a value declared when the session started,
 ///   or a partial one. It does not follow the game, so it is written `MF: 333% parcial`, in the
 ///   muted tone, never warns about a drop and never feeds the session's peak.
 /// - Neither: `—`.
 ///
-/// What the old "optional preparation" block said is at the end of the tooltip.
+/// When the reader tried and has no coverage, the tooltip says why. What the old "optional
+/// preparation" block said is at the end of the tooltip.
 fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> Cell {
     let view = input.farming;
     let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
@@ -498,45 +575,57 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
         memory.magic_find_peak = None;
     }
     let mut tooltip = vec![line("Hallazgo mágico", "Magic Find")];
-    let no_coverage = line("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage");
+    // Why the figure is not the addon's own: the reader's reason, or that there is no reader
+    // output at all.
+    let magic_find = current(input.live, input.magic_find);
+    let uncovered = match magic_find {
+        MagicFindCoverage::Unavailable(reason) => no_coverage(reason, english),
+        _ if !input.live.is_sampling() => not_sampling(english),
+        _ => line("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"),
+    };
     let plugin = view.reading.as_ref().filter(|reading| reading.mf_kind == MagicFindKind::Partial).and_then(|reading| reading.mf);
-    let (text, tone) = if let Some(verified) = input.verified_magic_find.as_ref() {
+    let (text, tone) = if let MagicFindCoverage::Read(read) = magic_find {
         tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
-        for (source, value) in &verified.parts {
-            tooltip.push(format!("{}: {value}%", magic_find_source(*source, english)));
+        let addends: [(&str, f32, fn(&MagicFind) -> f32); 3] = [
+            (tr(english, "Suerte", "Luck"), read.luck as f32, |value| value.luck as f32),
+            (tr(english, "Servidor", "Server"), read.pushed, |value| value.pushed),
+            (tr(english, "Efectos", "Effects"), read.buffs, |value| value.buffs),
+        ];
+        for (name, value, _) in &addends {
+            tooltip.push(format!("{name}: {}%", points(*value)));
         }
-        if memory.magic_find_peak.as_ref().is_none_or(|peak| verified.total >= peak.total) {
-            memory.magic_find_peak = Some(verified.clone());
+        if memory.magic_find_peak.as_ref().is_none_or(|peak| !lower(read.total, peak.total)) {
+            memory.magic_find_peak = Some(read);
         }
-        let peak = memory.magic_find_peak.as_ref().filter(|peak| verified.total < peak.total);
+        let peak = memory.magic_find_peak.as_ref().filter(|peak| lower(read.total, peak.total));
         if let Some(peak) = peak {
-            let fall = peak.total - verified.total;
+            let fall = points(peak.total - read.total);
             tooltip.push(if english {
-                format!("Down {fall} points from the session peak ({}%)", peak.total)
+                format!("Down {fall} points from the session peak ({}%)", points(peak.total))
             } else {
-                format!("Bajó {fall} puntos respecto al máximo de la sesión ({}%)", peak.total)
+                format!("Bajó {fall} puntos respecto al máximo de la sesión ({}%)", points(peak.total))
             });
-            for (source, before) in &peak.parts {
-                let now = verified.parts.iter().find(|(part, _)| part == source).map_or(0, |(_, value)| *value);
-                if now < *before {
+            for (name, now, of) in &addends {
+                let before = of(peak);
+                if lower(*now, before) {
                     tooltip.push(if english {
-                        format!("{}: from {before}% to {now}%", magic_find_source(*source, english))
+                        format!("{name}: from {}% to {}%", points(before), points(*now))
                     } else {
-                        format!("{}: de {before}% a {now}%", magic_find_source(*source, english))
+                        format!("{name}: de {}% a {}%", points(before), points(*now))
                     });
                 }
             }
         }
-        (magic_find_text(Some(verified.total), false, english), if peak.is_some() { Tone::Warning } else { Tone::Normal })
+        (magic_find_text(Some(&points(read.total)), false, english), if peak.is_some() { Tone::Warning } else { Tone::Normal })
     } else if let Some(value) = plugin {
         tooltip.push(line(
             "Dato del plugin: declarado al empezar la sesión, o parcial. No es una lectura en vivo.",
             "From the plugin: declared when the session started, or partial. Not a live reading.",
         ));
-        tooltip.push(no_coverage);
-        (magic_find_text(Some(value), true, english), Tone::Muted)
+        tooltip.push(uncovered);
+        (magic_find_text(Some(&value.to_string()), true, english), Tone::Muted)
     } else {
-        tooltip.push(no_coverage);
+        tooltip.push(uncovered);
         (magic_find_text(None, false, english), Tone::Muted)
     };
     if let Some(reading) = view.reading.as_ref() {
@@ -545,10 +634,13 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
             Preparation::Partial => line("Preparación parcial", "Partial preparation"),
             Preparation::Unknown => line("Preparación desconocida", "Preparation unknown"),
         });
-        tooltip.push(line(
-            "Buffs temporales sin verificar. Recordatorios manuales en el host.",
-            "Temporary buffs unverified. Manual reminders in the host.",
-        ));
+        // The host cannot see the effects on the character; the addon's own reading counts them.
+        if !matches!(magic_find, MagicFindCoverage::Read(_)) {
+            tooltip.push(line(
+                "Buffs temporales sin verificar. Recordatorios manuales en el host.",
+                "Temporary buffs unverified. Manual reminders in the host.",
+            ));
+        }
     }
     cell(text, tone, tooltip)
 }
@@ -720,8 +812,8 @@ pub fn width_samples(english: bool) -> WidthSamples {
         lines: vec![
             slots_text(Some(9999), english),
             slots_text(None, english),
-            magic_find_text(Some(9999), false, english),
-            magic_find_text(Some(9999), true, english),
+            magic_find_text(Some("9999.9"), false, english),
+            magic_find_text(Some("9999"), true, english),
             magic_find_text(None, false, english),
         ],
         status,

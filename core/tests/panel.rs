@@ -5,11 +5,12 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use tyrian_companion_nexus_core::bags::{BagCoverage, BagSlots};
 use tyrian_companion_nexus_core::farming::FarmingView;
 use tyrian_companion_nexus_core::live::LiveStatus;
-use tyrian_companion_nexus_core::panel::{
-    self, Cell, MagicFindSource, PanelInput, PanelMemory, PanelView, Tone, VerifiedMagicFind, VerifiedSlots, NO_DATA,
-};
+use tyrian_companion_nexus_core::magic_find::{MagicFind, MagicFindCoverage};
+use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, PanelView, Tone, NO_DATA};
+use tyrian_companion_nexus_core::passive::Uncovered;
 use tyrian_companion_nexus_core::price::PriceView;
 use tyrian_companion_nexus_core::protocol::{parse_server_line, ServerLine};
 use tyrian_companion_nexus_core::state::{SharedState, Status};
@@ -77,12 +78,27 @@ fn no_price() -> PriceView {
     SharedState::new().price_view(Instant::now())
 }
 
-fn verified(luck: i32, server: i32, effects: i32) -> VerifiedMagicFind {
-    VerifiedMagicFind {
-        total: luck + server + effects,
-        parts: vec![(MagicFindSource::Luck, luck), (MagicFindSource::Server, server), (MagicFindSource::Effects, effects)],
-    }
+/// A Magic Find the addon's reader read: luck, what the server pushed, and the effects.
+fn verified(luck: u32, server: f32, effects: f32) -> MagicFindCoverage {
+    MagicFindCoverage::Read(MagicFind { total: luck as f32 + server + effects, luck, pushed: server, buffs: effects, boon: false })
 }
+
+/// Bags the addon's reader read: `free` of `capacity`, in eight bags.
+fn bags(free: u32, capacity: u32) -> BagCoverage {
+    BagCoverage::Read(BagSlots { capacity, occupied: capacity - free, free, bag_slots: 8, bags: 8 })
+}
+
+const REASONS: [Uncovered; 9] = [
+    Uncovered::Guard,
+    Uncovered::Profile,
+    Uncovered::Root,
+    Uncovered::Bounds,
+    Uncovered::Alignment,
+    Uncovered::Integrity,
+    Uncovered::Unsupported,
+    Uncovered::Changed,
+    Uncovered::ReadFailed,
+];
 
 struct Case {
     connection: Status,
@@ -90,8 +106,8 @@ struct Case {
     price: PriceView,
     live: LiveStatus,
     wallet: WalletCoverage,
-    verified_slots: Option<VerifiedSlots>,
-    verified_magic_find: Option<VerifiedMagicFind>,
+    bags: BagCoverage,
+    magic_find: MagicFindCoverage,
 }
 
 impl Case {
@@ -103,8 +119,8 @@ impl Case {
             price: price(Some(&price_frame("ok")), Duration::ZERO),
             live: LiveStatus::Measuring,
             wallet: WalletCoverage::Listed(55),
-            verified_slots: None,
-            verified_magic_find: None,
+            bags: BagCoverage::NotRead,
+            magic_find: MagicFindCoverage::NotRead,
         }
     }
 
@@ -131,8 +147,8 @@ impl Case {
                 price: &self.price,
                 live: self.live,
                 wallet: self.wallet,
-                verified_slots: self.verified_slots,
-                verified_magic_find: self.verified_magic_find.clone(),
+                bags: self.bags,
+                magic_find: self.magic_find,
             },
             memory,
             english,
@@ -167,7 +183,7 @@ fn the_sketch_itself() {
     assert_eq!((english.status_label.as_str(), english.status.text.as_str()), ("Status:", "Measuring"));
     // With a verified reading the line is the sketch's, bare.
     let mut read = Case::sketch();
-    read.verified_magic_find = Some(verified(300, 0, 33));
+    read.magic_find = verified(300, 0.0, 33.0);
     assert_eq!(read.view(false).magic_find.text, "MF: 333%");
     // The corn is not in the panel, and neither is any net-of-fee wording.
     for view in [&view, &english] {
@@ -215,7 +231,7 @@ fn slots_warn_at_ten_and_turn_to_error_at_three_whatever_their_source() {
     for (slots, tone) in [(250, Tone::Normal), (11, Tone::Normal), (10, Tone::Warning), (4, Tone::Warning), (3, Tone::Error), (0, Tone::Error)] {
         let plugin = Case::measuring().with_frame(sketch_frame(), |frame| frame["slots"] = json!(slots)).view(false).slots;
         let mut case = Case::measuring();
-        case.verified_slots = Some(VerifiedSlots { free: slots, capacity: Some(250) });
+        case.bags = bags(slots as u32, 250);
         let read = case.view(false).slots;
         for cell in [&plugin, &read] {
             assert_eq!(cell.text, format!("Huecos: {slots} libres"));
@@ -228,17 +244,93 @@ fn slots_warn_at_ten_and_turn_to_error_at_three_whatever_their_source() {
 #[test]
 fn a_verified_reading_of_the_slots_comes_before_the_plugin_one() {
     let mut case = Case::sketch();
-    case.verified_slots = Some(VerifiedSlots { free: 41, capacity: Some(160) });
+    case.bags = bags(41, 160);
     let view = case.view(false);
     assert_eq!((view.slots.text.as_str(), view.slots.tone), ("Huecos: 41 libres", Tone::Normal));
-    assert_eq!(view.slots.tooltip, ["Huecos libres en las bolsas del personaje", "Leído y verificado por el addon", "Capacidad: 160"]);
+    // The tooltip names the counter of the inventory window: used of total.
+    assert_eq!(
+        view.slots.tooltip,
+        ["Huecos libres en las bolsas del personaje", "Leído y verificado por el addon", "Inventario: 119 usados de 160", "Bolsas: 8 en 8 ranuras"]
+    );
     assert!(!has(&view.slots, "plugin"));
     // It does not depend on the plugin's frame being there, or fresh.
     case.farming = farming(None, Duration::ZERO);
-    case.verified_slots = Some(VerifiedSlots { free: 41, capacity: None });
     let view = case.view(true);
     assert_eq!(view.slots.text, "Slots: 41 free");
-    assert_eq!(view.slots.tooltip, ["Free bag slots of the character", "Read and verified by the addon"]);
+    assert_eq!(
+        view.slots.tooltip,
+        ["Free bag slots of the character", "Read and verified by the addon", "Inventory: 119 used of 160", "Bags: 8 in 8 bag slots"]
+    );
+}
+
+/// The reader tried and has no figure. The line falls back to the plugin's figure, or to a
+/// dash, says in the tooltip that the addon has no coverage and why, and never turns red for
+/// it: no coverage is not something the player did.
+#[test]
+fn bags_without_coverage_fall_back_to_the_plugin_or_a_dash_and_say_why() {
+    for reason in REASONS {
+        for english in [false, true] {
+            let why = format!(
+                "{} ({})",
+                if english { "Addon reading: no coverage" } else { "Lectura del addon: sin cobertura" },
+                panel::uncovered_reason(reason, english)
+            );
+            // With the plugin's figure.
+            let mut with_plugin = Case::sketch();
+            with_plugin.bags = BagCoverage::Unavailable(reason);
+            let cell = with_plugin.view(english).slots;
+            assert_eq!((cell.text.as_str(), cell.tone), (if english { "Slots: 63 free" } else { "Huecos: 63 libres" }, Tone::Normal), "{reason:?}");
+            assert!(has(&cell, if english { "From the plugin" } else { "Dato del plugin" }) && has(&cell, &why), "{reason:?}: {cell:?}");
+            // Without any figure.
+            let mut without = Case::measuring();
+            without.bags = BagCoverage::Unavailable(reason);
+            let cell = without.view(english).slots;
+            assert_eq!((cell.text.as_str(), cell.tone), (if english { "Slots: —" } else { "Huecos: —" }, Tone::Muted), "{reason:?}");
+            assert!(has(&cell, &why), "{reason:?}: {cell:?}");
+        }
+    }
+    // Every reason has its own short text, in both languages.
+    for english in [false, true] {
+        let mut texts: Vec<&str> = REASONS.iter().map(|reason| panel::uncovered_reason(*reason, english)).collect();
+        assert!(texts.iter().all(|text| !text.is_empty() && text.chars().count() <= 42), "{texts:?}");
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts.len(), REASONS.len());
+    }
+    // Not read at all: as before there was a reader.
+    let mut not_read = Case::sketch();
+    not_read.bags = BagCoverage::NotRead;
+    assert_eq!(not_read.view(false).slots.tooltip, ["Huecos libres en las bolsas del personaje", "Dato del plugin", "Lectura de huecos hace 2s"]);
+}
+
+/// The reader's diagnostics keep the last cycle's figures after the cycles stop. A figure of
+/// then is not a reading of now, so outside sampling it is not painted as verified.
+#[test]
+fn a_reading_of_the_addon_only_counts_while_its_reader_is_sampling() {
+    for live in [LiveStatus::Waiting, LiveStatus::Measuring, LiveStatus::Partial] {
+        let mut case = Case::sketch();
+        case.live = live;
+        case.bags = bags(41, 160);
+        case.magic_find = verified(300, 30.0, 3.0);
+        let view = case.view(false);
+        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 41 libres", "MF: 333%"), "{live:?}");
+    }
+    for live in [LiveStatus::NotNegotiated, LiveStatus::UnsupportedBuild, LiveStatus::Unavailable, LiveStatus::Conflict, LiveStatus::StorageUnavailable] {
+        let mut case = Case::sketch();
+        case.live = live;
+        case.bags = bags(41, 160);
+        case.magic_find = verified(300, 30.0, 53.0);
+        let mut memory = PanelMemory::default();
+        let view = case.view_with(&mut memory, false);
+        // Back to the plugin's figures, and the tooltip says the reader is not sampling.
+        assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+        assert_eq!(view.magic_find.tone, Tone::Muted);
+        for cell in [&view.slots, &view.magic_find] {
+            assert!(has(cell, "Lectura del addon: sin muestreo en curso") && !has(cell, "verificado por el addon"), "{live:?}: {cell:?}");
+        }
+        assert_eq!(memory, PanelMemory::default(), "a figure that is not painted is not a peak either");
+        assert!(has(&case.view(true).slots, "Addon reading: not sampling now"));
+    }
 }
 
 /// The plugin's Magic Find is a value declared when the session started, or a partial one. It
@@ -288,51 +380,117 @@ fn the_plugin_magic_find_is_marked_as_not_live_and_never_warns() {
     assert_eq!(offline.view(false).magic_find.tooltip, ["Hallazgo mágico", "Hallazgo mágico verificado: sin cobertura"]);
 }
 
-/// The reading a reader inside the addon will provide: the total, its parts, and a warning
-/// while it is below the highest total of the session, saying how much it fell and which part.
+/// The reading of the addon's own reader: the total, its three addends, and a warning while it
+/// is below the highest total of the session, saying how much it fell and which addend.
 #[test]
 fn a_verified_magic_find_shows_its_parts_and_warns_when_it_falls_from_the_session_peak() {
     let mut memory = PanelMemory::default();
     let mut case = Case::sketch();
-    let mut step = |memory: &mut PanelMemory, reading: Option<VerifiedMagicFind>, english: bool| {
-        case.verified_magic_find = reading;
+    let mut step = |memory: &mut PanelMemory, reading: MagicFindCoverage, english: bool| {
+        case.magic_find = reading;
         case.view_with(memory, english).magic_find
     };
-    let first = step(&mut memory, Some(verified(300, 30, 3)), false);
+    let first = step(&mut memory, verified(300, 30.0, 3.0), false);
     assert_eq!((first.text.as_str(), first.tone), ("MF: 333%", Tone::Normal));
+    // The host's "temporary buffs unverified" is not said next to a reading that counts them.
     assert_eq!(
         first.tooltip,
-        [
-            "Hallazgo mágico",
-            "Leído y verificado por el addon",
-            "Suerte: 300%",
-            "Servidor: 30%",
-            "Efectos: 3%",
-            "Preparación parcial",
-            "Buffs temporales sin verificar. Recordatorios manuales en el host.",
-        ]
+        ["Hallazgo mágico", "Leído y verificado por el addon", "Suerte: 300%", "Servidor: 30%", "Efectos: 3%", "Preparación parcial"]
     );
     assert!(!has(&first, "plugin") && !has(&first, "sin cobertura"), "a verified reading comes before the plugin's 333: {first:?}");
-    assert_eq!(step(&mut memory, Some(verified(300, 30, 53)), false).tone, Tone::Normal, "a rise is the new peak");
-    let fallen = step(&mut memory, Some(verified(300, 30, 3)), false);
+    assert_eq!(step(&mut memory, verified(300, 30.0, 53.0), false).tone, Tone::Normal, "a rise is the new peak");
+    let fallen = step(&mut memory, verified(300, 30.0, 3.0), false);
     assert_eq!((fallen.text.as_str(), fallen.tone), ("MF: 333%", Tone::Warning));
     assert!(has(&fallen, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{fallen:?}");
     assert!(has(&fallen, "Efectos: de 53% a 3%"));
     assert!(!has(&fallen, "Suerte: de") && !has(&fallen, "Servidor: de"), "only the part that fell: {fallen:?}");
-    let english = step(&mut memory, Some(verified(300, 0, 3)), true);
+    let english = step(&mut memory, verified(300, 0.0, 3.0), true);
     assert_eq!((english.text.as_str(), english.tone), ("MF: 303%", Tone::Warning));
     assert!(has(&english, "Down 80 points from the session peak (383%)") && has(&english, "Server: from 30% to 0%") && has(&english, "Effects: from 53% to 3%"));
-    assert_eq!(step(&mut memory, Some(verified(300, 30, 53)), false).tone, Tone::Normal, "back at the peak");
+    assert_eq!(english.tooltip[2..5], ["Luck: 300%", "Server: 0%", "Effects: 3%"]);
+    assert_eq!(step(&mut memory, verified(300, 30.0, 53.0), false).tone, Tone::Normal, "back at the peak");
     // A reading that goes missing falls back to the plugin's value and does not forget the peak.
-    let fallback = step(&mut memory, None, false);
+    let fallback = step(&mut memory, MagicFindCoverage::NotRead, false);
     assert_eq!((fallback.text.as_str(), fallback.tone), ("MF: 333% parcial", Tone::Muted));
-    assert_eq!(step(&mut memory, Some(verified(300, 30, 3)), false).tone, Tone::Warning);
+    assert_eq!(step(&mut memory, MagicFindCoverage::Unavailable(Uncovered::Changed), false).text, "MF: 333% parcial");
+    assert_eq!(step(&mut memory, verified(300, 30.0, 3.0), false).tone, Tone::Warning);
     // A new session has its own peak.
     let mut starting = Case::measuring().with_frame(sketch_frame(), |frame| frame["phase"] = json!("starting"));
-    starting.verified_magic_find = Some(verified(250, 0, 0));
+    starting.magic_find = verified(250, 0.0, 0.0);
     assert_eq!(starting.view_with(&mut memory, false).magic_find.tone, Tone::Normal);
-    assert_eq!(step(&mut memory, Some(verified(260, 0, 0)), false).tone, Tone::Normal);
-    assert_eq!(step(&mut memory, Some(verified(250, 0, 0)), false).tone, Tone::Warning);
+    assert_eq!(step(&mut memory, verified(260, 0.0, 0.0), false).tone, Tone::Normal);
+    assert_eq!(step(&mut memory, verified(250, 0.0, 0.0), false).tone, Tone::Warning);
+    // Fractions are written with one decimal, and a difference too small to write is no drop.
+    let mut memory = PanelMemory::default();
+    let half = step(&mut memory, verified(300, 12.5, 20.0), false);
+    assert_eq!(half.text, "MF: 332.5%");
+    assert!(has(&half, "Servidor: 12.5%"));
+    assert_eq!(step(&mut memory, verified(300, 12.49, 20.0), false).tone, Tone::Normal);
+    let small = step(&mut memory, verified(300, 12.0, 20.0), false);
+    assert_eq!((small.text.as_str(), small.tone), ("MF: 332%", Tone::Warning));
+    assert!(has(&small, "Bajó 0.5 puntos") && has(&small, "Servidor: de 12.5% a 12%"), "{small:?}");
+    // The boon flag is not an addend: it changes nothing the panel writes.
+    let mut memory = PanelMemory::default();
+    let with_boon = MagicFindCoverage::Read(MagicFind { total: 333.0, luck: 300, pushed: 30.0, buffs: 3.0, boon: true });
+    assert_eq!(step(&mut memory, with_boon, false).tooltip, step(&mut PanelMemory::default(), verified(300, 30.0, 3.0), false).tooltip);
+}
+
+/// The Magic Find reader tried and has no figure: the plugin's value if there is one, marked
+/// as not live as always, or a dash; the tooltip says the addon has no coverage and why; grey.
+#[test]
+fn magic_find_without_coverage_falls_back_to_the_plugin_or_a_dash_and_says_why() {
+    for reason in REASONS {
+        for english in [false, true] {
+            let why = format!(
+                "{} ({})",
+                if english { "Addon reading: no coverage" } else { "Lectura del addon: sin cobertura" },
+                panel::uncovered_reason(reason, english)
+            );
+            let mut with_plugin = Case::sketch();
+            with_plugin.magic_find = MagicFindCoverage::Unavailable(reason);
+            let cell = with_plugin.view(english).magic_find;
+            assert_eq!((cell.text.as_str(), cell.tone), (if english { "MF: 333% partial" } else { "MF: 333% parcial" }, Tone::Muted), "{reason:?}");
+            assert!(has(&cell, &why) && has(&cell, if english { "Not a live reading" } else { "No es una lectura en vivo" }), "{reason:?}: {cell:?}");
+            let mut without = Case::measuring();
+            without.magic_find = MagicFindCoverage::Unavailable(reason);
+            let cell = without.view(english).magic_find;
+            assert_eq!((cell.text.as_str(), cell.tone), ("MF: —", Tone::Muted), "{reason:?}");
+            assert!(has(&cell, &why), "{reason:?}: {cell:?}");
+            // The reason replaces the generic line, it does not add to it.
+            assert!(!has(&cell, "Verified Magic Find: no coverage") && !has(&cell, "Hallazgo mágico verificado: sin cobertura"));
+        }
+    }
+    let mut live_state = Case::sketch();
+    live_state.magic_find = MagicFindCoverage::Unavailable(Uncovered::Unsupported);
+    assert!(has(&live_state.view(false).magic_find, "Lectura del addon: sin cobertura (un efecto necesita estado en vivo)"));
+}
+
+/// What the Options window shows of each reader's last pass, for a screenshot.
+#[test]
+fn the_reader_diagnostics_name_the_outcome_the_exact_reason_and_the_cost() {
+    assert_eq!(panel::bags_diagnostic(BagCoverage::NotRead, 0, 0), "Bags: not read; bytes: 0 / 8192; reads: 0");
+    assert_eq!(
+        panel::bags_diagnostic(bags(63, 160), 1480, 37),
+        "Bags: read, 97 used of 160, 63 free (8 bags in 8 bag slots); bytes: 1480 / 8192; reads: 37"
+    );
+    assert_eq!(
+        panel::bags_diagnostic(BagCoverage::Unavailable(Uncovered::Alignment), 312, 9),
+        "Bags: no coverage, Alignment (misaligned pointer); bytes: 312 / 8192; reads: 9"
+    );
+    assert_eq!(panel::magic_find_diagnostic(MagicFindCoverage::NotRead, 0, 0), "Magic Find: not read; bytes: 0 / 65536; reads: 0");
+    assert_eq!(
+        panel::magic_find_diagnostic(verified(300, 30.0, 33.5), 28706, 410),
+        "Magic Find: read, 363.5% = luck 300 + server 30 + effects 33.5 (boon modifiers counted: no); bytes: 28706 / 65536; reads: 410"
+    );
+    assert_eq!(
+        panel::magic_find_diagnostic(MagicFindCoverage::Unavailable(Uncovered::ReadFailed), 41200, 603),
+        "Magic Find: no coverage, ReadFailed (read failed); bytes: 41200 / 65536; reads: 603"
+    );
+    for reason in REASONS {
+        for line in [panel::bags_diagnostic(BagCoverage::Unavailable(reason), 1, 1), panel::magic_find_diagnostic(MagicFindCoverage::Unavailable(reason), 1, 1)] {
+            assert!(line.contains(&format!("{reason:?}")) && line.contains(panel::uncovered_reason(reason, true)), "{line}");
+        }
+    }
 }
 
 fn rate_after(memory: &mut PanelMemory, lo: Value, hi: Value, english: bool) -> Cell {
@@ -728,7 +886,11 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                 (json!(9000), json!(9999), json!(9999)),
                 (json!(37), json!(38), json!(1234)),
             ] {
-                for (slots, mf) in [(Value::Null, Value::Null), (json!(0), json!(0)), (json!(250), json!(333)), (json!(9999), json!(9999))] {
+                for (index, (slots, mf)) in [(Value::Null, Value::Null), (json!(9999), json!(9999)), (json!(0), json!(0)), (json!(250), json!(333))].into_iter().enumerate() {
+                    // The middle figures add nothing outside one phase; the limits go everywhere.
+                    if index > 1 && phase != "active" {
+                        continue;
+                    }
                     let mut frame = farming_frame();
                     frame["phase"] = json!(phase);
                     frame["err"] = err.clone();
@@ -758,15 +920,19 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
             for local in [0, 15] {
                 for (index, price_frame) in prices.iter().enumerate() {
                     for connection in [Status::Connected, Status::WaitingForPlugin, Status::MissingToken, Status::TokenRejected, Status::UpdateRequired, Status::GameExiting] {
-                        for read in [false, true] {
+                        for read in 0..3 {
+                            // The addon's reader only runs with a connection.
+                            if read > 0 && connection != Status::Connected {
+                                continue;
+                            }
                             let case = Case {
                                 connection,
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },
                                 live: if local == 0 { LiveStatus::Measuring } else { LiveStatus::Unavailable },
                                 wallet: WalletCoverage::Listed(55),
-                                verified_slots: read.then_some(VerifiedSlots { free: 2, capacity: Some(160) }),
-                                verified_magic_find: read.then(|| verified(300, 30, 3)),
+                                bags: match read { 0 => BagCoverage::NotRead, 1 => bags(2, 160), _ => BagCoverage::Unavailable(Uncovered::Changed) },
+                                magic_find: match read { 0 => MagicFindCoverage::NotRead, 1 => verified(300, 30.5, 3.0), _ => MagicFindCoverage::Unavailable(Uncovered::Unsupported) },
                             };
                             let view = case.view(english);
                             for cell in view.cells() {

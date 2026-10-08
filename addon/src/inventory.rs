@@ -353,8 +353,8 @@ impl NativeReader {
                 }
                 Err(error) => coverage = WalletCoverage::Unavailable(error),
             }
-            // Reader output only: these two stay in the local diagnostics. Nothing here changes
-            // the sample that goes out, whose `free_slots` remains `None`.
+            // These two stay in the local diagnostics, where the panel and Options read them.
+            // Nothing here changes the sample that goes out, whose `free_slots` remains `None`.
             bag_coverage = match self.bags(&mut bag_reader, context) {
                 Ok(slots) => BagCoverage::Read(slots),
                 Err(error) => BagCoverage::Unavailable(error),

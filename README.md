@@ -60,10 +60,15 @@ Version 0.8.0 redraws the Labyrinth panel after David's sketch: observed bags an
 the left, the gross price of a stack of 250 on the right, and three lines for free slots, Magic
 Find and status, the last with a coloured dot for the connection. Every line is always there,
 the window keeps its size, and what used to be lines of the panel is in the tooltips. The
-panel has its own title bar, with a button that removes the window's background. Slots and
-Magic Find are the plugin's until the addon has a verified reader for them, and the plugin's
-Magic Find is written `MF: 333% partial` because it is not a live reading. No frame of the
-protocol changes. See "Labyrinth farming panel".
+panel has its own title bar, with a button that removes the window's background.
+
+0.8.0 also reads, passively and from the game's own stored inputs, the bags' capacity with
+their used and free slots and the Magic Find with its three addends. The panel paints those
+readings in its Slots and MF lines, and MF warns when it falls from the session's highest.
+Without a reading the lines fall back to what the plugin sends, and the plugin's Magic Find is
+written `MF: 333% partial` because it is not a live reading. Neither reading is sent to the
+plugin yet, and no frame of the protocol changes. See "Labyrinth farming panel" and "Bag slots
+and Magic Find (read by the addon, not on the wire)".
 
 ## What it does, and does not do
 
@@ -207,13 +212,17 @@ currency reaching zero, a first-ever currency, a character change or a map rehas
 not a run of this DLL: the wallet reader in the addon has only been exercised against
 fixtures.
 
-### Bag slots and Magic Find (reader output only)
+### Bag slots and Magic Find (read by the addon, not on the wire)
 
 In the same cycle, after the wallet, the worker reads two more things from the same verified
-build and context. **Neither is on the wire or on the panel yet**: both end in the local
-reader diagnostics (`inventory::Diagnostics::bags` and `::magic_find`), each as a value or as
-"no coverage" with one closed reason. The inventory sample that goes out is unchanged, and its
-`free_slots` stays `None`.
+build and context. Both end in the local reader diagnostics (`inventory::Diagnostics::bags`
+and `::magic_find`), each as a value or as "no coverage" with one closed reason. From there
+the Labyrinth panel paints them in its "Slots" and "MF" lines, before the plugin's figures,
+and Options shows each reader's last pass (see "Labyrinth farming panel").
+
+**Neither is on the wire in this version.** The inventory sample that goes out is unchanged,
+its `free_slots` stays `None`, and no frame carries Magic Find: the plugin does not receive
+what the addon reads. Sending them is pending, and needs the protocol to say how.
 
 The game stores neither number. It computes both when it paints, from stored inputs, and the
 reader repeats that arithmetic without calling anything.
@@ -593,24 +602,51 @@ Estado: ● Midiendo
 - **Left column:** the positive **observed bags**, large, and under them the rate per hour.
 - **Right column:** the gross trading-post price of a **stack of 250 bags**: the highest buy
   order, then the lowest sell offer (see "Bag price (`price2`)").
-- **Slots:** the free bag slots the plugin sends in `farm1`, orange at 10 or fewer and red at
-  3 or fewer. The tooltip says they are the plugin's, whether they are a recent character's,
-  and how old the reading is; an old one paints the line orange. Without a figure, which is
-  what a live session sends today, the line says `—` in grey.
-- **MF** (Magic Find): the plugin's `mf`, when it sends one, written **`MF: 333% partial`**
-  (`parcial`) and in grey. It is a value declared when the session started, or a partial one,
-  and does not follow the game: the word and the colour are there so it is never taken for a
-  live reading, and it never warns about a drop. The tooltip says where it comes from and
-  "Verified Magic Find: no coverage", and ends with what the old preparation block said
-  (preparation state, temporary buffs unverified). Without a value the line says `—`.
+- **Slots:** the free bag slots, orange at 10 or fewer and red at 3 or fewer.
+- **MF:** the Magic Find.
 - **Status:** a dot, a text and a tooltip. The colour is never the only signal.
 
-Slots and Magic Find take a reading the addon verified itself before the plugin's
-(`PanelInput::verified_slots` and `verified_magic_find` in `core/src/panel.rs`). No reader
-provides one yet, so the addon passes none; the model and its tests are ready for it. A
-verified Magic Find is written bare, `MF: 333%`, with its parts (luck, server, effects) in the
-tooltip, and turns orange while it is below the highest total of the session, saying how many
-points it fell and which parts. Verified slots add the bags' capacity to the tooltip.
+Slots and MF take their figure from the first of these that has one:
+
+1. **What the addon's own reader read and verified in its last cycle** (see "Bag slots and
+   Magic Find (read by the addon, not on the wire)"), while the reader is sampling.
+   - Slots: the tooltip says "Read and verified by the addon" and gives the inventory window's
+     counter, `Inventory: 97 used of 160`, and the bags.
+   - MF is written bare, `MF: 333%`, with its three addends in the tooltip: luck, server (what
+     the server pushed) and effects (food, boosters, banners). It is the total the hero panel
+     adds up, without that panel's cap. While it is below the highest total of the session it
+     turns orange, and the tooltip says how many points it fell and which addends
+     (`Effects: from 53% to 3%`). Fractions are written with one decimal.
+2. **What the plugin sends in `farm1`.**
+   - Slots: the tooltip says they are the plugin's, whether they are a recent character's, and
+     how old the reading is; an old one paints the line orange.
+   - MF is written **`MF: 333% partial`** (`parcial`) and in grey. It is a value declared when
+     the session started, or a partial one, and does not follow the game: the word and the
+     colour are there so it is never taken for a live reading, and it never warns about a
+     drop. The tooltip says so.
+3. **`—`**, in grey.
+
+When the addon's reader tried and got nothing, the line falls back to 2 or 3 and its tooltip
+says "Addon reading: no coverage" with the reason: this game build is not the audited one,
+structure not recognised, character unavailable, outside the read limits, misaligned pointer,
+inconsistent data, an effect needs live state, changed while reading, or read failed. No
+coverage is not something the player did, so nothing turns red for it. Outside sampling (no
+session, a source conflict, an unsupported build) the reader's last figures are not painted:
+they are of then, not of now, and the tooltip says the reader is not sampling. The MF tooltip
+ends with the host's preparation state and, unless the figure is the addon's own, with
+"temporary buffs unverified".
+
+In Options, under "Reader diagnostics", two lines give each reader's last pass, for a
+screenshot when a figure is missing:
+
+```
+Bags: read, 97 used of 160, 63 free (5 bags in 8 bag slots); bytes: 1480 / 8192; reads: 37
+Magic Find: no coverage, ReadFailed (read failed); bytes: 41200 / 65536; reads: 603
+```
+
+They show the outcome with its exact reason and the bytes and reads of that pass against its
+budget. The readers do not time themselves, so there is no duration: a Magic Find pass cut by
+the cycle's 750 ms deadline shows as `ReadFailed` with fewer bytes than its budget.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -740,6 +776,14 @@ Options show the inventory status and the wallet coverage always.
 
 Still to be looked at in the game; none of the panel's painting has been seen there:
 
+- That the two readers work in this DLL at all: they have only run against fixtures. The
+  tooltip of Slots against the inventory window's counter (used of total, and free), MF
+  against the hero panel, and removing an effect to see MF fall, turn orange and name the
+  addend. If either line says `—` or `partial`, the two "Reader diagnostics" lines of Options
+  say why.
+- Whether a reading that fails now and then (`Changed`, or `ReadFailed` when the Magic Find
+  pass does not fit the cycle's 750 ms) makes Slots or MF alternate between the addon's figure
+  and the plugin's. Nothing holds the last good reading across a failed cycle.
 - That the panel paints at all as described: the two columns side by side without touching,
   the large figure, the dot, and the three drawn buttons of the bar.
 - That the bar's buttons take the click, that the panel moves when dragged by its bar or an

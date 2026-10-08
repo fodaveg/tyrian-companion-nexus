@@ -125,6 +125,10 @@ pub fn options_render(ui: &Ui) {
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
         ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
             tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
+        // The last pass of the two readers the panel takes its slots and Magic Find from: the
+        // outcome with its exact reason, and what it read. The readers do not time themselves.
+        ui.text_wrapped(panel::bags_diagnostic(diagnostics.bags, diagnostics.bag_bytes, diagnostics.bag_reads));
+        ui.text_wrapped(panel::magic_find_diagnostic(diagnostics.magic_find, diagnostics.magic_find_bytes, diagnostics.magic_find_reads));
         if let Some(context) = shared.live_context() {
             ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
         }
@@ -387,6 +391,7 @@ pub fn farming_render(ui: &Ui) {
     let shared = state::shared();
     let now = std::time::Instant::now();
     let (farming, price) = (shared.farming_view(now), shared.price_view(now));
+    let diagnostics = shared.inventory_diagnostics();
     let view = {
         let mut memory = PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         panel::view(
@@ -395,11 +400,11 @@ pub fn farming_render(ui: &Ui) {
                 farming: &farming,
                 price: &price,
                 live: shared.live_status(),
-                wallet: shared.inventory_diagnostics().wallet,
-                // The addon has no verified reader for either yet, so both lines use what the
-                // plugin sends in `farm1`. A reader plugs its reading in here.
-                verified_slots: None,
-                verified_magic_find: None,
+                wallet: diagnostics.wallet,
+                // What the addon's own reader got in its last cycle. Only a `Read` is painted
+                // as verified; otherwise the lines use what the plugin sends in `farm1`.
+                bags: diagnostics.bags,
+                magic_find: diagnostics.magic_find,
             },
             &mut memory,
             english,
