@@ -603,6 +603,20 @@ token below, which only take effect after **Save**:
 Changes take effect on the addon's next connection attempt, right away if the plugin had
 rejected the previous token; they do not tear down a connection that is already up.
 
+`settings.json` is replaced whole or not at all: the new contents are written next to it, in
+`settings.json.tmp`, and renamed over it, so a write cut short (the game killed, a full disk)
+leaves the file of before instead of half of a new one. It is not flushed to the disk before
+the rename, so this does not cover a power cut.
+
+If the file is there and cannot be loaded, because it cannot be read or does not parse, the
+addon runs on the default settings, leaves the file as it is and **saves nothing by itself**:
+the checkboxes, the buttons of the panel's bar and the quick access icon still work for that
+load, but they are not written. Only **Save**, with the token pasted again, writes, and it
+replaces that file; from then on everything saves as usual. Until then Options says so above
+the port, in English and Spanish. Before this a file that did not parse was loaded as the
+defaults and the first click on a checkbox wrote them, with an empty token, over it. A file
+that is not there is a first run and nothing of this applies.
+
 ## Labyrinth farming panel
 
 In Nexus Options, enable **Show Labyrinth farming panel / Mostrar panel de Laberinto**.
@@ -984,7 +998,9 @@ covers what does not need a running game:
 - what Save accepts as the token (`core/src/token.rs`): an API key refused in either case, a
   43-character token accepted, surrounding whitespace trimmed, too short or too long refused;
 - the `\n` framer, the backoff table, settings persistence (an API key saved by 0.2.0 dropped
-  and removed from disk on load), and the token never showing up in `Debug` output.
+  and removed from disk on load; a save that a concurrent reader never sees half of; a file
+  that cannot be loaded told apart from a missing one, left as it is and not replaced by an
+  automatic save until an explicit one), and the token never showing up in `Debug` output.
 
 It does not, and cannot, cover the actual Nexus load/unload cycle, what `NexusLink` and the
 Mumble Link really contain in each game state, the `WndProc` callback, or the ImGui panel —

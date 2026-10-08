@@ -25,7 +25,7 @@ use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, To
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
-use tyrian_companion_nexus_core::settings::{self, Settings};
+use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
 use tyrian_companion_nexus_core::token::{self, TokenRejection};
 
@@ -50,9 +50,19 @@ static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 /// What the panel carries from one frame to the next (`panel::PanelMemory`).
 static PANEL_MEMORY: Mutex<PanelMemory> = Mutex::new(PanelMemory::new());
 
+/// Keeps what saves by itself (a checkbox, a button of the panel's bar, a quick access icon)
+/// from replacing a `settings.json` that could not be loaded: only the Save button writes while
+/// it holds, and Options says so (`settings::SaveGuard`).
+static SAVE_GUARD: SaveGuard = SaveGuard::new();
+
 /// `notice` is shown under the fields from the first frame: `load()` passes one when it removed
-/// an API key from `settings.json`.
-pub fn init_pending(settings: &Settings, notice: Option<&'static str>) {
+/// an API key from `settings.json`. `unreadable` is `settings::Loaded::unreadable`: the file is
+/// there and could not be loaded, so `settings` are the defaults and nothing but the user's own
+/// Save may replace it.
+pub fn init_pending(settings: &Settings, notice: Option<&'static str>, unreadable: bool) {
+    if unreadable {
+        SAVE_GUARD.hold();
+    }
     let _ = PENDING.set(Mutex::new(Pending { port: i32::from(settings.port), token: settings.token.clone(), notice,
         windows: PanelWindows::from_settings(settings), farming_english: settings.farming_english,
         reset_farming_position: false }));
@@ -140,6 +150,13 @@ pub fn options_render(ui: &Ui) {
 
     {
         let mut pending = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `settings.json` could not be loaded: nothing below is what the user had, and the
+        // checkboxes save nothing until the Save button replaces the file.
+        if SAVE_GUARD.held() {
+            for notice in settings::UNREADABLE_NOTICE {
+                text_colored_wrapped(ui, ORANGE, notice);
+            }
+        }
         ui.input_int("Port", &mut pending.port).build();
         ui.input_text("Token", &mut pending.token).password(true).build();
         ui.same_line();
@@ -167,7 +184,9 @@ pub fn options_render(ui: &Ui) {
                     let open_obsidian_on_start = shared.open_obsidian_on_start();
                     let launch_app = shared.launch_app();
                     shared.apply_settings(port, &token, open_obsidian_on_start, launch_app);
-                    save_panel_settings(&pending);
+                    // The one save the user asks for by name: it also replaces a file that
+                    // could not be loaded.
+                    save_panel_settings(&pending, SaveRequest::Explicit);
                 }
                 Err(rejection) => {
                     if rejection == TokenRejection::Gw2ApiKey {
@@ -211,7 +230,7 @@ pub fn options_render(ui: &Ui) {
         }
         if changed {
             let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            save_panel_settings(&panel);
+            save_panel_settings(&panel, SaveRequest::Automatic);
         }
         if let Some(outcome) = shared.obsidian_launch_outcome() {
             let (color, text) = launch_line(launch_app, outcome);
@@ -233,7 +252,7 @@ pub fn options_render(ui: &Ui) {
         if ui.button("Reset farming panel position / Restablecer posición") {
             panel.reset_farming_position = true;
         }
-        if changed { save_panel_settings(&panel); }
+        if changed { save_panel_settings(&panel, SaveRequest::Automatic); }
         ui.text_wrapped("Read-only: session, goal and preparation are managed in Hebra or Obsidian.");
     }
 
@@ -251,7 +270,11 @@ pub fn options_render(ui: &Ui) {
 
 /// Saves only applied settings, so toggling the panel cannot save an unfinished token paste:
 /// port, token and the launch choice come from the shared state, never from the input boxes.
-fn save_panel_settings(panel: &Pending) {
+///
+/// After a `settings.json` that could not be loaded, an automatic `request` writes nothing: the
+/// applied settings are then the defaults, with no token, and the file may still hold the
+/// user's. The change stays in memory for this load and Options says why (`SAVE_GUARD`).
+fn save_panel_settings(panel: &Pending, request: SaveRequest) {
     let shared = state::shared();
     if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
         let settings = panel.windows.apply_to(Settings {
@@ -259,7 +282,7 @@ fn save_panel_settings(panel: &Pending) {
             open_obsidian_on_start: shared.open_obsidian_on_start(), launch_app: shared.launch_app(),
             farming_english: panel.farming_english, ..Settings::default()
         });
-        if let Err(error) = settings::save(&dir, &settings) { log::error!("failed to save settings: {error}"); }
+        if let Err(error) = SAVE_GUARD.save(&dir, &settings, request) { log::error!("failed to save settings: {error}"); }
     }
 }
 
@@ -272,7 +295,7 @@ fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
 pub fn activate_shortcut(shortcut: Shortcut) {
     let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     shortcut.activate(&mut panel.windows);
-    if shortcut == Shortcut::Panel { save_panel_settings(&panel); }
+    if shortcut == Shortcut::Panel { save_panel_settings(&panel, SaveRequest::Automatic); }
 }
 
 /// Per-frame housekeeping and the addon's own Options window, opened from the quick access bar.
@@ -526,6 +549,6 @@ pub fn farming_render(ui: &Ui) {
         if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
         if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
         if clicks.close { panel.windows.show_panel = false; }
-        save_panel_settings(&panel);
+        save_panel_settings(&panel, SaveRequest::Automatic);
     }
 }
