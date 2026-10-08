@@ -920,6 +920,39 @@ Still to be looked at in the game; none of the panel's painting has been seen th
   status turns red and says "Could not update" until coverage is back. The line stays where it
   is; only its colour and text change.
 
+### What a frame of the panel costs
+
+The panel used to be worked out from scratch on every frame, also to paint only the bar of a
+folded one: the texts of its cells and their tooltips, some two hundred allocations, and the
+forty measurements its reserved width takes. At the game's frame rate nearly every frame
+repeats the one before, so the panel is computed only when it can have changed
+(`panel::PanelCache`):
+
+- the shared state changed: every setter of something the panel is painted from bumps a
+  counter (`SharedState::panel_generation`), and setting what was already there does not;
+- the language changed, or what the frame does with the panel (closed, folded, painted);
+- a whole second went by since one of the instants the panel counts from: a `farm1` or a
+  price frame, the reading each of the two lines has, the last capture and the last wallet
+  that worked. The ages are written in whole seconds and the 2 s, 5 s and 15 s rules turn on
+  whole seconds of those, so with the same state nothing can change in between;
+- a quarter of a second went by, whatever else.
+
+With the first three the panel that is kept is the very panel that frame would compute, and
+nothing that is painted changes: the 5 seconds a reading is held, the dot, the lines and the
+ages are where they were. `core/tests/panel_cache.rs` plays a session of 80 seconds, some
+6000 frames a few milliseconds apart plus frames exactly on those whole seconds, against a
+panel computed on every frame, and compares the view and the memory after each one. The
+quarter of a second alone does not give that: the 5 seconds of a held reading would run out
+up to 250 ms late, and that test fails with it. It stays as a bound, for a setter that some
+day forgets the counter. In that session about one frame in ten is computed (some 650 of
+6400), the frames forced onto the whole seconds included.
+
+Folded, no cell is built at all: the memory is moved on as a painted frame would leave it
+(`panel::observe_folded`), which is the rate's range-or-average choice besides what a closed
+panel already followed. The width samples are built once per language, and the reserved
+width is measured once per language and font, the font being its size, the frame height,
+the line height and the width of the ten digits.
+
 ### Quick access icons
 
 Two icons appear in Nexus's quick access bar (the row of addon icons beside the game menu):
@@ -1008,6 +1041,10 @@ covers what does not need a running game:
   with the panel closed and without a `starting` frame, a complete session not feeding the
   highest, the two diagnostics lines of Options, and that every text the panel produces is
   covered by a width reserved for its own cell. None of the painting itself is tested;
+- the panel that is kept between frames (`core/tests/panel_cache.rs`): the same view and the
+  same memory as a panel computed on every frame, frame by frame through a whole session, a
+  folded panel leaving the memory a painted one would, and every setter of what the panel
+  paints moving the counter the cache looks at;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the

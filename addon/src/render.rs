@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use nexus::imgui::{Condition, DrawListMut, StyleColor, StyleVar, TreeNodeFlags, Ui, Window};
 
 use tyrian_companion_nexus_core::quick_access::{PanelWindows, Shortcut};
-use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, Tone};
+use tyrian_companion_nexus_core::panel::{self, Cell, Frame, PanelCache, PanelMemory, Tone};
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
@@ -47,8 +47,65 @@ struct Pending {
 /// Seeded from the loaded settings once, at `load()`; see `init_pending`.
 static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 
-/// What the panel carries from one frame to the next (`panel::PanelMemory`).
-static PANEL_MEMORY: Mutex<PanelMemory> = Mutex::new(PanelMemory::new());
+/// What the panel carries from one frame to the next: what it remembers of the session
+/// (`panel::PanelMemory`), the last frame computed (`panel::PanelCache`) and the widths reserved
+/// for the window. Only the render callback takes it.
+struct PanelState {
+    memory: PanelMemory,
+    cache: PanelCache,
+    reserved: Option<Reserved>,
+}
+
+static PANEL: Mutex<PanelState> = Mutex::new(PanelState { memory: PanelMemory::new(), cache: PanelCache::new(), reserved: None });
+
+/// The widths the window is reserved from, and the language and the font they were measured in.
+#[derive(Clone, Copy, PartialEq)]
+struct Reserved {
+    english: bool,
+    /// The font size, the frame height, the line height and the width of the ten digits, as
+    /// bits: a host that changes its font, its scale or its style changes one of them.
+    font: [u32; 4],
+    /// The left column.
+    left: f32,
+    /// The whole window.
+    width: f32,
+}
+
+/// `panel::width_samples`, built once for each language.
+fn width_samples(english: bool) -> &'static panel::WidthSamples {
+    static SAMPLES: [OnceLock<panel::WidthSamples>; 2] = [OnceLock::new(), OnceLock::new()];
+    SAMPLES[usize::from(english)].get_or_init(|| panel::width_samples(english))
+}
+
+/// The widths of the panel in this language and this font: measured once, and again only when
+/// either changes. Measuring is some forty texts, each built for the purpose, and the result
+/// is the same on every frame in between.
+fn reserve(ui: &Ui, reserved: &mut Option<Reserved>, english: bool, scale: f32) -> Reserved {
+    let (button, line) = (ui.frame_height(), ui.text_line_height());
+    let font = [ui.current_font_size(), button, line, ui.calc_text_size("0123456789")[0]].map(f32::to_bits);
+    if let Some(measured) = reserved.filter(|measured| measured.english == english && measured.font == font) {
+        return measured;
+    }
+    let samples = width_samples(english);
+    // The samples write their figures with 9s; measure them with whichever digit is widest in
+    // this font, so no figure can be wider than what was reserved for it.
+    let digit = ('0'..='9')
+        .map(|digit| (ui.calc_text_size(digit.to_string())[0], digit))
+        .fold((0.0, '9'), |widest, candidate| if candidate.0 > widest.0 { candidate } else { widest })
+        .1;
+    let widest = |texts: &[String]| {
+        texts.iter().map(|text| ui.calc_text_size(text.replace('9', &digit.to_string()))[0]).fold(0.0, f32::max)
+    };
+    let gap = 16.0 * scale;
+    let title = translated(english, "Tyrian · Laberinto", "Tyrian · Labyrinth");
+    let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
+    let status_start = ui.calc_text_size(panel::status_label(english))[0] + 8.0 * scale + line + 8.0 * scale;
+    let width = (left + gap + widest(&samples.right))
+        .max(widest(&samples.lines))
+        .max(status_start + widest(&samples.status))
+        .max(button + 8.0 * scale + ui.calc_text_size(title)[0] + gap + 2.0 * button + 8.0 * scale);
+    *reserved.insert(Reserved { english, font, left, width })
+}
 
 /// Keeps what saves by itself (a checkbox, a button of the panel's bar, a quick access icon)
 /// from replacing a `settings.json` that could not be loaded: only the Save button writes while
@@ -433,43 +490,30 @@ struct BarClicks {
 pub fn farming_render(ui: &Ui) {
     let shared = state::shared();
     let now = std::time::Instant::now();
-    let (farming, price) = (shared.farming_view(now), shared.price_view(now));
-    let (diagnostics, read_at) = shared.inventory_reading();
-    // The context the client last reported, for the character it names.
-    let context = shared.live_context();
-    let input = PanelInput {
-        now,
-        // The instant of the reader's cycle these diagnostics are from: a reading is as old as
-        // that, not as this frame.
-        read_at,
-        connection: shared.status(),
-        farming: &farming,
-        price: &price,
-        live: shared.live_status(),
-        // By the context the client reports, from NexusLink and the Mumble Link: at character
-        // select or on a loading screen the source is unavailable and nothing has failed.
-        character_in_map: shared.character_in_map(),
-        // Only to notice that it is another: the session's highest Magic Find is per character.
-        character: context.as_ref().and_then(|context| context.character.as_deref()),
-        wallet: diagnostics.wallet,
-        // What the addon's own reader got in its last cycle. Only a `Read` is painted as
-        // verified; otherwise the lines use what the plugin sends in `farm1`.
-        bags: diagnostics.bags,
-        magic_find: diagnostics.magic_find,
-    };
     let (windows, english, reset) = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !panel.windows.show_panel {
-            // Closed, the panel still follows the session: a session that ends and another
-            // that starts meanwhile must not be one session to its memory when it is reopened.
-            panel::observe(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            return;
-        }
-        let reset = std::mem::take(&mut panel.reset_farming_position);
+        // Only a panel that is shown takes the reset; closed, the request waits for it.
+        let reset = panel.windows.show_panel && std::mem::take(&mut panel.reset_farming_position);
         (panel.windows, panel.farming_english, reset)
     };
-    let view = panel::view(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), english);
-    let samples = panel::width_samples(english);
+    // Closed, the panel still follows the session: a session that ends and another that starts
+    // meanwhile must not be one session to its memory when it is reopened. Folded, only its bar
+    // is painted, so no cell is built for it.
+    let frame = if !windows.show_panel {
+        Frame::Hidden
+    } else if windows.collapsed {
+        Frame::Folded
+    } else {
+        Frame::Painted
+    };
+    let mut carried = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let PanelState { memory, cache, reserved } = &mut *carried;
+    // Computed only when it can differ from the last frame computed: at the game's frame rate
+    // nearly every frame repeats the one before (`panel::PanelCache`).
+    let view = cache.frame(shared, memory, now, english, frame);
+    if frame == Frame::Hidden {
+        return;
+    }
     let scale = (ui.current_font_size() / 13.0).max(1.0);
     let tr = |es, en| translated(english, es, en);
     let outlined = windows.transparent;
@@ -484,23 +528,9 @@ pub fn farming_render(ui: &Ui) {
         .bg_alpha(1.0)
         .build(ui, || {
             let draw = ui.get_window_draw_list();
-            // The samples write their figures with 9s; measure them with whichever digit is
-            // widest in this font, so no figure can be wider than what was reserved for it.
-            let digit = ('0'..='9')
-                .map(|digit| (ui.calc_text_size(digit.to_string())[0], digit))
-                .fold((0.0, '9'), |widest, candidate| if candidate.0 > widest.0 { candidate } else { widest })
-                .1;
-            let widest = |texts: &[String]| {
-                texts.iter().map(|text| ui.calc_text_size(text.replace('9', &digit.to_string()))[0]).fold(0.0, f32::max)
-            };
             let (gap, button, line) = (16.0 * scale, ui.frame_height(), ui.text_line_height());
             let title = tr("Tyrian · Laberinto", "Tyrian · Labyrinth");
-            let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
-            let status_start = ui.calc_text_size(&view.status_label)[0] + 8.0 * scale + line + 8.0 * scale;
-            let width = (left + gap + widest(&samples.right))
-                .max(widest(&samples.lines))
-                .max(status_start + widest(&samples.status))
-                .max(button + 8.0 * scale + ui.calc_text_size(title)[0] + gap + 2.0 * button + 8.0 * scale);
+            let Reserved { left, width, .. } = reserve(ui, reserved, english, scale);
             let origin = ui.cursor_pos()[0];
 
             // The title bar: fold, title, and on the right the background switch and the cross.
@@ -521,7 +551,8 @@ pub fn farming_render(ui: &Ui) {
                 else { tr("Quitar el fondo del panel", "Remove the panel's background") }, outlined);
             ui.same_line();
             clicks.close = icon_button(ui, &draw, "##close", button, Icon::Close, tr("Cerrar el panel", "Close the panel"), outlined);
-            if windows.collapsed { return clicks; }
+            // Folded, the bar is all there is, and no view was built.
+            let Some(view) = view else { return clicks };
 
             // Two columns: bags and their rate, the stack and its two prices.
             let second = origin + left + gap;
@@ -560,6 +591,8 @@ pub fn farming_render(ui: &Ui) {
         .unwrap_or_default();
     spacing.pop();
     padding.pop();
+    // Released before the settings are taken: the two locks are never held together.
+    drop(carried);
     if clicks.fold || clicks.background || clicks.close {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }

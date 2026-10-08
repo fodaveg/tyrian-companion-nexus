@@ -91,6 +91,10 @@ pub struct FarmingView {
     pub fresh: bool,
     pub age: Option<u64>,
     pub slot_age: Option<u64>,
+    /// When `reading` was received, on the caller's monotonic clock. `fresh`, `age` and
+    /// `slot_age` are what they are because of how long ago that was: with the same reading
+    /// they change only when a whole second since then goes by.
+    pub received: Option<Instant>,
 }
 
 impl FarmingView {
@@ -222,6 +226,7 @@ impl FarmingFeed {
             fresh,
             age: self.reading.as_ref().and_then(|(reading, received)| age(reading.age, *received)),
             slot_age: self.reading.as_ref().and_then(|(reading, received)| age(reading.slot_age, *received)),
+            received: self.reading.as_ref().map(|(_, received)| *received),
         }
     }
 }

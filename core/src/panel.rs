@@ -26,7 +26,8 @@ use crate::live::LiveStatus;
 use crate::magic_find::{MagicFind, MagicFindCoverage};
 use crate::passive::Uncovered;
 use crate::price::{format_coins, PriceStatus, PriceView};
-use crate::state::Status;
+use crate::protocol::{GameContext, GameState};
+use crate::state::{SharedState, Status};
 use crate::wallet::{WalletCoverage, WalletError};
 
 /// What a cell says when there is no figure.
@@ -380,6 +381,15 @@ pub fn observe(input: &PanelInput<'_>, memory: &mut PanelMemory) {
     advance(input, memory);
 }
 
+/// The same for a frame of the panel folded down to its bar: no cell is painted, and `memory`
+/// is left exactly as [`view`] would leave it. Besides what [`observe`] follows that is the
+/// rate's range-or-average choice, which a closed panel does not follow and a folded one
+/// always did, when it still built the whole view to paint only its bar.
+pub fn observe_folded(input: &PanelInput<'_>, memory: &mut PanelMemory) {
+    advance(input, memory);
+    rate_shape(input.farming, memory);
+}
+
 /// Everything the panel is painted from.
 #[derive(Debug, Clone)]
 pub struct PanelInput<'a> {
@@ -551,20 +561,30 @@ fn averaged(lo: i32, hi: i32, was: bool) -> bool {
 
 const RATE_UNIT: &str = "b/h";
 
+/// Moves the rate's range-or-average choice on by this frame's band: only a band more than one
+/// unit wide has the choice, and [`averaged`] makes it from what it was. It is what the rate
+/// carries from one frame to the next, so a frame that paints nothing of the rate but must
+/// leave the memory as a painted one would ([`observe_folded`]) runs this and no more.
+fn rate_shape(view: &FarmingView, memory: &mut PanelMemory) {
+    memory.rate_averaged = match view.reading.as_ref().map(|reading| (reading.lo, reading.hi)) {
+        Some((Some(lo), Some(hi))) if i64::from(hi) - i64::from(lo) > 1 => averaged(lo, hi, memory.rate_averaged),
+        _ => false,
+    };
+}
+
 /// The rate. A band is shown as `lo–hi`, or as `~mean` while it is wide (see [`averaged`]),
 /// with the band itself in the tooltip. A band one unit wide is one number rounded down and
 /// up, which is what a live session sends, and is shown as that number. Notes about the rate
 /// ([`FarmingView::rate_notes`]) go to the tooltip and paint it in the warning tone.
 fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cell {
+    rate_shape(view, memory);
     let mut tooltip = vec![tr(english, "Bolsas por hora", "Bags per hour").to_string()];
     let Some(reading) = view.reading.as_ref() else {
-        memory.rate_averaged = false;
         tooltip.push(tr(english, "Sin lectura", "No reading").to_string());
         return cell(format!("{NO_DATA} {RATE_UNIT}"), Tone::Muted, tooltip);
     };
     let figure = match (reading.lo, reading.hi) {
         (Some(lo), Some(hi)) if i64::from(hi) - i64::from(lo) > 1 => {
-            memory.rate_averaged = averaged(lo, hi, memory.rate_averaged);
             if memory.rate_averaged {
                 let mean = (i64::from(lo) + i64::from(hi) + 1) / 2;
                 tooltip.push(format!("{}: {lo}–{hi} {RATE_UNIT}", tr(english, "Rango", "Range")));
@@ -574,13 +594,9 @@ fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cel
             }
         }
         (Some(lo), hi) => {
-            memory.rate_averaged = false;
             if hi.is_some() { lo.to_string() } else { format!("≥{lo}") }
         }
-        (None, _) => {
-            memory.rate_averaged = false;
-            NO_DATA.to_string()
-        }
+        (None, _) => NO_DATA.to_string(),
     };
     let notes = view.rate_notes(english);
     let tone = if notes.is_empty() { Tone::Normal } else { Tone::Warning };
@@ -1093,9 +1109,196 @@ pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> 
         sell,
         slots: slots_cell(input, readings.source, readings.bags, english),
         magic_find: magic_find_cell(input, readings.source, readings.magic_find, memory.magic_find_peak, english),
-        status_label: tr(english, "Estado:", "Status:").to_string(),
+        status_label: status_label(english).to_string(),
         status_dot,
         status,
+    }
+}
+
+/// The label in front of the status dot. The addon needs its width to reserve the window's,
+/// also in a frame for which no view was built.
+pub fn status_label(english: bool) -> &'static str {
+    tr(english, "Estado:", "Status:")
+}
+
+/// One frame's copy of what the panel is painted from, taken out of the shared state. The
+/// addon and the tests build a [`PanelInput`] from it in the same way.
+#[derive(Debug, Clone)]
+pub struct PanelSources {
+    now: Instant,
+    read_at: Option<Instant>,
+    connection: Status,
+    farming: FarmingView,
+    price: PriceView,
+    live: LiveStatus,
+    /// The game context the client last reported, from `NexusLink` and the Mumble Link.
+    context: Option<GameContext>,
+    wallet: WalletCoverage,
+    bags: BagCoverage,
+    magic_find: MagicFindCoverage,
+}
+
+impl PanelSources {
+    /// `now` is the frame's instant on the monotonic clock the readings are dated by.
+    pub fn read(state: &SharedState, now: Instant) -> Self {
+        // What the addon's own reader got in its last cycle, and the instant of that cycle: a
+        // reading is as old as that, not as this frame.
+        let (diagnostics, read_at) = state.inventory_reading();
+        Self {
+            now,
+            read_at,
+            connection: state.status(),
+            farming: state.farming_view(now),
+            price: state.price_view(now),
+            live: state.live_status(),
+            context: state.live_context(),
+            wallet: diagnostics.wallet,
+            bags: diagnostics.bags,
+            magic_find: diagnostics.magic_find,
+        }
+    }
+
+    pub fn input(&self) -> PanelInput<'_> {
+        PanelInput {
+            now: self.now,
+            read_at: self.read_at,
+            connection: self.connection,
+            farming: &self.farming,
+            price: &self.price,
+            live: self.live,
+            // `gameplay`, and not `loading` or `character_select`. Before any context was
+            // reported nothing is known, and a reading that is missing is not put down to the
+            // character.
+            character_in_map: self.context.as_ref().is_none_or(|context| context.state == GameState::Gameplay),
+            character: self.context.as_ref().and_then(|context| context.character.as_deref()),
+            wallet: self.wallet,
+            bags: self.bags,
+            magic_find: self.magic_find,
+        }
+    }
+}
+
+/// What a frame does with the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frame {
+    /// The window is closed: nothing is painted and the memory follows the session
+    /// ([`observe`]).
+    Hidden,
+    /// The window is folded down to its bar: no cell is painted and the memory is left as a
+    /// painted frame would leave it ([`observe_folded`]).
+    Folded,
+    /// The whole panel is painted ([`view`]).
+    Painted,
+}
+
+/// The longest that what was computed for one frame is used for the ones after it, whatever
+/// else says it still stands. A setter of the shared state that forgot to count its change
+/// (`SharedState::panel_generation`) would then show a quarter of a second late, not never.
+pub const REFRESH_TICK: Duration = Duration::from_millis(250);
+
+/// What a computed frame was computed from, and until when it stands.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    generation: u64,
+    english: bool,
+    frame: Frame,
+    computed_at: Instant,
+    stands_until: Instant,
+}
+
+/// The panel as computed for one frame, kept for the frames after it that would compute the
+/// very same: [`view`] is some two hundred allocations, and at the game's frame rate nearly
+/// every frame repeats the one before.
+///
+/// A frame is computed again when the shared state changed, the language or what the frame
+/// does with the panel changed, [`REFRESH_TICK`] went by, or a whole second went by since one
+/// of the instants the panel counts from (see [`stands_until`]). In between, computing it
+/// again would give the same view and leave the same memory, which is what
+/// `tests/panel_cache.rs` checks frame by frame against a panel that computes every frame.
+#[derive(Debug, Default)]
+pub struct PanelCache {
+    stamp: Option<Stamp>,
+    view: Option<PanelView>,
+    computed: u64,
+}
+
+impl PanelCache {
+    pub const fn new() -> Self {
+        Self { stamp: None, view: None, computed: 0 }
+    }
+
+    /// The panel of the frame at `now`, computed only if the last one computed does not stand
+    /// for it. `Some` for [`Frame::Painted`], `None` for the two that paint no cell. `memory`
+    /// is advanced only by a frame that is computed, which leaves it as every frame would.
+    pub fn frame(&mut self, state: &SharedState, memory: &mut PanelMemory, now: Instant, english: bool, frame: Frame) -> Option<&PanelView> {
+        // Before the state it numbers is read: see `SharedState::panel_generation`.
+        let generation = state.panel_generation();
+        let stands = self.stamp.is_some_and(|stamp| {
+            stamp.generation == generation
+                && stamp.english == english
+                && stamp.frame == frame
+                && now >= stamp.computed_at
+                && now < stamp.stands_until
+        });
+        if !stands {
+            let sources = PanelSources::read(state, now);
+            let input = sources.input();
+            self.view = match frame {
+                Frame::Hidden => {
+                    observe(&input, memory);
+                    None
+                }
+                Frame::Folded => {
+                    observe_folded(&input, memory);
+                    None
+                }
+                Frame::Painted => Some(view(&input, memory, english)),
+            };
+            self.stamp = Some(Stamp { generation, english, frame, computed_at: now, stands_until: stands_until(&input, memory) });
+            self.computed += 1;
+        }
+        self.view.as_ref()
+    }
+
+    /// How many frames had to be computed since this cache was made; every other one used what
+    /// was there.
+    pub fn computed(&self) -> u64 {
+        self.computed
+    }
+}
+
+/// The first instant after this frame's at which the same state could give another panel.
+///
+/// Everything the panel takes from the clock is how long ago something happened: a `farm1` or
+/// a price frame was received, the reading each line has was read, the last capture or the
+/// last wallet worked. Each is used in whole seconds (the ages that are written) or compared
+/// with a whole number of them (the 2 s and 5 s of a reading, the 15 s of a feed). So with the
+/// same state nothing changes until a whole second has gone by since one of those instants,
+/// and the earliest of those moments is until when this frame stands.
+///
+/// `memory` is the one this frame left. The instant of the reader's last cycle is not in the
+/// list by itself: the panel never counts from it except through the reading a line took in
+/// that cycle and the capture it remembers as good, which are.
+fn stands_until(input: &PanelInput<'_>, memory: &PanelMemory) -> Instant {
+    let counted_from = [
+        input.farming.received,
+        input.price.received,
+        memory.bags.map(|(_, at)| at),
+        memory.magic_find.map(|(_, at)| at),
+        memory.good_capture,
+        memory.good_wallet,
+    ];
+    counted_from.into_iter().flatten().map(|since| next_second(since, input.now)).fold(input.now + REFRESH_TICK, Instant::min)
+}
+
+/// When the whole seconds elapsed since `since` next change, seen from `now`.
+fn next_second(since: Instant, now: Instant) -> Instant {
+    match now.checked_duration_since(since) {
+        Some(elapsed) if elapsed.subsec_nanos() != 0 => since + Duration::from_secs(elapsed.as_secs() + 1),
+        // Exactly on a whole second the very next instant can differ: an age is "more than
+        // 5 s" right after five seconds sharp and not at them. No later frame is taken to be
+        // this one, and neither is one before the instant itself.
+        _ => now,
     }
 }
 
