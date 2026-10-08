@@ -314,7 +314,74 @@ print anything:
 x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll \
   | grep -E 'SuspendThread|GetThreadContext|SetThreadContext|ResumeThread|SetThreadPriority'
 strings target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll \
-  | grep -i -E 'SuspendThread|GetThreadContext|SetThreadContext'
+  | grep -i -E 'SuspendThread|GetThreadContext|SetThreadContext|ResumeThread|SetThreadPriority'
+```
+
+Those two only say the names are gone. They cannot say whether the functions are still
+unreachable, and the stand-ins would hide it if they stopped being so: after an upgrade of
+winpthreads or libstdc++, or with a C++ dependency that starts a thread with `pthread_create`,
+the link would still succeed and both commands would still print nothing, but
+`pthread_create` would return success for a thread left suspended for ever. So a third check
+goes with them, on **every** release build:
+
+```sh
+scripts/check-dead-thread-code.sh
+```
+
+It links the addon once more in `target/check-dead-thread-code/` (symbol table kept, linker
+map with `--cref`; the release DLL is not touched) and exits with 1 if any object outside
+`libpthread.a` references `pthread_create`, `pthread_cancel`, `pthread_kill` or
+`pthread_setschedparam`, if any instruction of the DLL outside those four reaches one of them
+or goes through one of the five stand-ins, if a pointer to one of the four is stored anywhere
+in the DLL, or if one of the five is imported again. It reads every address from the DLL it has
+just linked, and exits with 2, not 0, when it cannot check (no symbol table, no map). The
+first run compiles everything again for that directory (about 30 s and 350 MB); later runs
+only link. Expected output, with cargo's own lines on stderr:
+
+```
+  __imp_GetThreadContext     defined by the addon, referenced only by libpthread.a
+  __imp_ResumeThread         defined by the addon, referenced only by libpthread.a
+  __imp_SetThreadContext     defined by the addon, referenced only by libpthread.a
+  __imp_SetThreadPriority    defined by the addon, referenced only by libpthread.a
+  __imp_SuspendThread        defined by the addon, referenced only by libpthread.a
+  pthread_cancel             no object outside libpthread.a references it
+  pthread_create             no object outside libpthread.a references it
+  pthread_kill               no object outside libpthread.a references it
+  pthread_setschedparam      no object outside libpthread.a references it
+  __imp_GetThreadContext     used only by: pthread_cancel
+  __imp_ResumeThread         used only by: pthread_cancel pthread_create
+  __imp_SetThreadContext     used only by: pthread_cancel
+  __imp_SetThreadPriority    used only by: pthread_setschedparam pthread_create
+  __imp_SuspendThread        used only by: pthread_cancel
+  4 of the four are in the DLL; pointers to them stored in it: none
+  import table: none of the five
+check-dead-thread-code: OK
+```
+
+If it fails, do not ship that DLL. Before anything else, take out of
+`addon/src/absent_imports.rs` the stand-ins the function it names uses (the "used only by"
+lines say which): they will be imported again, and work.
+
+To see that it measures something, give the check link an object that calls `pthread_create`.
+Outside the repository:
+
+```sh
+cat > /tmp/probe.c <<'EOF'
+#include <pthread.h>
+static void *run(void *argument) { return argument; }
+int tyrian_negative_probe(void) { pthread_t thread; return pthread_create(&thread, 0, run, 0); }
+EOF
+x86_64-w64-mingw32-gcc -c -O2 /tmp/probe.c -o /tmp/probe.o
+CHECK_DEAD_THREAD_CODE_LINK_ARGS="/tmp/probe.o -Wl,--undefined=tyrian_negative_probe" \
+  scripts/check-dead-thread-code.sh; echo "exit=$?"
+```
+
+It must end in `check-dead-thread-code: FAIL` and `exit=1`, with these two lines among the
+rest (the addresses change from one build to another):
+
+```
+  FAIL pthread_create is referenced by /tmp/probe.o
+  FAIL tyrian_negative_probe reaches pthread_create:   180266925:	call   180254110 <pthread_create>
 ```
 
 What the DLL still imports of that kind, and why:
@@ -535,11 +602,25 @@ measurement and made the window jump. The bags ETA followed the same 5 s and its
 into "ETA not available yet" at the tail of each cycle. Both now use one threshold: the
 observation counts as current until it is 15 s old, with a fresh transport.
 
-Still to be looked at in the game: the inventory footer ("Inventory: unresolved quantities",
-then "waiting for confirmation") appears for a couple of seconds after a partial sample or a
-new epoch, and the wallet line is one line whose longest texts ("Currencies: no coverage
-(changed while reading)") may wrap into two. Neither has been seen to come and go in normal
-measurement, and neither has been ruled out.
+Still to be looked at in the game, none of it measured there yet:
+
+- The inventory footer ("Inventory: unresolved quantities", then "waiting for confirmation")
+  appears for a couple of seconds after a partial sample or a new epoch, and the wallet line is
+  one line whose longest texts ("Currencies: no coverage (changed while reading)") may wrap
+  into two. Neither has been seen to come and go in normal measurement, and neither has been
+  ruled out.
+- Whether the longest lines of the price block fit on one line with the game's font: 34
+  characters for "Buy order 3s 45c · ×250 8g 62s 50c", 35 for the "Sell offer" one, 36 for
+  "Saco · precio caducado (hace 21 min)" and 37 from 100 minutes on. If one wraps, the block
+  takes four lines while it shows.
+- Connecting outside a session, the price block can show for an instant ("price not read
+  yet") between `price_cap` and the first `price_state`, which says `idle` and hides it. When
+  a session starts it can appear up to 5 s after the rest of the panel, the host's send
+  period. Both follow from the block taking its three lines as soon as there is a capability;
+  neither is a fault.
+- When the source loses coverage, as on a change of map, the host sends `err: observe` and
+  marks the slots as `recent`. While that lasts the panel shows the error line and its hint,
+  "Recent character" and the slot reading age, and they go when coverage is back.
 
 ### Lines that only appear with a problem
 

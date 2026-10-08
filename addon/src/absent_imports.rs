@@ -19,7 +19,11 @@
 //!
 //! Measured on the linked DLL, not assumed: `-Wl,-Map=...,--cref` for who references what
 //! across objects, and its disassembly and data for any call, jump, address or stored pointer
-//! to those functions. `GetThreadPriority` is not here: winpthreads' own bookkeeping of the
+//! to those functions. `scripts/check-dead-thread-code.sh` repeats that measurement and has to
+//! pass on every release build: a new winpthreads or libstdc++, or a C++ dependency that
+//! starts a thread with `pthread_create`, would still link and still import none of the five,
+//! and that `pthread_create` would report success for a thread these stand-ins never resume.
+//! `GetThreadPriority` is not here: winpthreads' own bookkeeping of the
 //! calling thread (`__pthread_self_lite`) uses it, and that path is live.
 //!
 //! An import only enters the table when the linker has to pull the import library's member

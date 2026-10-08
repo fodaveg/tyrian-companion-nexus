@@ -20,7 +20,9 @@
 //! the backoff table, settings persistence) lives in `tyrian_companion_nexus_core`, which has
 //! no such restriction; see its own doc.
 
-#[cfg(windows)]
+// Narrower than the rest on purpose: what that module does was only measured for the mingw
+// link with static winpthreads (`.cargo/config.toml`), so no other Windows target gets it.
+#[cfg(all(windows, target_env = "gnu"))]
 mod absent_imports;
 #[cfg(windows)]
 mod client;
