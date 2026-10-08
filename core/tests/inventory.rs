@@ -686,6 +686,50 @@ fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
         ]
     );
 }
+/// The adapter finds the game context with the same reader before the pass, so that search
+/// comes out of the same budget: `teb+0x30` and the route of [`context_from_teb`] for each of
+/// at most 128 threads of its own.
+fn discovery() -> usize {
+    let mut m = fixture(0);
+    for (a, v, z) in [
+        (BASE + TLS_INDEX_RVA, 3, 4),
+        (0x110000 + 0x58, 0x111000, 8),
+        (0x111000 + 24, 0x112000, 8),
+        (0x112000 + 0x10, CTX, 8),
+        (CTX + 0x198, 0x113000, 8),
+    ] {
+        m.put(a, v, z);
+    }
+    let mut r = Reader::new(m);
+    context_from_teb(&mut r, profile(), 0x110000).unwrap();
+    128 * (8 + r.bytes)
+}
+#[test]
+fn full_bags_are_read_within_the_cycle_budget_beside_the_discovery() {
+    assert_eq!(discovery(), 5_632);
+    let full = |occupied, branch| {
+        let (result, _, bytes) = pass(dense(512, occupied, branch));
+        result.map(|snapshot| {
+            assert_eq!(snapshot.quantities.len() as u64, occupied);
+            assert_eq!(
+                snapshot.quantities.values().map(|n| *n as u64).sum::<u64>(),
+                occupied * 7
+            );
+            bytes
+        })
+    };
+    // The 512 positions 16 bags of 32 can hold, every one with a stack, common branch.
+    assert_eq!(full(512, Branch::Common), Ok(97_600));
+    assert!(97_600 + discovery() <= MAX_BYTES);
+    // A stack of a conditional class costs 80 bytes more. 460 of them fit beside the largest
+    // discovery and 482 beside none; from 483 on the pass asks for more than the budget and
+    // gives no sample rather than a part of one.
+    assert_eq!(full(460, Branch::Conditional), Ok(125_368));
+    assert!(125_368 + discovery() <= MAX_BYTES);
+    assert_eq!(full(482, Branch::Conditional), Ok(130_956));
+    assert_eq!(full(483, Branch::Conditional), Err(ReadError::Bounds));
+    assert_eq!(full(512, Branch::Conditional), Err(ReadError::Bounds));
+}
 #[test]
 fn a_class_is_judged_once_per_pass_and_read_again_before_the_pass_is_accepted() {
     let words = [
