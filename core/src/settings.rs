@@ -46,6 +46,13 @@ pub struct Settings {
     /// Spanish by default; the Options panel can switch the farming window to English.
     #[serde(default)]
     pub farming_english: bool,
+    /// The panel's own title bar button: no window background, only the text. Older settings
+    /// leave it off.
+    #[serde(default)]
+    pub farming_panel_transparent: bool,
+    /// The panel folded down to its title bar, with the same button the native bar had.
+    #[serde(default)]
+    pub farming_panel_collapsed: bool,
 }
 
 fn default_open_obsidian_on_start() -> bool {
@@ -63,6 +70,8 @@ impl fmt::Debug for Settings {
             .field("launch_app", &self.launch_app)
             .field("show_farming_panel", &self.show_farming_panel)
             .field("farming_english", &self.farming_english)
+            .field("farming_panel_transparent", &self.farming_panel_transparent)
+            .field("farming_panel_collapsed", &self.farming_panel_collapsed)
             .finish()
     }
 }
@@ -70,7 +79,7 @@ impl fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self { port: DEFAULT_PORT, token: String::new(), open_obsidian_on_start: true, launch_app: LaunchApp::default(),
-            show_farming_panel: false, farming_english: false }
+            show_farming_panel: false, farming_english: false, farming_panel_transparent: false, farming_panel_collapsed: false }
     }
 }
 
@@ -144,9 +153,21 @@ mod tests {
     fn round_trips_through_save_and_load() {
         let dir = temp_dir("roundtrip");
         let settings = Settings { port: 54321, token: "a".repeat(43), open_obsidian_on_start: false, launch_app: LaunchApp::Hebra,
-            show_farming_panel: true, farming_english: true };
+            show_farming_panel: true, farming_english: true, farming_panel_transparent: true, farming_panel_collapsed: true };
         save(&dir, &settings).expect("save succeeds");
         assert_eq!(load(&dir), Loaded { settings, discarded_api_key: false });
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_the_panel_flags_existed_loads_them_off() {
+        // A 0.7.2 settings.json: the panel comes back opaque and unfolded, as it was.
+        let dir = temp_dir("pre-panel-flags");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(FILE_NAME), r#"{ "port": 50005, "show_farming_panel": true, "farming_english": true }"#).unwrap();
+        let settings = load(&dir).settings;
+        assert!(settings.show_farming_panel && settings.farming_english);
+        assert!(!settings.farming_panel_transparent && !settings.farming_panel_collapsed);
         let _ = fs::remove_dir_all(&dir);
     }
 

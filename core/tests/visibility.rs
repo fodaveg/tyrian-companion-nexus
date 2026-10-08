@@ -1,10 +1,9 @@
-//! When the panel paints "last reading ago Xs" and the inventory footer.
+//! When the panel says "last reading ago Xs", what the rate line carries and when the ETA holds.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tyrian_companion_nexus_core::farming::{show_inventory_status, FarmingView};
-use tyrian_companion_nexus_core::live::LiveStatus;
+use tyrian_companion_nexus_core::farming::FarmingView;
 use tyrian_companion_nexus_core::protocol::{parse_server_line, ServerLine};
 use tyrian_companion_nexus_core::state::SharedState;
 
@@ -229,20 +228,4 @@ fn the_rate_block_is_one_line_in_every_state() {
             }
         }
     }
-}
-
-#[test]
-fn the_inventory_footer_hides_only_measuring() {
-    for status in [
-        LiveStatus::NotNegotiated,
-        LiveStatus::Waiting,
-        LiveStatus::Partial,
-        LiveStatus::UnsupportedBuild,
-        LiveStatus::Unavailable,
-        LiveStatus::Conflict,
-        LiveStatus::StorageUnavailable,
-    ] {
-        assert!(show_inventory_status(status), "{status:?}");
-    }
-    assert!(!show_inventory_status(LiveStatus::Measuring));
 }

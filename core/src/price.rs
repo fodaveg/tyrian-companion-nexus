@@ -178,6 +178,10 @@ fn side(label: &str, unit: Option<i32>, stack: Option<i32>) -> String {
 /// How many lines the price block takes whenever it is painted: a header and the two sides.
 pub const PANEL_LINES: usize = 3;
 
+/// The price as the three text lines of the `price2` contract (header, buy order, sell offer).
+/// The Labyrinth panel painted these until 0.7.2; since 0.8.0 it paints the two stack prices
+/// of [`crate::panel`] instead, and nothing in the addon calls this.
+///
 /// The lines of the price block: none without a capability (which includes disconnected) or
 /// on `idle`, and [`PANEL_LINES`] in every other state, so the rest of the panel never moves
 /// when the price changes state. The header carries the state and the two sides stay in place

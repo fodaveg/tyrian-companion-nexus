@@ -11,12 +11,6 @@ pub const FARMING_TTL: Duration = Duration::from_secs(15);
 /// A reading this many seconds old (or older) is worth telling the player about.
 pub const READING_AGE_NOTICE: u64 = 15;
 
-/// The panel footer "Inventory: observations stored" says nothing while measuring normally;
-/// every other status is shown. The Options window keeps all of them as diagnostics.
-pub fn show_inventory_status(status: crate::live::LiveStatus) -> bool {
-    status != crate::live::LiveStatus::Measuring
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase { Idle, Starting, Active, Stopping, Provisional, Complete, Error, Abandoned }

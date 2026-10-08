@@ -69,13 +69,18 @@ impl Shortcut {
     }
 }
 
-/// Which of the addon's own windows are open. The panel flag is the persisted
-/// `show_farming_panel` setting, the same one the Options checkbox edits; the options window is
-/// never persisted.
+/// Which of the addon's own windows are open, and how the panel is shown. The panel flag is the
+/// persisted `show_farming_panel` setting, the same one the Options checkbox edits; the two
+/// buttons of the panel's title bar (no background, folded) are persisted too; the options
+/// window never is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PanelWindows {
     pub show_panel: bool,
     pub show_options: bool,
+    /// The panel is painted without its window background.
+    pub transparent: bool,
+    /// The panel is folded down to its title bar.
+    pub collapsed: bool,
 }
 
 impl PanelWindows {
@@ -83,6 +88,8 @@ impl PanelWindows {
         Self {
             show_panel: settings.show_farming_panel,
             show_options: false,
+            transparent: settings.farming_panel_transparent,
+            collapsed: settings.farming_panel_collapsed,
         }
     }
 
@@ -97,6 +104,8 @@ impl PanelWindows {
     /// `base` with the persisted part of this state applied.
     pub fn apply_to(&self, mut base: Settings) -> Settings {
         base.show_farming_panel = self.show_panel;
+        base.farming_panel_transparent = self.transparent;
+        base.farming_panel_collapsed = self.collapsed;
         base
     }
 }
@@ -144,6 +153,19 @@ mod tests {
         assert!(!windows.show_panel);
         crate::settings::save(&dir, &windows.apply_to(reloaded)).unwrap();
         assert!(!crate::settings::load(&dir).settings.show_farming_panel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_title_bar_flags_persist_through_the_settings() {
+        let dir = std::env::temp_dir().join(format!("tyrian-qa-flags-{}", std::process::id()));
+        let mut windows = PanelWindows::from_settings(&Settings::default());
+        assert!(!windows.transparent && !windows.collapsed);
+        windows.transparent = true;
+        windows.collapsed = true;
+        crate::settings::save(&dir, &windows.apply_to(Settings::default())).unwrap();
+        let reloaded = PanelWindows::from_settings(&crate::settings::load(&dir).settings);
+        assert!(reloaded.transparent && reloaded.collapsed && !reloaded.show_panel);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

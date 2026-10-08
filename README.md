@@ -39,8 +39,8 @@ mean.
 
 Version 0.7.0 adds the bag price block (`price1`, replaced by `price2` in 0.7.2) to the
 Labyrinth panel, stops painting the reading-age lines while measurement is normal, and adds two
-icons to Nexus's quick access bar. See "Bag price (`price2`)", "Lines that only appear with a
-problem" and "Quick access icons".
+icons to Nexus's quick access bar. See "Bag price (`price2`)", "A panel that does not jump"
+and "Quick access icons".
 
 Version 0.7.1 retries `live_open` every 30 s after the plugin answers `source_conflict`, so the
 inventory source recovers without a change of map. While it waits, the panel keeps saying that
@@ -55,6 +55,14 @@ DLL no longer imports `SuspendThread`, `GetThreadContext`, `SetThreadContext`, `
 or `SetThreadPriority`, which no code of the addon ever called; it ships without its symbol
 table and is reproducible. See "Bag price (`price2`)", "A panel that does not jump", "Why the
 DLL does not import the thread-control functions" and "Reproducible DLL".
+
+Version 0.8.0 redraws the Labyrinth panel after David's sketch: observed bags and their rate on
+the left, the gross price of a stack of 250 on the right, and three lines for free slots, Magic
+Find and status, the last with a coloured dot for the connection. Every line is always there,
+the window keeps its size, and what used to be lines of the panel is in the tooltips. The
+panel has its own title bar, with a button that removes the window's background. Slots and
+Magic Find say `—` until the addon has a validated reader for them. No frame of the protocol
+changes. See "Labyrinth farming panel".
 
 ## What it does, and does not do
 
@@ -506,23 +514,67 @@ rejected the previous token; they do not tear down a connection that is already 
 In Nexus Options, enable **Show Labyrinth farming panel / Mostrar panel de Laberinto**.
 It is hidden by default, including for older `settings.json` files. The adjacent language
 checkbox switches only this panel between Spanish and English; the position reset restores
-the window if it was moved outside the screen. Drag its native title bar to move it; closing
-it hides it until re-enabled in Options. These controls save immediately without saving a
-pending token edit. The host's font/DPI and window style are retained, with an opaque background.
+the window if it was moved outside the screen. These controls save immediately without saving
+a pending token edit. The host's font and DPI are retained.
 
-The read-only window separates measurement phase from host connection. It shows positive
-**observed bags**, the host's declared session duration, a bags/hour band (or a minimum
-if there is no upper bound), the observation's age, and free character bag slots with their
-own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
-numeric progress and the host's estimate; the addon never estimates a rate or advances the
-duration by itself. A bags ETA requires an observation younger than 15 seconds. The rate is
-one line that never grows: what there is to say about it is its colour and tooltip (see "A
-panel that does not jump"). Duration countdowns remain
-available through observation errors and unknown/old source age, while still requiring
-a fresh transport snapshot and active session. The feed does not identify the source type.
-Closing reconciliation shows signed **net bags at close** separately
-from the observed counter. Partial Magic Find and preparation are labelled as such;
-temporary buffs and AFK are never represented as verified.
+Since 0.8.0 the panel follows David's sketch of 8 Oct 2026 and has a fixed shape:
+
+```
+▾ Tyrian · Laberinto        ▪ ×
+────────────────────────────────
+bolsas          stack
+143             7g 7s 62c
+37 b/h          8g 90s 37c
+────────────────────────────────
+Huecos: 63 libres
+MF: 333%
+Estado: ● Midiendo
+```
+
+- **Left column:** the positive **observed bags**, large, and under them the rate per hour.
+- **Right column:** the gross trading-post price of a **stack of 250 bags**: the highest buy
+  order, then the lowest sell offer (see "Bag price (`price2`)").
+- **Slots** and **MF** (Magic Find): the addon has no validated reader for either yet, so
+  both say `—` in grey. The model is ready for them (`core/src/panel.rs`): slots turn orange
+  at 10 or fewer and red at 3 or fewer; Magic Find turns orange while it is below the highest
+  value seen in the session.
+- **Status:** a dot, a text and a tooltip. The colour is never the only signal.
+
+| Dot | Means | Text |
+|---|---|---|
+| green | connected, a session under way | the phase: "Measuring", "Preparing measurement"… |
+| grey | connected, nothing measuring; or the game closing | "Waiting for session", "Session complete"… |
+| orange | connected, something to read in the tooltip | the phase, in orange: old data, or an inventory source that cannot measure while a session needs it |
+| red | no connection, or a session error | "Offline", "Token missing", "Could not update"… |
+
+Every cell has a tooltip, and what used to be lines of the panel is in the tooltip of the cell
+it is about: duration, goal, progress and ETA, and the signed **net bags at close**, on the
+observed bags; the range of an averaged rate and the notes about the rate, on the rate; which
+side each price is, its unit price and why there is none, on the prices; inventory status,
+wallet coverage, host connection, stale data and where to look after an error, on the status;
+"Verified Magic Find: no coverage" on MF. A cell whose tooltip reports a problem is painted
+orange, or red for an error; one with no figure is grey. The optional preparation block is gone from the panel: preparation is managed
+in Hebra or Obsidian.
+
+The window has no native title bar, because ImGui's cannot hold a button of ours. Its own bar
+keeps what the native one had and adds one button:
+
+- the triangle folds the panel down to its bar, and unfolds it;
+- drag the bar, or any empty spot of the panel, to move it;
+- the square removes the window's background and leaves the text, which then gets a dark
+  outline so it stays readable over the game; the square is filled while the background is
+  there and hollow while it is not. Options has the same switch as a checkbox;
+- the cross hides the panel until it is re-enabled in Options or from the quick access bar.
+
+Folded and background are saved in `settings.json`, like the panel's visibility. The three
+buttons and the status dot are drawn, not written, so they do not depend on the host's font
+having a glyph for them.
+
+The addon never estimates a rate or advances the duration by itself. A bags ETA requires an
+observation younger than 15 seconds. Duration countdowns remain available through observation
+errors and unknown/old source age, while still requiring a fresh transport snapshot and active
+session. The feed does not identify the source type. Temporary buffs and AFK are never
+represented as verified.
 
 No start/stop or goal-edit buttons are in this window: manage the session and preparation
 in Hebra or Obsidian. Neither hiding the panel nor losing the bridge stops a session.
@@ -530,14 +582,15 @@ in Hebra or Obsidian. Neither hiding the panel nor losing the bridge stops a ses
 The host advertises `{"v":3,"type":"farming_cap","nonce":…,"tag":"farm1"}` only
 after authentication. The addon subscribes once using `farming_sub`, sharing the same
 outgoing sequence as context, heartbeat and alert acknowledgements. A host without that
-capability gets no subscription and the window says the panel is unavailable. Incoming
+capability gets no subscription and the status says "No panel", in orange. Incoming
 flat `farming_state` frames stay within 512 bytes, require exact keys, closed enums and
 int32-or-null metrics, and are accepted only with the current 22-character base64url nonce
 and increasing positive int32 farming sequence. Their sequence is independent of alert
 deduplication and they are never ACKed.
 
 Snapshots expire after 15 seconds of monotonic time, or immediately on disconnection.
-The window retains the last reading, marks it **Stale data / Datos antiguos**, and removes
+The window retains the last reading, paints it orange with **Stale data / Datos antiguos** in
+its tooltips and in the status, and removes
 ETA. Counts, declared duration and rates freeze; a transport refresh never renews an inventory
 observation or a character-slot observation. The feed does not send account/character
 identity, builds, economic details, inventory contents, or free-form text. No new API
@@ -550,28 +603,26 @@ session; Fedora/Wine/game runtime QA remains pending until measured on that clie
 
 ### Bag price (`price2`)
 
-Between the rate (bags/hour) and the character's slots, the panel can show the trading-post
-price of one Labyrinth bag (item 36038): **Buy order** (the highest buy order, what selling at
-once is offered) and **Sell offer** (the lowest sell offer), each for one bag and for a stack of
-250. The figures are **gross, as the trading post shows them**: no fee is taken off, and a
-stack is exactly 250 times the unit price. They are written as `8g 62s 50c`. The contract's
-full labels ("Highest buy order", "Lowest sell offer") do not fit the panel's width next to the
-amounts, so the block uses its short forms. When the quote is fine its age is not shown.
+The right column of the panel shows the trading-post price of a stack of 250 Labyrinth bags
+(item 36038): first the **highest buy order** (what selling at once is offered), then the
+**lowest sell offer**. The figures are **gross, as the trading post shows them**: no fee is
+taken off, and a stack is exactly 250 times the unit price. They are written as `8g 62s 50c`.
+The tooltip of each says which side it is and its unit price.
 
-The block is always three lines: the header and the two sides. With no figure to show, the
-sides stay in place with `—` and the header says why: `Bag · price not read yet` (no frame
-yet, `pending`, or a transport of 15 s or more), `Bag · no quote`, or, in the warning colour,
-`Bag · price expired (11 min ago)`. One side alone can also be `—`.
+The two prices are always there. With no figure they say `—` and the tooltip says why: no
+connection, a host without the price, no session ("The price is read during a session"),
+"Price not read yet" (no frame yet, `pending`, or a transport of 15 s or more), "No quote",
+or, with the column in orange, "Price expired (11 min ago)". One side alone can also be `—`.
 
 The price comes from the public trading-post data and can be up to about **2 minutes** old,
 and older if the plugin's network fails (it expires after 10 minutes). It is not "live" and the
-panel never says so. Nothing is shown outside an active session.
+panel never says so. Outside an active session there is no figure.
 
 `price2` replaces `price1`, which had the same frames with figures net of the trading-post
 fees. The tag is what tells them apart, and this addon reads `price2` only. With a plugin that
 announces `price1`, or none, the capability is discarded without closing the connection, the
-addon never subscribes, and the block simply does not appear: a net figure is never painted
-under a gross label. Addon 0.7.1 and older do the same with a plugin that announces `price2`.
+addon never subscribes, and the two prices say `—`: a net figure is never painted under a
+gross label. Addon 0.7.1 and older do the same with a plugin that announces `price2`.
 
 Wire: `price_cap` (`v,type,nonce,tag`) after authentication; the addon sends one `price_sub`
 only after receiving it on that connection, on the same outgoing sequence as `farming_sub`; then
@@ -582,13 +633,22 @@ at once. `farm1` and `live1` are unchanged. No item id, name or account travels 
 
 ### A panel that does not jump
 
-The rate block is one line, `480–560 bags/h` (or `— bags/h`), and the price block is three
-lines or none; neither changes its number of lines while a session runs, so the rest of the
-window stays where it is.
+The panel has the same lines in every state: each cell is always there and says `—` without a
+figure, so the window never grows or shrinks. Its width does not follow the content either:
+it is reserved once from the longest text each part can hold (`panel::width_samples`: a rate
+of `9999–9999 b/h`, a price of `999g 99s 99c`, the longest status text), so a text that
+changes moves nothing. Only a figure beyond those, such as a stack over 999 g, widens it.
 
-"Rate not available yet", "Last recorded rate" and "Last reading ago Xs" / "No reading" used to
-be lines of their own under the rate. They are now the rate line's tooltip, and while any of
-them applies the line is painted in the warning colour (orange):
+The rate is a range when the host sends one, `480–560 b/h`. While the range is wide it is
+shown as one number, its average, with `~` in front and the range in the tooltip: it turns
+into the average when (high − low) / average goes above 0.30 and back into a range when it
+goes below 0.20, and between the two it stays as it was, so it does not alternate. A range
+one unit wide (`37–38`) is one number rounded down and up, which is what a live session
+sends, and is shown as `37 b/h`. With only a lower bound it is `≥480 b/h`.
+
+"Rate not available yet", "Last recorded rate" and "Last reading ago Xs" / "No reading" are
+the rate's tooltip, and while any of them applies the rate is painted in the warning colour
+(orange):
 
 - no rate yet: the host has sent no band;
 - last recorded rate: the transport is 15 s old or more, or the reading is, or has no age;
@@ -598,36 +658,26 @@ them applies the line is painted in the warning colour (orange):
 
 "Last recorded rate" used to follow the 5 s freshness of the source. The host sends a frame
 every 5 s and the age keeps counting in between, so that line came and went in normal
-measurement and made the window jump. The bags ETA followed the same 5 s and its line turned
-into "ETA not available yet" at the tail of each cycle. Both now use one threshold: the
-observation counts as current until it is 15 s old, with a fresh transport.
+measurement and made the window jump. The bags ETA followed the same 5 s. Both use one
+threshold: the observation counts as current until it is 15 s old, with a fresh transport.
 
-Still to be looked at in the game, none of it measured there yet:
+The inventory states that come and go in normal measurement ("waiting for confirmation",
+"unresolved quantities") are in the status tooltip and do not change its colour. Nexus's
+Options show the inventory status and the wallet coverage always.
 
-- The inventory footer ("Inventory: unresolved quantities", then "waiting for confirmation")
-  appears for a couple of seconds after a partial sample or a new epoch, and the wallet line is
-  one line whose longest texts ("Currencies: no coverage (changed while reading)") may wrap
-  into two. Neither has been seen to come and go in normal measurement, and neither has been
-  ruled out.
-- Whether the longest lines of the price block fit on one line with the game's font: 34
-  characters for "Buy order 3s 45c · ×250 8g 62s 50c", 35 for the "Sell offer" one, 36 for
-  "Saco · precio caducado (hace 21 min)" and 37 from 100 minutes on. If one wraps, the block
-  takes four lines while it shows.
-- Connecting outside a session, the price block can show for an instant ("price not read
-  yet") between `price_cap` and the first `price_state`, which says `idle` and hides it. When
-  a session starts it can appear up to 5 s after the rest of the panel, the host's send
-  period. Both follow from the block taking its three lines as soon as there is a capability;
-  neither is a fault.
-- When the source loses coverage, as on a change of map, the host sends `err: observe` and
-  marks the slots as `recent`. While that lasts the panel shows the error line and its hint,
-  "Recent character" and the slot reading age, and they go when coverage is back.
+Still to be looked at in the game; none of the panel's painting has been seen there:
 
-### Lines that only appear with a problem
-
-In normal measurement the panel does not paint "Slot reading ago Xs" or the footer "Inventory:
-observations stored". The slot age line shows under the same conditions as the reading age
-above. The inventory footer is hidden only while the status is "measuring"; every other status
-still shows, and Nexus's Options show the inventory status always.
+- That the panel paints at all as described: the two columns side by side without touching,
+  the large figure, the dot, and the three drawn buttons of the bar.
+- That the bar's buttons take the click, that the panel moves when dragged by its bar or an
+  empty spot, and that folding leaves only the bar.
+- That without the background the outlined text reads well over the game, and that the
+  window still takes the mouse over its area even though nothing is painted behind the text.
+- That the tooltips appear with the game in the foreground.
+- That `—`, `–`, `≥` and `~` have a glyph in the host's font.
+- When the source loses coverage, as on a change of map, the host sends `err: observe`: the
+  status turns red and says "Could not update" until coverage is back. The line stays where it
+  is; only its colour and text change.
 
 ### Quick access icons
 

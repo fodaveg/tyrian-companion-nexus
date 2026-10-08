@@ -12,13 +12,16 @@
 //! Save button may store is decided by `tyrian_companion_nexus_core::token::validate_for_save`: a
 //! Guild Wars 2 API key or a value outside the plugin's format is refused with a message and never
 //! reaches `settings.json` or the client.
+//!
+//! The Labyrinth panel is painted here too, and only painted: which text, tone and tooltip each
+//! of its cells has is decided by `tyrian_companion_nexus_core::panel`.
 
 use std::sync::{Mutex, OnceLock};
 
-use nexus::imgui::{Condition, ProgressBar, StyleColor, StyleVar, TreeNodeFlags, Ui, Window};
+use nexus::imgui::{Condition, DrawListMut, StyleColor, StyleVar, TreeNodeFlags, Ui, Window};
 
 use tyrian_companion_nexus_core::quick_access::{PanelWindows, Shortcut};
-use tyrian_companion_nexus_core::farming::{show_inventory_status, FarmingError, Goal, MagicFindKind, Phase, Preparation, SlotSource};
+use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, Tone};
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
@@ -34,7 +37,8 @@ struct Pending {
     token: String,
     /// Why the last paste or save was refused, until the next one that goes through.
     notice: Option<&'static str>,
-    /// Which of the addon's own windows are open; the panel flag is the persisted setting.
+    /// Which of the addon's own windows are open and how the panel is shown; all but the
+    /// options window are persisted settings.
     windows: PanelWindows,
     farming_english: bool,
     reset_farming_position: bool,
@@ -42,6 +46,9 @@ struct Pending {
 
 /// Seeded from the loaded settings once, at `load()`; see `init_pending`.
 static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
+
+/// What the panel carries from one frame to the next (`panel::PanelMemory`).
+static PANEL_MEMORY: Mutex<PanelMemory> = Mutex::new(PanelMemory::new());
 
 /// `notice` is shown under the fields from the first frame: `load()` passes one when it removed
 /// an API key from `settings.json`.
@@ -60,6 +67,8 @@ const GREEN: [f32; 4] = [0.45, 0.85, 0.45, 1.0];
 const ORANGE: [f32; 4] = [0.90, 0.65, 0.30, 1.0];
 const RED: [f32; 4] = [0.95, 0.35, 0.35, 1.0];
 const GREY: [f32; 4] = [0.70, 0.70, 0.70, 1.0];
+/// Behind the text and the icons of the panel when it has no background.
+const OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.90];
 
 fn status_line(status: Status) -> ([f32; 4], &'static str) {
     match status {
@@ -104,8 +113,8 @@ pub fn options_render(ui: &Ui) {
 
     let (color, text) = status_line(shared.status());
     text_colored_wrapped(ui, color, text);
-    ui.text_wrapped(inventory_status(shared.live_status(), true));
-    ui.text_wrapped(wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, true));
+    ui.text_wrapped(panel::inventory_status(shared.live_status(), true));
+    ui.text_wrapped(panel::wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, true));
     ui.text_wrapped("Verified Magic Find: no coverage");
     if ui.collapsing_header("Reader diagnostics", TreeNodeFlags::empty()) {
         ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
@@ -150,14 +159,7 @@ pub fn options_render(ui: &Ui) {
                     let open_obsidian_on_start = shared.open_obsidian_on_start();
                     let launch_app = shared.launch_app();
                     shared.apply_settings(port, &token, open_obsidian_on_start, launch_app);
-                    if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-                        if let Err(error) =
-                            settings::save(&dir, &Settings { port, token, open_obsidian_on_start, launch_app,
-                                show_farming_panel: pending.windows.show_panel, farming_english: pending.farming_english })
-                        {
-                            log::error!("failed to save settings: {error}");
-                        }
-                    }
+                    save_panel_settings(&pending);
                 }
                 Err(rejection) => {
                     if rejection == TokenRejection::Gw2ApiKey {
@@ -201,19 +203,7 @@ pub fn options_render(ui: &Ui) {
         }
         if changed {
             let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-                let settings = Settings {
-                    port: shared.port(),
-                    token: shared.token(),
-                    open_obsidian_on_start: open_on_start,
-                    launch_app,
-                    show_farming_panel: panel.windows.show_panel,
-                    farming_english: panel.farming_english,
-                };
-                if let Err(error) = settings::save(&dir, &settings) {
-                    log::error!("failed to save settings: {error}");
-                }
-            }
+            save_panel_settings(&panel);
         }
         if let Some(outcome) = shared.obsidian_launch_outcome() {
             let (color, text) = launch_line(launch_app, outcome);
@@ -229,6 +219,9 @@ pub fn options_render(ui: &Ui) {
             changed = true;
             crate::quick_access::refresh_tooltips(panel.farming_english);
         }
+        // The same switch as the button on the panel's own title bar, for when the panel is
+        // hard to hit against the game.
+        changed |= ui.checkbox("Farming panel without background / Panel sin fondo", &mut panel.windows.transparent);
         if ui.button("Reset farming panel position / Restablecer posición") {
             panel.reset_farming_position = true;
         }
@@ -248,109 +241,22 @@ pub fn options_render(ui: &Ui) {
     }
 }
 
-/// Saves only applied settings, so toggling the panel cannot save an unfinished token paste.
+/// Saves only applied settings, so toggling the panel cannot save an unfinished token paste:
+/// port, token and the launch choice come from the shared state, never from the input boxes.
 fn save_panel_settings(panel: &Pending) {
     let shared = state::shared();
     if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-        let settings = Settings {
+        let settings = panel.windows.apply_to(Settings {
             port: shared.port(), token: shared.token(),
             open_obsidian_on_start: shared.open_obsidian_on_start(), launch_app: shared.launch_app(),
-            show_farming_panel: panel.windows.show_panel, farming_english: panel.farming_english,
-        };
+            farming_english: panel.farming_english, ..Settings::default()
+        });
         if let Err(error) = settings::save(&dir, &settings) { log::error!("failed to save settings: {error}"); }
     }
 }
 
 fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
     if english { en } else { spanish }
-}
-
-fn number(value: Option<i32>) -> String {
-    value.map_or_else(|| "—".into(), |value| value.to_string())
-}
-
-fn duration(seconds: i32) -> String {
-    let seconds = seconds as u32;
-    format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
-}
-
-fn phase_label(phase: Phase, english: bool) -> &'static str {
-    let (es, en) = match phase {
-        Phase::Idle => ("Sin medición", "Not measuring"),
-        Phase::Starting => ("Preparando medición", "Preparing measurement"),
-        Phase::Active => ("Midiendo", "Measuring"),
-        Phase::Stopping => ("Terminando sesión", "Finishing session"),
-        Phase::Provisional => ("Cierre provisional", "Provisional close"),
-        Phase::Complete => ("Sesión finalizada", "Session complete"),
-        Phase::Abandoned => ("Sesión abandonada", "Session abandoned"),
-        Phase::Error => ("Error de sesión", "Session error"),
-    };
-    translated(english, es, en)
-}
-
-/// Failures are independent of phase: an active session may fail an observation and a
-/// completed session may fail to save. Both stay visible until the host clears them.
-fn farming_error_label(error: FarmingError, english: bool) -> &'static str {
-    let (es, en) = match error {
-        FarmingError::Start => ("No se pudo empezar", "Could not start"),
-        FarmingError::Observe => ("No se pudo actualizar", "Could not update"),
-        FarmingError::Stop => ("No se pudo finalizar", "Could not finish"),
-        FarmingError::Save => ("No se pudo guardar", "Could not save"),
-        FarmingError::Other => ("Error de sesión", "Session error"),
-    };
-    translated(english, es, en)
-}
-
-/// Source status is separate from both host connectivity and persisted session phase.
-fn inventory_status(status: tyrian_companion_nexus_core::live::LiveStatus, english: bool) -> &'static str {
-    use tyrian_companion_nexus_core::live::LiveStatus;
-    let (es, en) = match status {
-        LiveStatus::NotNegotiated => ("Inventario: fuente no disponible en este host", "Inventory: source unavailable in this host"),
-        LiveStatus::Waiting => ("Inventario: esperando confirmación", "Inventory: waiting for confirmation"),
-        LiveStatus::Measuring => ("Inventario: observaciones guardadas", "Inventory: observations stored"),
-        LiveStatus::Partial => ("Inventario: cantidades sin resolver", "Inventory: unresolved quantities"),
-        LiveStatus::UnsupportedBuild => ("Inventario: versión del juego no compatible", "Inventory: unsupported game build"),
-        LiveStatus::Unavailable => ("Inventario: lectura no disponible", "Inventory: reading unavailable"),
-        LiveStatus::Conflict => ("Inventario: otra fuente vinculada a la sesión", "Inventory: another source owns the session"),
-        LiveStatus::StorageUnavailable => ("Inventario: no se pudo guardar la lectura", "Inventory: observation could not be stored"),
-    };
-    translated(english, es, en)
-}
-
-/// Wallet coverage of the last capture: how many currencies it listed, or the closed reason it
-/// listed none. Covered means those IDs only; an unlisted currency is unknown, never zero. With
-/// no measurement in progress there is no capture to describe, whatever an older one found.
-fn wallet_status(status: tyrian_companion_nexus_core::live::LiveStatus, coverage: tyrian_companion_nexus_core::wallet::WalletCoverage, english: bool) -> String {
-    use tyrian_companion_nexus_core::wallet::{WalletCoverage, WalletError};
-    let measuring = status.is_sampling();
-    let (es, en) = match coverage {
-        WalletCoverage::Listed(count) if measuring => return format!("{}: {count}", translated(english, "Monedas cubiertas", "Currencies covered")),
-        WalletCoverage::Unavailable(error) if measuring => match error {
-            WalletError::Guard => ("perfil de cartera no verificado", "wallet profile not verified"),
-            WalletError::Profile => ("estructura desconocida", "unknown structure"),
-            WalletError::Root => ("personaje no disponible", "character unavailable"),
-            WalletError::Bounds => ("mapa fuera de límites", "map out of bounds"),
-            WalletError::Empty => ("cartera vacía o ausente", "wallet empty or absent"),
-            WalletError::Integrity => ("mapa incoherente", "inconsistent map"),
-            WalletError::Range => ("valor fuera de rango", "value out of range"),
-            WalletError::Changed => ("cambió durante la lectura", "changed while reading"),
-            WalletError::ReadFailed => ("lectura fallida", "read failed"),
-        },
-        _ => ("sin lectura", "no reading"),
-    };
-    format!("{} ({})", translated(english, "Monedas: sin cobertura", "Currencies: no coverage"), translated(english, es, en))
-}
-
-/// The bag price block, between the rate and the character's slots. It paints exactly what
-/// `price::panel_lines` returns: nothing without the capability or outside a session, and the
-/// same three lines in every other state.
-fn price_block(ui: &Ui, view: &tyrian_companion_nexus_core::price::PriceView, english: bool) {
-    let lines = tyrian_companion_nexus_core::price::panel_lines(view, english);
-    if lines.is_empty() { return; }
-    ui.separator();
-    for line in lines {
-        if line.warning { text_colored_wrapped(ui, ORANGE, &line.text); } else { ui.text_wrapped(&line.text); }
-    }
 }
 
 /// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
@@ -382,143 +288,210 @@ pub fn options_window_render(ui: &Ui) {
     }
 }
 
-/// Optional native window. It only renders validated host snapshots, never reads the API,
-/// sends game input, starts/stops a session, or extrapolates a counter from stale data.
+/// How much larger the observed bags are painted than the rest.
+const LARGE: f32 = 1.6;
+
+/// The colour of a tone: the host's text colour, or one of the four this file already had.
+fn tone_color(ui: &Ui, tone: Tone) -> [f32; 4] {
+    match tone {
+        Tone::Normal => ui.style_color(StyleColor::Text),
+        Tone::Muted => GREY,
+        Tone::Good => GREEN,
+        Tone::Warning => ORANGE,
+        Tone::Error => RED,
+    }
+}
+
+/// One line of text at the cursor. Without a window background it gets a dark outline, four
+/// copies one pixel away, so it stays readable over the game.
+fn paint_text(ui: &Ui, draw: &DrawListMut<'_>, text: &str, color: [f32; 4], outlined: bool) {
+    if outlined {
+        let [x, y] = ui.cursor_screen_pos();
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            draw.add_text([x + dx, y + dy], OUTLINE, text);
+        }
+    }
+    ui.text_colored(color, text);
+}
+
+/// One cell of `panel::PanelView`: its text in its tone, and its tooltip under the mouse.
+fn paint_cell(ui: &Ui, draw: &DrawListMut<'_>, cell: &Cell, outlined: bool) {
+    paint_text(ui, draw, &cell.text, tone_color(ui, cell.tone), outlined);
+    if ui.is_item_hovered() { ui.tooltip_text(cell.tooltip.join("\n")); }
+}
+
+/// The three buttons of the panel's own title bar. They are drawn, not written: the host's font
+/// is not known to have a glyph for any of them.
+#[derive(Clone, Copy)]
+enum Icon {
+    /// A triangle: down while the panel is open, right while it is folded.
+    Fold { collapsed: bool },
+    /// A square: filled while the panel has its background, hollow while it does not.
+    Background { transparent: bool },
+    /// A cross.
+    Close,
+}
+
+/// A square button of the title bar with a drawn icon; true when clicked.
+fn icon_button(ui: &Ui, draw: &DrawListMut<'_>, id: &str, size: f32, icon: Icon, tooltip: &str, outlined: bool) -> bool {
+    let [x, y] = ui.cursor_screen_pos();
+    let clicked = ui.invisible_button(id, [size, size]);
+    let hovered = ui.is_item_hovered();
+    if hovered {
+        draw.add_rect([x, y], [x + size, y + size], ui.style_color(StyleColor::ButtonHovered)).filled(true).rounding(size * 0.15).build();
+        ui.tooltip_text(tooltip);
+    }
+    let color = if hovered { ui.style_color(StyleColor::Text) } else { GREY };
+    let (inset, thickness) = (size * 0.30, (size * 0.09).max(1.0));
+    let (left, top, right, bottom) = (x + inset, y + inset, x + size - inset, y + size - inset);
+    let shape = |dx: f32, dy: f32, color: [f32; 4]| {
+        let (left, top, right, bottom) = (left + dx, top + dy, right + dx, bottom + dy);
+        match icon {
+            Icon::Fold { collapsed: false } => draw.add_triangle([left, top], [right, top], [(left + right) / 2.0, bottom], color).filled(true).build(),
+            Icon::Fold { collapsed: true } => draw.add_triangle([left, top], [right, (top + bottom) / 2.0], [left, bottom], color).filled(true).build(),
+            Icon::Background { transparent } => draw.add_rect([left, top], [right, bottom], color).filled(!transparent).thickness(thickness).build(),
+            Icon::Close => {
+                draw.add_line([left, top], [right, bottom], color).thickness(thickness).build();
+                draw.add_line([left, bottom], [right, top], color).thickness(thickness).build();
+            }
+        }
+    };
+    if outlined { shape(1.0, 1.0, OUTLINE); }
+    shape(0.0, 0.0, color);
+    clicked
+}
+
+/// What the player did on the panel's title bar this frame.
+#[derive(Default)]
+struct BarClicks {
+    fold: bool,
+    background: bool,
+    close: bool,
+}
+
+/// The Labyrinth panel. It only renders validated host snapshots, never reads the API, sends
+/// game input, starts/stops a session, or extrapolates a counter from stale data.
+///
+/// The window has no native title bar: ImGui's cannot hold a button of ours, and the sketch asks
+/// for one that removes the background. The bar painted here keeps what the native one had
+/// (fold, title, close, and dragging the window by it or by any empty spot) and adds that
+/// button. Its width, and so the window's, is reserved from `panel::width_samples`, not from
+/// what the cells say now, so nothing moves when a text changes.
 pub fn farming_render(ui: &Ui) {
-    let (mut opened, english, reset) = {
+    let (windows, english, reset) = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !panel.windows.show_panel { return; }
         let reset = std::mem::take(&mut panel.reset_farming_position);
-        (panel.windows.show_panel, panel.farming_english, reset)
+        (panel.windows, panel.farming_english, reset)
     };
     let shared = state::shared();
-    let view = shared.farming_view(std::time::Instant::now());
+    let now = std::time::Instant::now();
+    let (farming, price) = (shared.farming_view(now), shared.price_view(now));
+    let view = {
+        let mut memory = PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel::view(
+            &PanelInput {
+                connection: shared.status(),
+                farming: &farming,
+                price: &price,
+                live: shared.live_status(),
+                wallet: shared.inventory_diagnostics().wallet,
+                // No validated reader for either yet: the lines say `—` until one exists.
+                slots: None,
+                magic_find: None,
+            },
+            &mut memory,
+            english,
+        )
+    };
+    let samples = panel::width_samples(english);
     let scale = (ui.current_font_size() / 13.0).max(1.0);
     let tr = |es, en| translated(english, es, en);
+    let outlined = windows.transparent;
     let padding = ui.push_style_var(StyleVar::WindowPadding([12.0 * scale, 12.0 * scale]));
     let spacing = ui.push_style_var(StyleVar::ItemSpacing([8.0 * scale, 8.0 * scale]));
-    Window::new(tr("Tyrian · Laberinto###TyrianFarming", "Tyrian · Labyrinth###TyrianFarming"))
-        .opened(&mut opened)
+    let clicks = Window::new(tr("Tyrian · Laberinto###TyrianFarming", "Tyrian · Labyrinth###TyrianFarming"))
+        .title_bar(false)
         .position([80.0 * scale, 80.0 * scale], if reset { Condition::Always } else { Condition::FirstUseEver })
-        .size([288.0 * scale, 0.0], Condition::FirstUseEver)
-        .size_constraints([250.0 * scale, 0.0], [320.0 * scale, f32::MAX])
         .always_auto_resize(true)
+        .scroll_bar(false)
+        .draw_background(!windows.transparent)
         .bg_alpha(1.0)
         .build(ui, || {
-            if let Some(reading) = &view.reading {
-                ui.text_wrapped(phase_label(reading.phase, english));
-                if let Some(error) = reading.err {
-                    text_colored_wrapped(ui, RED, farming_error_label(error, english));
-                    ui.text_wrapped(tr("Revisa la sesión en Hebra u Obsidian", "Check the session in Hebra or Obsidian"));
-                }
-                if !view.fresh {
-                    text_colored_wrapped(ui, ORANGE, tr("Datos antiguos · última lectura", "Stale data · last reading"));
-                }
-                ui.separator();
-                // Keep the labels readable at the host's font scale instead of importing fonts.
-                ui.set_window_font_scale(1.35);
-                ui.text_wrapped(number(reading.observed));
-                ui.set_window_font_scale(1.0);
-                ui.text_wrapped(tr("Bolsas observadas", "Observed bags"));
-                let elapsed = reading.elapsed.map_or_else(|| "—".into(), duration);
-                ui.text_wrapped(format!("{elapsed} · {}", tr("Duración", "Duration")));
-                ui.separator();
-                // One line, always (`FarmingView::rate_line`): what there is to say about the
-                // rate is its colour and its tooltip, never a line that comes and goes.
-                if let Some(rate) = view.rate_line(english) {
-                    if rate.warning { text_colored_wrapped(ui, ORANGE, &rate.text); } else { ui.text_wrapped(&rate.text); }
-                    if !rate.notes.is_empty() && ui.is_item_hovered() { ui.tooltip_text(rate.notes.join("\n")); }
-                }
-                price_block(ui, &shared.price_view(std::time::Instant::now()), english);
-                ui.separator();
-                ui.text_wrapped(format!("{}: {} {}", tr("Huecos del personaje", "Character bag slots"),
-                    number(reading.slots), tr("libres", "free")));
-                if reading.slot_source == SlotSource::Recent {
-                    ui.text_wrapped(tr("Personaje reciente", "Recent character"));
-                }
-                if view.show_reading_age() {
-                    if let Some(age) = view.slot_age {
-                        ui.text_wrapped(format!("{} {age}s", tr("Lectura de huecos hace", "Slot reading ago:")));
-                    } else { ui.text_wrapped(tr("Sin lectura de huecos", "No slot reading")); }
-                }
+            let draw = ui.get_window_draw_list();
+            let widest = |texts: &[String]| texts.iter().map(|text| ui.calc_text_size(text)[0]).fold(0.0, f32::max);
+            let (gap, button, line) = (16.0 * scale, ui.frame_height(), ui.text_line_height());
+            let title = tr("Tyrian · Laberinto", "Tyrian · Labyrinth");
+            let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
+            let status_start = ui.calc_text_size(&view.status_label)[0] + 8.0 * scale + line + 8.0 * scale;
+            let width = (left + gap + widest(&samples.right))
+                .max(widest(&samples.lines))
+                .max(status_start + widest(&samples.status))
+                .max(button + 8.0 * scale + ui.calc_text_size(title)[0] + gap + 2.0 * button + 8.0 * scale);
+            let origin = ui.cursor_pos()[0];
 
-                if reading.goal != Goal::None {
-                    ui.separator();
-                    let (progress, target) = if reading.goal == Goal::Duration {
-                        (reading.progress.map_or_else(|| "—".into(), duration),
-                            reading.target.map_or_else(|| "—".into(), duration))
-                    } else { (number(reading.progress), number(reading.target)) };
-                    ui.text_wrapped(format!("{}: {progress} / {target} {}", tr("Objetivo", "Goal"),
-                        if reading.goal == Goal::Bags { tr("bolsas", "bags") } else { "" }));
-                    if let (Some(progress), Some(target)) = (reading.progress, reading.target) {
-                        if target > 0 {
-                            ProgressBar::new((progress as f32 / target as f32).clamp(0.0, 1.0))
-                                .overlay_text("").build(ui);
-                            if progress >= target { ui.text_wrapped(tr("Objetivo alcanzado", "Goal reached")); }
-                        }
-                    }
-                    if let Some(eta) = view.eta() {
-                        let label = if reading.goal == Goal::Duration { tr("Quedan", "Time left:") }
-                            else { tr("Quedan aprox.", "Approx. time left:") };
-                        ui.text_wrapped(format!("{label} {}", duration(eta)));
-                    } else if reading.goal == Goal::Duration {
-                        ui.text_wrapped(tr("Cuenta atrás no disponible", "Countdown unavailable"));
-                    } else { ui.text_wrapped(tr("ETA aún no disponible", "ETA not available yet")); }
+            // The title bar: fold, title, and on the right the background switch and the cross.
+            let mut clicks = BarClicks::default();
+            let [bar_x, bar_y] = ui.cursor_screen_pos();
+            clicks.fold = icon_button(ui, &draw, "##fold", button, Icon::Fold { collapsed: windows.collapsed },
+                if windows.collapsed { tr("Desplegar", "Unfold") } else { tr("Plegar", "Fold") }, outlined);
+            let title_at = [bar_x + button + 8.0 * scale, bar_y + (button - line) / 2.0];
+            if outlined {
+                for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                    draw.add_text([title_at[0] + dx, title_at[1] + dy], OUTLINE, title);
                 }
-                if let Some(net) = reading.net {
-                    ui.separator();
-                    ui.text_wrapped(format!("{net} · {}", tr("Bolsas netas al cierre", "Net bags at close")));
-                    ui.text_wrapped(tr("El neto puede ser menor si abriste o gastaste bolsas.",
-                        "Net bags may be lower if you opened or spent bags."));
-                }
-                if matches!(reading.phase, Phase::Stopping | Phase::Provisional) {
-                    ui.text_wrapped(tr("Esperando la lectura final", "Waiting for the final reading"));
-                }
-                if reading.phase == Phase::Starting {
-                    ui.text_wrapped(tr("Capturando el punto de partida", "Capturing the starting point"));
-                }
-                if reading.phase == Phase::Error && reading.err.is_none() {
-                    ui.text_wrapped(tr("Revisa la sesión en Hebra u Obsidian", "Check the session in Hebra or Obsidian"));
-                }
-                if ui.collapsing_header(tr("Preparación opcional", "Optional preparation"), TreeNodeFlags::empty()) {
-                    let mf = if reading.mf_kind == MagicFindKind::Partial { number(reading.mf) } else { "—".into() };
-                    let label = if reading.mf_kind == MagicFindKind::Partial { tr("Parcial", "Partial") }
-                        else { tr("Desconocido", "Unknown") };
-                    ui.text_wrapped(format!("{}: {mf}% · {label}", tr("Hallazgo mágico", "Magic Find")));
-                    ui.text_wrapped(match reading.prep {
-                        Preparation::Attention => tr("Preparación: revisar en el host", "Preparation: check in the host"),
-                        Preparation::Partial => tr("Preparación parcial", "Partial preparation"),
-                        Preparation::Unknown => tr("Preparación desconocida", "Preparation unknown"),
-                    });
-                    ui.text_wrapped(tr("Buffs temporales sin verificar. Recordatorios manuales en el host.",
-                        "Temporary buffs unverified. Manual reminders in the host."));
-                }
-            } else {
-                ui.text_wrapped(if shared.connected() { tr("Sin medición", "Not measuring") }
-                    else { tr("Sin conexión", "Offline") });
-                ui.separator();
-                ui.text_wrapped(tr("— · Bolsas observadas", "— · Observed bags"));
-                ui.text_wrapped(tr("Sin lectura", "No reading"));
             }
+            draw.add_text(title_at, ui.style_color(StyleColor::Text), title);
+            ui.same_line_with_pos(origin + width - 2.0 * button - 8.0 * scale);
+            clicks.background = icon_button(ui, &draw, "##background", button, Icon::Background { transparent: windows.transparent },
+                if windows.transparent { tr("Poner el fondo del panel", "Give the panel its background") }
+                else { tr("Quitar el fondo del panel", "Remove the panel's background") }, outlined);
+            ui.same_line();
+            clicks.close = icon_button(ui, &draw, "##close", button, Icon::Close, tr("Cerrar el panel", "Close the panel"), outlined);
+            if windows.collapsed { return clicks; }
+
+            // Two columns: bags and their rate, the stack and its two prices.
+            let second = origin + left + gap;
             ui.separator();
-            if show_inventory_status(shared.live_status()) {
-                ui.text_wrapped(inventory_status(shared.live_status(), english));
-            }
-            ui.text_wrapped(wallet_status(shared.live_status(), shared.inventory_diagnostics().wallet, english));
-            ui.text_wrapped(tr("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"));
-            ui.text_wrapped(if shared.connected() { tr("Conexión al host: conectado", "Host connection: connected") }
-                else { tr("Conexión al host: sin conexión", "Host connection: offline") });
-            if shared.connected() && !view.capable {
-                ui.text_wrapped(tr("Panel no disponible en este host", "Panel unavailable in this host"));
-            } else if view.capable && view.reading.is_none() {
-                ui.text_wrapped(tr("Esperando sesión", "Waiting for session"));
-            }
-        });
+            paint_cell(ui, &draw, &view.bags_label, outlined);
+            ui.same_line_with_pos(second);
+            paint_cell(ui, &draw, &view.stack_label, outlined);
+            // Larger at the host's font scale instead of importing a font.
+            ui.set_window_font_scale(LARGE);
+            paint_cell(ui, &draw, &view.bags, outlined);
+            ui.set_window_font_scale(1.0);
+            ui.same_line_with_pos(second);
+            paint_cell(ui, &draw, &view.buy, outlined);
+            paint_cell(ui, &draw, &view.rate, outlined);
+            ui.same_line_with_pos(second);
+            paint_cell(ui, &draw, &view.sell, outlined);
+
+            // Three full-width lines. The status is a label, a dot and a text with one tooltip.
+            ui.separator();
+            paint_cell(ui, &draw, &view.slots, outlined);
+            paint_cell(ui, &draw, &view.magic_find, outlined);
+            ui.group(|| {
+                paint_text(ui, &draw, &view.status_label, ui.style_color(StyleColor::Text), outlined);
+                ui.same_line();
+                let [x, y] = ui.cursor_screen_pos();
+                ui.dummy([line, line]);
+                let centre = [x + line / 2.0, y + line / 2.0];
+                if outlined { draw.add_circle(centre, line * 0.32 + 1.0, OUTLINE).filled(true).build(); }
+                draw.add_circle(centre, line * 0.32, tone_color(ui, view.status_dot)).filled(true).build();
+                ui.same_line();
+                paint_text(ui, &draw, &view.status.text, tone_color(ui, view.status.tone), outlined);
+            });
+            if ui.is_item_hovered() { ui.tooltip_text(view.status.tooltip.join("\n")); }
+            clicks
+        })
+        .unwrap_or_default();
     spacing.pop();
     padding.pop();
-    if !opened {
+    if clicks.fold || clicks.background || clicks.close {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        panel.windows.show_panel = false;
+        if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
+        if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
+        if clicks.close { panel.windows.show_panel = false; }
         save_panel_settings(&panel);
     }
 }
