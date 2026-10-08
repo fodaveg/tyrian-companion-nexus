@@ -124,7 +124,10 @@ No session pointer or PID is hardcoded. The currently certified executable is
 `owned-bags-v3`. All other builds are unavailable until separately certified.
 
 That verification runs on the first cycle and its answer is kept for the whole load only when
-it is final: the certified build, or a hash that was computed and is another build's. One
+it is final, which is whenever the file or its loaded image decides it: the certified build,
+or another one, by a size that cannot be the certified build's (no bytes, or more than
+128 MiB), a hash that was computed and is not its, or a header in memory that is not its. A
+"no" of those is `unsupported_build` to the host and stops the source, as it always did. One
 that could not be finished, because hashing the executable did not fit its 10 seconds or the
 file could not be read, used to be kept as well, and the source then said "unsupported game
 build" until the addon was loaded again. It is now reported as a reading that failed

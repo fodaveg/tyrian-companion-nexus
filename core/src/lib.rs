@@ -17,6 +17,7 @@
 pub mod backoff;
 pub mod bags;
 pub mod client;
+pub mod executable;
 pub mod framer;
 pub mod farming;
 pub mod game_context;

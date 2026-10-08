@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots};
+use tyrian_companion_nexus_core::executable::{self, Step};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
 };
@@ -51,7 +52,6 @@ use windows::Win32::System::Threading::{
 
 const MAX_THREADS: usize = 128;
 const MAX_SYSTEM_ENTRIES: usize = 4096;
-const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 /// How long the bag slots and the Magic Find may take together, after the wallet. It bounds
 /// what they add to the wait before the client seals the inventory sample. Not measured in a
 /// running game: if `Uncovered::Deadline` shows up in the diagnostics, this is the number to
@@ -160,11 +160,12 @@ const VERIFY_RETRY: Duration = Duration::from_secs(30);
 
 /// Why the executable is not verified.
 enum Unverified {
-    /// Its SHA-256 was computed and is not the certified one: another build, for as long as
-    /// this process lives.
+    /// Decided by the file or by its loaded image (`executable`): its size cannot be the
+    /// certified build's, its SHA-256 is not, or its header is not. Another build, for as long
+    /// as this process lives.
     OtherBuild,
-    /// The verification could not be finished: the hash ran out of time or the file could not
-    /// be read, or a check after the hash could not be made. Not an answer about the build.
+    /// The verification could not be finished: the system failed to open, read or copy
+    /// something, or the time ran out. Not an answer about the build.
     Failed(ReadError),
 }
 impl From<ReadError> for Unverified {
@@ -239,30 +240,25 @@ impl NativeReader {
         if length == 0 || length >= path.len() {
             return Err(ReadError::UnsupportedBuild.into());
         }
-        let digest = executable_hash(
-            File::open(OsString::from_wide(&path[..length]))
-                .map_err(|_| ReadError::UnsupportedBuild)?,
-            stop,
-        )?;
-        // The one final "no": the hash was computed, and it is another build's.
+        let file = File::open(OsString::from_wide(&path[..length]))
+            .map_err(|_| ReadError::UnsupportedBuild)?;
+        // What the file itself decides is final: a size that cannot be the certified build's,
+        // a digest that is not its, and below a loaded image that is not what it loads as.
+        let size = file.metadata().map_err(|_| ReadError::UnsupportedBuild)?.len();
+        if !executable::size_in_range(size) {
+            return Err(Unverified::OtherBuild);
+        }
+        let digest = executable_hash(file, stop)?;
         if digest != inventory::BUILD_SHA256 {
             return Err(Unverified::OtherBuild);
         }
         let base = module.0 as u64;
-        let mut reader = Reader::new(ProcessMemory::new(stop));
-        if reader.read::<2>(base)? != *b"MZ" {
-            return Err(ReadError::UnsupportedBuild.into());
-        }
-        let pe = reader.scalar(base + 0x3c, 4)?;
-        if !(0x40..=4096).contains(&pe)
-            || reader.read::<4>(base + pe)? != *b"PE\0\0"
-            || reader.scalar(base + pe + 4, 2)? != 0x8664
-            || reader.scalar(base + pe + 24, 2)? != 0x20b
-        {
-            return Err(ReadError::UnsupportedBuild.into());
-        }
-        let image_size = reader.scalar(base + pe + 24 + 56, 4)?;
-        let profile = BuildProfile::checked(&digest, base, image_size)?;
+        let profile =
+            match executable::image_profile(&mut Reader::new(ProcessMemory::new(stop)), base) {
+                Step::Decided(Some(profile)) => profile,
+                Step::Decided(None) => return Err(Unverified::OtherBuild),
+                Step::Failed => return Err(ReadError::ReadFailed.into()),
+            };
         let ntdll =
             unsafe { GetModuleHandleW(w!("ntdll.dll")) }.map_err(|_| ReadError::ReadFailed)?;
         let address = unsafe { GetProcAddress(ntdll, s!("NtQueryInformationThread")) }
@@ -508,7 +504,7 @@ impl NativeReader {
 /// File size/mtime must remain stable during hashing. Handles close on every error path.
 fn executable_hash(mut file: File, stop: &AtomicBool) -> Result<String, ReadError> {
     let before = file.metadata().map_err(|_| ReadError::UnsupportedBuild)?;
-    if before.len() == 0 || before.len() > MAX_EXECUTABLE_BYTES {
+    if !executable::size_in_range(before.len()) {
         return Err(ReadError::UnsupportedBuild);
     }
     struct HashHandles {
@@ -558,7 +554,7 @@ fn executable_hash(mut file: File, stop: &AtomicBool) -> Result<String, ReadErro
             break;
         }
         total += n as u64;
-        if total > MAX_EXECUTABLE_BYTES
+        if total > executable::MAX_BYTES
             || unsafe { BCryptHashData(handles.hash, &buffer[..n], 0) }.0 < 0
         {
             return Err(ReadError::UnsupportedBuild);
