@@ -22,11 +22,14 @@
 //!
 //! What the plugin's `error` means is in [`ErrorCode::retries`]: after `auth_rejected` or
 //! `version_unsupported` this client stops trying until the user saves the settings again.
-//! Every other end of a connection, the plugin missing included, is retried forever on
-//! `[250, 500, 1000, 2000, 5000]` ms, well inside the plugin's 10-minute grace, so a dropped
-//! connection comes back as the same presence rather than as a new session. A connection the
-//! plugin welcomes and closes before those 10 s is one more step up that table, like one that
-//! was never welcomed: the retries slow down instead of going on at the fastest step.
+//! Every other end of a connection, the plugin missing included, is retried forever on the
+//! table `[250, 500, 1000, 2000, 5000]` ms, well inside the plugin's 10-minute grace, so a
+//! dropped connection comes back as the same presence rather than as a new session. An attempt
+//! that fails moves one step up the table before its wait is taken, so the waits after
+//! failures are 500 ms, 1 s, 2 s and then 5 s; the 250 ms is only the wait after a connection
+//! that had lived those 10 s. A connection the plugin welcomes and closes before them is one
+//! more step up, like one that was never welcomed: the retries slow down instead of going on
+//! at the fastest step.
 //!
 //! The token goes into the `hello` and nowhere else: no log line in this module formats it.
 
@@ -708,6 +711,23 @@ mod tests {
         assert_eq!(backoff.delay(), Duration::from_millis(250));
         // A reset can never make the reconnections more frequent than the table's slowest step.
         assert!(STABLE_CONNECTION >= slowest);
+    }
+
+    /// What the README says about the waits, as the loop takes them: it records how the
+    /// attempt ended and then reads the delay.
+    #[test]
+    fn the_first_wait_after_a_failure_is_500_ms_and_250_only_follows_a_connection_that_lasted() {
+        let mut backoff = Backoff::new();
+        let mut wait_after = |lasted: Option<Duration>| {
+            record_connection(&mut backoff, lasted);
+            backoff.delay().as_millis()
+        };
+        // Nobody listening, from the first attempt on.
+        let waits: Vec<u128> = (0..6).map(|_| wait_after(None)).collect();
+        assert_eq!(waits, [500, 1_000, 2_000, 5_000, 5_000, 5_000]);
+        // A connection that lived its ten seconds, and what comes if the retry after it fails.
+        assert_eq!(wait_after(Some(STABLE_CONNECTION)), 250);
+        assert_eq!([wait_after(None), wait_after(None)], [500, 1_000]);
     }
 
     #[test]

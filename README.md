@@ -333,7 +333,8 @@ This is a two-crate Cargo workspace, and that split is deliberate:
   `context`, `heartbeat` and `bye` exactly as the plugin validates them, reading `welcome`,
   `alert`, `error` and the optional `farm1` capability/state), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
-  the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
+  the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table (see "Reconnecting" for which
+  wait comes when), settings persistence, and
   shared in-memory state, the safe inventory and wallet interpreters and negotiated live1 producer. No dependency on `nexus` or `windows`: the loop reaches the game
   only through a `Host` trait. This is what `cargo test` exercises, and it builds and tests on
   any host, this repository's Linux dev machine included.
@@ -1046,13 +1047,21 @@ changing those four files and rebuilding.
 The addon does not need the plugin, or the game, to start first. If there is no server
 listening yet — the common case right when the game launches, since the plugin lives inside
 Obsidian and the player is free to start either one first — the addon just keeps retrying,
-forever, on the backoff table above, without surfacing that as an error. A connection that
-drops is retried the same way, well inside the ten minutes the plugin waits before it closes
-the session, so a short hiccup continues the same session instead of starting a new one.
-A connection that had lived for 10 seconds since the plugin's `welcome` starts the table over
-and is retried after 250 ms. One the plugin welcomes and closes before that is one more step
-up the table, like one that never got a `welcome`: a plugin that keeps closing at once is
-retried every 5 seconds in the end, not four times a second.
+forever, without surfacing that as an error.
+
+The waits between retries come from the table `[250, 500, 1000, 2000, 5000]` ms, and the
+first one after a failure is **500 ms, not 250**: an attempt that fails moves one step up the
+table before its wait is taken. With nobody listening the addon tries, waits 500 ms, tries,
+waits 1 s, then 2 s, and then 5 s between tries for as long as it takes. The 250 ms is only
+the wait after a connection that had lived for 10 seconds since the plugin's `welcome`:
+that one starts the table over and is retried a quarter of a second after it drops, and if
+that retry fails the waits are 500 ms, 1 s, 2 s and 5 s again.
+
+A connection that drops is retried that way, well inside the ten minutes the plugin waits
+before it closes the session, so a short hiccup continues the same session instead of
+starting a new one. One the plugin welcomes and closes before those 10 seconds is one more
+step up the table, like one that never got a `welcome`: a plugin that keeps closing at once
+is retried after 500 ms, 1 s, 2 s and then every 5 seconds, not four times a second.
 Only two answers stop the retries until the settings change: a rejected token
 (`auth_rejected`) and a protocol version the plugin does not speak (`version_unsupported`).
 It shows "update the Nexus addon" when the plugin's `v` is 3 or more, and "update Tyrian
