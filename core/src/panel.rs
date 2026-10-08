@@ -18,7 +18,9 @@
 //! coloured apart and never warns about a drop. When the reader has no coverage the cell falls
 //! back to the plugin's figure, or to `—`, and its tooltip says why the addon has none.
 
-use crate::bags::BagCoverage;
+use std::time::{Duration, Instant};
+
+use crate::bags::{BagCoverage, BagSlots};
 use crate::farming::{FarmingError, FarmingView, Goal, MagicFindKind, Phase, Preparation, SlotSource};
 use crate::live::LiveStatus;
 use crate::magic_find::{MagicFind, MagicFindCoverage};
@@ -58,25 +60,84 @@ pub struct Cell {
     pub tooltip: Vec<String>,
 }
 
+/// How long the last verified reading of a line is still painted while the reader's cycles
+/// come back without one. A single cycle that fails (`Changed`, `Deadline`, `ReadFailed`) would
+/// otherwise swap the figure for the plugin's, or for `—`, for a second and back.
+pub const READING_HOLD: Duration = Duration::from_secs(5);
+
 /// What the panel remembers from one frame to the next.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PanelMemory {
     /// The rate is being shown as one averaged number instead of its range.
     rate_averaged: bool,
-    /// The highest verified Magic Find of the current session, with its addends.
+    /// The highest verified Magic Find of the current session, with its addends. Only real
+    /// readings feed it, never one that is being held.
     magic_find_peak: Option<MagicFind>,
+    /// The last verified reading of each line and when the reader last returned it, kept for
+    /// [`READING_HOLD`].
+    bags: Option<(BagSlots, Instant)>,
+    magic_find: Option<(MagicFind, Instant)>,
+    /// A session was under way in the previous frame: a new one starts with nothing held.
+    session_running: bool,
 }
 
 impl PanelMemory {
-    /// Nothing remembered: a range is a range and no Magic Find has been seen.
+    /// Nothing remembered: a range is a range and no reading has been seen.
     pub const fn new() -> Self {
-        Self { rate_averaged: false, magic_find_peak: None }
+        Self { rate_averaged: false, magic_find_peak: None, bags: None, magic_find: None, session_running: false }
     }
+
+    /// The highest verified Magic Find total of the current session, if any reading fed it.
+    pub fn magic_find_peak(&self) -> Option<f32> {
+        self.magic_find_peak.map(|peak| peak.total)
+    }
+}
+
+/// A verified reading as a line takes it in this frame.
+struct Taken<T> {
+    value: T,
+    /// The reader returned it in its last cycle. Otherwise it is the last good one, held:
+    /// how many seconds ago it was read and, if the reader said, why it has none now.
+    held: Option<(u64, Option<Uncovered>)>,
+}
+
+/// The addon's reading of one line for this frame: the reader's own while it has one, the last
+/// good one for [`READING_HOLD`] after that, and nothing otherwise. Outside sampling nothing
+/// counts and nothing is kept: the reader's diagnostics keep the last cycle's figures after the
+/// cycles stop (no session, a source conflict, an unsupported build), and a figure of then is
+/// not a reading of now. It is the rule the wallet coverage follows.
+fn take<T: Copy>(slot: &mut Option<(T, Instant)>, sampling: bool, read: Option<T>, reason: Option<Uncovered>, now: Instant) -> Option<Taken<T>> {
+    if !sampling {
+        *slot = None;
+        return None;
+    }
+    if let Some(value) = read {
+        *slot = Some((value, now));
+        return Some(Taken { value, held: None });
+    }
+    let (value, at) = (*slot)?;
+    let age = now.saturating_duration_since(at);
+    if age > READING_HOLD {
+        *slot = None;
+        return None;
+    }
+    Some(Taken { value, held: Some((age.as_secs(), reason)) })
+}
+
+/// The tooltip lines of a reading that is being held: how old it is and why there is no new one.
+fn held_lines(held: Option<(u64, Option<Uncovered>)>, english: bool) -> Vec<String> {
+    let Some((age, reason)) = held else { return Vec::new() };
+    let mut lines = vec![if english { format!("Last reading {age} s ago") } else { format!("Última lectura hace {age} s") }];
+    lines.extend(reason.map(|reason| no_coverage(reason, english)));
+    lines
 }
 
 /// Everything the panel is painted from.
 #[derive(Debug, Clone)]
 pub struct PanelInput<'a> {
+    /// The frame's instant on a monotonic clock, for [`READING_HOLD`]. The caller owns the
+    /// clock; nothing here reads one.
+    pub now: Instant,
     pub connection: Status,
     pub farming: &'a FarmingView,
     pub price: &'a PriceView,
@@ -452,18 +513,6 @@ fn no_coverage(reason: Uncovered, english: bool) -> String {
     format!("{} ({})", tr(english, "Lectura del addon: sin cobertura", "Addon reading: no coverage"), uncovered_reason(reason, english))
 }
 
-/// The reader's output only describes the game while the reader is sampling: its diagnostics
-/// keep the last cycle's figures after the cycles stop (no session, a source conflict, an
-/// unsupported build), and a figure of then is not a reading of now. Outside sampling it
-/// counts as not read, the same rule the wallet coverage follows.
-fn current<T: Default>(live: LiveStatus, coverage: T) -> T {
-    if live.is_sampling() {
-        coverage
-    } else {
-        T::default()
-    }
-}
-
 fn not_sampling(english: bool) -> String {
     tr(english, "Lectura del addon: sin muestreo en curso", "Addon reading: not sampling now").to_string()
 }
@@ -472,19 +521,26 @@ fn not_sampling(english: bool) -> String {
 /// sends, else `—`. The warning tone at [`SLOTS_WARNING`] or fewer and the error tone at
 /// [`SLOTS_ERROR`] or fewer. The verified figure names the counter of the inventory window in
 /// its tooltip (used of total); the plugin's says whose it is and how old, and is also in the
-/// warning tone when it is old.
-fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
+/// warning tone when it is old. A verified figure is held for [`READING_HOLD`] through cycles
+/// that return none: the cell stays as it was and the tooltip says how old the reading is.
+fn slots_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> Cell {
     let view = input.farming;
     let line = |es: &'static str, en: &'static str| tr(english, es, en).to_string();
     let mut tooltip = vec![line("Huecos libres en las bolsas del personaje", "Free bag slots of the character")];
     let mut old = false;
-    let bags = current(input.live, input.bags);
-    let uncovered = match bags {
-        BagCoverage::Unavailable(reason) => Some(no_coverage(reason, english)),
-        _ if !input.live.is_sampling() => Some(not_sampling(english)),
-        _ => None,
+    let (read, reason) = match input.bags {
+        BagCoverage::Read(slots) => (Some(slots), None),
+        BagCoverage::Unavailable(reason) => (None, Some(reason)),
+        BagCoverage::NotRead => (None, None),
     };
-    let free = if let BagCoverage::Read(slots) = bags {
+    let taken = take(&mut memory.bags, input.live.is_sampling(), read, reason, input.now);
+    // Why the figure is not the addon's, for the two branches that do not paint it.
+    let uncovered = match reason {
+        _ if !input.live.is_sampling() => Some(not_sampling(english)),
+        Some(reason) => Some(no_coverage(reason, english)),
+        None => None,
+    };
+    let free = if let Some(Taken { value: slots, held }) = taken {
         tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
         tooltip.push(if english {
             format!("Inventory: {} used of {}", slots.occupied, slots.capacity)
@@ -496,6 +552,7 @@ fn slots_cell(input: &PanelInput<'_>, english: bool) -> Cell {
         } else {
             format!("Bolsas: {} en {} ranuras", slots.bags, slots.bag_slots)
         });
+        tooltip.extend(held_lines(held, english));
         i32::try_from(slots.free).unwrap_or(i32::MAX)
     } else if let Some((reading, free)) = view.reading.as_ref().and_then(|reading| reading.slots.map(|free| (reading, free))) {
         tooltip.push(line("Dato del plugin", "From the plugin"));
@@ -583,14 +640,20 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
     let mut tooltip = vec![line("Hallazgo mágico", "Magic Find")];
     // Why the figure is not the addon's own: the reader's reason, or that there is no reader
     // output at all.
-    let magic_find = current(input.live, input.magic_find);
-    let uncovered = match magic_find {
-        MagicFindCoverage::Unavailable(reason) => no_coverage(reason, english),
+    let (reading, reason) = match input.magic_find {
+        MagicFindCoverage::Read(read) => (Some(read), None),
+        MagicFindCoverage::Unavailable(reason) => (None, Some(reason)),
+        MagicFindCoverage::NotRead => (None, None),
+    };
+    let taken = take(&mut memory.magic_find, input.live.is_sampling(), reading, reason, input.now);
+    let verified = taken.is_some();
+    let uncovered = match reason {
         _ if !input.live.is_sampling() => not_sampling(english),
-        _ => line("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"),
+        Some(reason) => no_coverage(reason, english),
+        None => line("Hallazgo mágico verificado: sin cobertura", "Verified Magic Find: no coverage"),
     };
     let plugin = view.reading.as_ref().filter(|reading| reading.mf_kind == MagicFindKind::Partial).and_then(|reading| reading.mf);
-    let (text, tone) = if let MagicFindCoverage::Read(read) = magic_find {
+    let (text, tone) = if let Some(Taken { value: read, held }) = taken {
         tooltip.push(line("Leído y verificado por el addon", "Read and verified by the addon"));
         let addends: [(&str, f32, fn(&MagicFind) -> f32); 3] = [
             (tr(english, "Suerte", "Luck"), read.luck as f32, |value| value.luck as f32),
@@ -600,7 +663,9 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
         for (name, value, _) in &addends {
             tooltip.push(format!("{name}: {}%", points(*value)));
         }
-        if memory.magic_find_peak.as_ref().is_none_or(|peak| !lower(read.total, peak.total)) {
+        // Only a reading the reader has just returned can be the session's highest. A held one
+        // is compared with the peak, so it keeps its colour, and never moves it.
+        if held.is_none() && memory.magic_find_peak.as_ref().is_none_or(|peak| !lower(read.total, peak.total)) {
             memory.magic_find_peak = Some(read);
         }
         let peak = memory.magic_find_peak.as_ref().filter(|peak| lower(read.total, peak.total));
@@ -622,7 +687,9 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
                 }
             }
         }
-        (magic_find_text(Some(&points(read.total)), false, english), if peak.is_some() { Tone::Warning } else { Tone::Normal })
+        let tone = if peak.is_some() { Tone::Warning } else { Tone::Normal };
+        tooltip.extend(held_lines(held, english));
+        (magic_find_text(Some(&points(read.total)), false, english), tone)
     } else if let Some(value) = plugin {
         tooltip.push(line(
             "Dato del plugin: declarado al empezar la sesión, o parcial. No es una lectura en vivo.",
@@ -641,7 +708,7 @@ fn magic_find_cell(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bo
             Preparation::Unknown => line("Preparación desconocida", "Preparation unknown"),
         });
         // The host cannot see the effects on the character; the addon's own reading counts them.
-        if !matches!(magic_find, MagicFindCoverage::Read(_)) {
+        if !verified {
             tooltip.push(line(
                 "Buffs temporales sin verificar. Recordatorios manuales en el host.",
                 "Temporary buffs unverified. Manual reminders in the host.",
@@ -744,6 +811,17 @@ fn status_cell(input: &PanelInput<'_>, english: bool) -> (Tone, Cell) {
 /// The panel for this frame. `memory` carries the rate's range-or-average choice and the
 /// session's verified Magic Find peak from the previous one.
 pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> PanelView {
+    // A session that starts holds nothing of what was read before it.
+    let running = input
+        .farming
+        .reading
+        .as_ref()
+        .is_some_and(|reading| matches!(reading.phase, Phase::Starting | Phase::Active | Phase::Stopping | Phase::Provisional));
+    if running && !memory.session_running {
+        memory.bags = None;
+        memory.magic_find = None;
+    }
+    memory.session_running = running;
     let (stack_label, buy, sell) = stack_cells(input, english);
     let (status_dot, status) = status_cell(input, english);
     PanelView {
@@ -757,7 +835,7 @@ pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> 
         stack_label,
         buy,
         sell,
-        slots: slots_cell(input, english),
+        slots: slots_cell(input, memory, english),
         magic_find: magic_find_cell(input, memory, english),
         status_label: tr(english, "Estado:", "Status:").to_string(),
         status_dot,

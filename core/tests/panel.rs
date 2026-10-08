@@ -102,6 +102,8 @@ const REASONS: [Uncovered; 10] = [
 ];
 
 struct Case {
+    /// The frame's instant. Tests that follow the reader over time move it; the rest leave it.
+    now: Instant,
     connection: Status,
     farming: FarmingView,
     price: PriceView,
@@ -115,6 +117,7 @@ impl Case {
     /// Connected, measuring, a fresh price, and the frame of a live session of today.
     fn measuring() -> Self {
         Self {
+            now: Instant::now(),
             connection: Status::Connected,
             farming: farming(Some(&farming_frame()), Duration::ZERO),
             price: price(Some(&price_frame("ok")), Duration::ZERO),
@@ -143,6 +146,7 @@ impl Case {
     fn view_with(&self, memory: &mut PanelMemory, english: bool) -> PanelView {
         panel::view(
             &PanelInput {
+                now: self.now,
                 connection: self.connection,
                 farming: &self.farming,
                 price: &self.price,
@@ -329,7 +333,7 @@ fn a_reading_of_the_addon_only_counts_while_its_reader_is_sampling() {
         for cell in [&view.slots, &view.magic_find] {
             assert!(has(cell, "Lectura del addon: sin muestreo en curso") && !has(cell, "verificado por el addon"), "{live:?}: {cell:?}");
         }
-        assert_eq!(memory, PanelMemory::default(), "a figure that is not painted is not a peak either");
+        assert_eq!(memory.magic_find_peak(), None, "a figure that is not painted is not a peak either");
         assert!(has(&case.view(true).slots, "Addon reading: not sampling now"));
     }
 }
@@ -358,7 +362,7 @@ fn the_plugin_magic_find_is_marked_as_not_live_and_never_warns() {
     let lower = step(&mut memory, 250, false);
     assert_eq!((lower.text.as_str(), lower.tone), ("MF: 250% parcial", Tone::Muted));
     assert!(!has(&lower, "Bajó") && !has(&lower, "máximo"), "{lower:?}");
-    assert_eq!(memory, PanelMemory::default(), "it never feeds the session's peak");
+    assert_eq!(memory.magic_find_peak(), None, "it never feeds the session's peak");
     let english = step(&mut memory, 333, true);
     assert_eq!(english.text, "MF: 333% partial");
     assert!(has(&english, "Not a live reading") && has(&english, "Verified Magic Find: no coverage"));
@@ -410,10 +414,6 @@ fn a_verified_magic_find_shows_its_parts_and_warns_when_it_falls_from_the_sessio
     assert!(has(&english, "Down 80 points from the session peak (383%)") && has(&english, "Server: from 30% to 0%") && has(&english, "Effects: from 53% to 3%"));
     assert_eq!(english.tooltip[2..5], ["Luck: 300%", "Server: 0%", "Effects: 3%"]);
     assert_eq!(step(&mut memory, verified(300, 30.0, 53.0), false).tone, Tone::Normal, "back at the peak");
-    // A reading that goes missing falls back to the plugin's value and does not forget the peak.
-    let fallback = step(&mut memory, MagicFindCoverage::NotRead, false);
-    assert_eq!((fallback.text.as_str(), fallback.tone), ("MF: 333% parcial", Tone::Muted));
-    assert_eq!(step(&mut memory, MagicFindCoverage::Unavailable(Uncovered::Changed), false).text, "MF: 333% parcial");
     assert_eq!(step(&mut memory, verified(300, 30.0, 3.0), false).tone, Tone::Warning);
     // A new session has its own peak.
     let mut starting = Case::measuring().with_frame(sketch_frame(), |frame| frame["phase"] = json!("starting"));
@@ -464,6 +464,165 @@ fn magic_find_without_coverage_falls_back_to_the_plugin_or_a_dash_and_says_why()
     let mut live_state = Case::sketch();
     live_state.magic_find = MagicFindCoverage::Unavailable(Uncovered::Unsupported);
     assert!(has(&live_state.view(false).magic_find, "Lectura del addon: sin cobertura (un efecto necesita estado en vivo)"));
+}
+
+/// One panel followed over time: the same memory, a clock that the test moves, and whatever
+/// the reader returned in each cycle.
+struct Follow {
+    case: Case,
+    memory: PanelMemory,
+    start: Instant,
+}
+
+impl Follow {
+    fn new(case: Case) -> Self {
+        Self { start: case.now, case, memory: PanelMemory::default() }
+    }
+
+    /// The panel `seconds` after the start, with this cycle's output of the two readers.
+    fn at(&mut self, seconds: u64, bags: BagCoverage, magic_find: MagicFindCoverage) -> PanelView {
+        self.case.now = self.start + Duration::from_secs(seconds);
+        self.case.bags = bags;
+        self.case.magic_find = magic_find;
+        self.case.view_with(&mut self.memory, false)
+    }
+}
+
+fn failed(reason: Uncovered) -> (BagCoverage, MagicFindCoverage) {
+    (BagCoverage::Unavailable(reason), MagicFindCoverage::Unavailable(reason))
+}
+
+/// A cycle that comes back without a reading, between two that have one, moves nothing: the
+/// same figures in the same colours. Only the tooltips say that the reading is a second old and
+/// why there is no new one.
+#[test]
+fn one_failed_cycle_between_two_readings_changes_neither_cell() {
+    for reason in [Uncovered::Changed, Uncovered::Deadline, Uncovered::ReadFailed] {
+        let mut panel = Follow::new(Case::sketch());
+        // A Magic Find below the session's highest, so the held cell has a colour to keep.
+        panel.at(0, bags(8, 160), verified(300, 30.0, 53.0));
+        let before = panel.at(1, bags(8, 160), verified(300, 30.0, 3.0));
+        assert_eq!((before.slots.text.as_str(), before.slots.tone), ("Huecos: 8 libres", Tone::Warning));
+        assert_eq!((before.magic_find.text.as_str(), before.magic_find.tone), ("MF: 333%", Tone::Warning));
+        let (no_bags, no_magic_find) = failed(reason);
+        let during = panel.at(2, no_bags, no_magic_find);
+        for (held, was) in [(&during.slots, &before.slots), (&during.magic_find, &before.magic_find)] {
+            assert_eq!((held.text.as_str(), held.tone), (was.text.as_str(), was.tone), "{reason:?}");
+            // Everything the tooltip said, plus the age of the reading and today's reason.
+            let why = format!("Lectura del addon: sin cobertura ({})", panel::uncovered_reason(reason, false));
+            assert!(has(held, "Última lectura hace 1 s") && has(held, &why), "{reason:?}: {held:?}");
+            assert!(was.tooltip.iter().all(|line| held.tooltip.contains(line)), "{reason:?}: {held:?}");
+            assert!(!has(held, "plugin"), "{reason:?}: {held:?}");
+        }
+        let after = panel.at(3, bags(8, 160), verified(300, 30.0, 3.0));
+        assert_eq!(after.slots, before.slots, "{reason:?}");
+        assert_eq!(after.magic_find, before.magic_find, "{reason:?}");
+    }
+    // In English, and for a cycle in which the reader was not even tried.
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 3.0));
+    panel.case.bags = BagCoverage::NotRead;
+    panel.case.magic_find = MagicFindCoverage::Unavailable(Uncovered::Deadline);
+    panel.case.now = panel.start + Duration::from_secs(2);
+    let english = panel.case.view_with(&mut panel.memory, true);
+    assert_eq!((english.slots.text.as_str(), english.magic_find.text.as_str()), ("Slots: 41 free", "MF: 333%"));
+    assert!(has(&english.slots, "Last reading 2 s ago") && !has(&english.slots, "no coverage"), "{:?}", english.slots);
+    assert!(has(&english.magic_find, "Last reading 2 s ago") && has(&english.magic_find, "Addon reading: no coverage (the read ran out of time)"));
+}
+
+/// The hold lasts five seconds from the last reading the reader returned. After that the lines
+/// fall back as before: the plugin's figure, or a dash, with the reason.
+#[test]
+fn six_seconds_without_a_reading_let_go_of_it() {
+    assert_eq!(panel::READING_HOLD, Duration::from_secs(5));
+    for with_plugin in [true, false] {
+        let mut panel = Follow::new(if with_plugin { Case::sketch() } else { Case::measuring() });
+        panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+        let (no_bags, no_magic_find) = failed(Uncovered::Deadline);
+        for seconds in 1..=5 {
+            let view = panel.at(seconds, no_bags, no_magic_find);
+            assert_eq!((view.slots.text.as_str(), view.magic_find.text.as_str()), ("Huecos: 41 libres", "MF: 383%"), "+{seconds} s");
+            assert_eq!((view.slots.tone, view.magic_find.tone), (Tone::Normal, Tone::Normal), "+{seconds} s");
+            assert!(has(&view.magic_find, &format!("Última lectura hace {seconds} s")), "+{seconds} s");
+        }
+        let gone = panel.at(6, no_bags, no_magic_find);
+        let expected = if with_plugin { ("Huecos: 63 libres", "MF: 333% parcial") } else { ("Huecos: —", "MF: —") };
+        assert_eq!((gone.slots.text.as_str(), gone.magic_find.text.as_str()), expected);
+        assert_eq!(gone.magic_find.tone, Tone::Muted);
+        for cell in [&gone.slots, &gone.magic_find] {
+            assert!(has(cell, "Lectura del addon: sin cobertura (se acabó el tiempo de lectura)") && !has(cell, "Última lectura hace"), "{cell:?}");
+        }
+        // It does not come back on its own, and a new reading is a reading again.
+        assert_eq!(panel.at(7, no_bags, no_magic_find).magic_find.text, expected.1);
+        let back = panel.at(8, bags(40, 160), verified(300, 30.0, 3.0));
+        assert_eq!((back.slots.text.as_str(), back.magic_find.text.as_str()), ("Huecos: 40 libres", "MF: 333%"));
+        assert_eq!(back.magic_find.tone, Tone::Warning, "the session's highest was not forgotten");
+        // The five seconds count from the last reading, not from the first failure.
+        assert_eq!(panel.at(13, no_bags, no_magic_find).slots.text, "Huecos: 40 libres");
+        assert_eq!(panel.at(14, no_bags, no_magic_find).slots.text, expected.0);
+    }
+}
+
+/// The reader's rule comes first: outside sampling nothing is held, not even for a frame, and
+/// what was held does not come back when sampling does.
+#[test]
+fn outside_sampling_a_held_reading_is_let_go_at_once() {
+    for live in [LiveStatus::NotNegotiated, LiveStatus::UnsupportedBuild, LiveStatus::Unavailable, LiveStatus::Conflict, LiveStatus::StorageUnavailable] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+        let (no_bags, no_magic_find) = failed(Uncovered::Changed);
+        assert_eq!(panel.at(1, no_bags, no_magic_find).magic_find.text, "MF: 383%", "held while sampling");
+        panel.case.live = live;
+        let stopped = panel.at(1, no_bags, no_magic_find);
+        assert_eq!((stopped.slots.text.as_str(), stopped.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+        assert!(has(&stopped.magic_find, "Lectura del addon: sin muestreo en curso") && !has(&stopped.magic_find, "Última lectura hace"));
+        // Even the reader's own last figures are not painted then, and are not kept either.
+        let stale = panel.at(2, bags(41, 160), verified(300, 30.0, 53.0));
+        assert_eq!(stale.magic_find.text, "MF: 333% parcial", "{live:?}");
+        panel.case.live = LiveStatus::Measuring;
+        let resumed = panel.at(2, no_bags, no_magic_find);
+        assert_eq!((resumed.slots.text.as_str(), resumed.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "{live:?}");
+    }
+}
+
+#[test]
+fn a_new_session_holds_nothing_of_the_one_before() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    let (no_bags, no_magic_find) = failed(Uncovered::Changed);
+    // The session ends: what was read a second ago is still what the bags hold.
+    panel.case.farming = farming(Some(&{ let mut frame = sketch_frame(); frame["phase"] = json!("complete"); frame }), Duration::ZERO);
+    assert_eq!(panel.at(1, no_bags, no_magic_find).slots.text, "Huecos: 41 libres");
+    // Another one starts: nothing of the one before is held.
+    panel.case.farming = farming(Some(&{ let mut frame = sketch_frame(); frame["phase"] = json!("starting"); frame }), Duration::ZERO);
+    let started = panel.at(2, no_bags, no_magic_find);
+    assert_eq!((started.slots.text.as_str(), started.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    // Inside the new session the hold works as always.
+    panel.at(3, bags(30, 160), verified(300, 0.0, 0.0));
+    assert_eq!(panel.at(4, no_bags, no_magic_find).slots.text, "Huecos: 30 libres");
+}
+
+/// The session's highest only comes from readings the reader returned. A held one keeps the
+/// colour it had against that highest and never becomes it.
+#[test]
+fn a_held_reading_does_not_move_the_session_peak() {
+    let mut panel = Follow::new(Case::sketch());
+    let (no_bags, no_magic_find) = failed(Uncovered::Changed);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    panel.at(1, bags(41, 160), verified(300, 30.0, 3.0));
+    for seconds in 2..=6 {
+        let held = panel.at(seconds, no_bags, no_magic_find).magic_find;
+        assert_eq!((held.text.as_str(), held.tone), ("MF: 333%", Tone::Warning), "+{seconds} s");
+        assert!(has(&held, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "+{seconds} s");
+        assert_eq!(panel.memory.magic_find_peak(), Some(383.0), "+{seconds} s");
+    }
+    // Outside a session there is no highest: a reading held there paints, and feeds none.
+    let mut idle = Follow::new(Case::measuring().with_frame(sketch_frame(), |frame| frame["phase"] = json!("idle")));
+    idle.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    let held = idle.at(1, no_bags, no_magic_find).magic_find;
+    assert_eq!((held.text.as_str(), held.tone), ("MF: 383%", Tone::Normal));
+    assert_eq!(idle.memory.magic_find_peak(), None);
 }
 
 #[test]
@@ -953,6 +1112,7 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                                 continue;
                             }
                             let case = Case {
+                                now: Instant::now(),
                                 connection,
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },

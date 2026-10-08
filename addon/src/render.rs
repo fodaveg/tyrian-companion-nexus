@@ -396,6 +396,7 @@ pub fn farming_render(ui: &Ui) {
         let mut memory = PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         panel::view(
             &PanelInput {
+                now,
                 connection: shared.status(),
                 farming: &farming,
                 price: &price,
