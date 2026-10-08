@@ -1,11 +1,11 @@
-//! `price2` frames, freshness, formatting and the painted lines, against the fixture shared
-//! byte for byte with the plugin.
+//! `price2` frames, freshness and formatting, against the fixture shared byte for byte with
+//! the plugin. What the panel paints from them is in `tests/panel.rs`.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tyrian_companion_nexus_core::price::{
-    format_coins, panel_lines, PriceState, PriceStatus, PriceView,
+    format_coins, PriceState, PriceStatus,
 };
 use tyrian_companion_nexus_core::protocol::{build_price_sub_line, parse_server_line, ServerLine};
 use tyrian_companion_nexus_core::state::SharedState;
@@ -261,15 +261,6 @@ fn transport_ttl_is_15_seconds_monotonic_and_age_grows_locally() {
     assert_eq!(before.age, Some(412 + 14));
     let after = state.price_view(now + Duration::from_secs(15));
     assert!(!after.fresh);
-    // The block stays where it is; the figures of the expired transport are gone.
-    assert_eq!(
-        texts(&after, false),
-        owned(&[
-            ("Saco · precio aún sin leer", false),
-            ("Pedido —", false),
-            ("Oferta —", false)
-        ])
-    );
     // A new frame restarts the transport clock; its own age replaces the old one.
     state.accept_price(reading(&frame(3)), now + Duration::from_secs(20));
     let view = state.price_view(now + Duration::from_secs(22));
@@ -285,7 +276,6 @@ fn disconnect_is_immediate_and_a_new_connection_needs_its_own_frame() {
     state.disconnect_price();
     let view = state.price_view(now + Duration::from_secs(1));
     assert!(!view.capable && !view.fresh && view.reading.is_none());
-    assert!(panel_lines(&view, false).is_empty());
     state.begin_price_connection(NONCE);
     assert!(state.price_view(now).reading.is_none());
     assert!(state.enable_price(NONCE));
@@ -319,201 +309,5 @@ fn format_coins_drops_leading_zero_units() {
         (i32::MAX, "214748g 36s 47c"),
     ] {
         assert_eq!(format_coins(copper), text);
-    }
-}
-
-fn view_of(index: usize, age_extra: u64) -> PriceView {
-    let state = subscribed();
-    let now = Instant::now();
-    state.accept_price(reading(&frame(index)), now);
-    state.price_view(now + Duration::from_secs(age_extra))
-}
-
-fn texts(view: &PriceView, english: bool) -> Vec<(String, bool)> {
-    panel_lines(view, english)
-        .into_iter()
-        .map(|line| (line.text, line.warning))
-        .collect()
-}
-
-fn owned(rows: &[(&str, bool)]) -> Vec<(String, bool)> {
-    rows.iter()
-        .map(|(text, warning)| (text.to_string(), *warning))
-        .collect()
-}
-
-#[test]
-fn panel_lines_per_status_and_language_use_the_contract_texts() {
-    let ok = view_of(2, 0);
-    assert_eq!(
-        texts(&ok, false),
-        owned(&[
-            ("Saco · precio del bazar", false),
-            ("Pedido 3s 45c · ×250 8g 62s 50c", false),
-            ("Oferta 3s 67c · ×250 9g 17s 50c", false)
-        ])
-    );
-    assert_eq!(
-        texts(&ok, true),
-        owned(&[
-            ("Bag · trading post price", false),
-            ("Buy order 3s 45c · ×250 8g 62s 50c", false),
-            ("Sell offer 3s 67c · ×250 9g 17s 50c", false)
-        ])
-    );
-    // Gross figures only: the net wording is gone from the block in both languages.
-    for english in [false, true] {
-        for (text, _) in texts(&ok, english) {
-            let lower = text.to_lowercase();
-            assert!(!lower.contains("neto") && !lower.contains("net of") && !lower.contains("comisi"), "{text}");
-        }
-    }
-    // Every other state keeps the two sides in place with a dash; the header says the state.
-    let dashes = |header: &str, warning: bool, english: bool| {
-        let (buy, sell) = if english { ("Buy order —", "Sell offer —") } else { ("Pedido —", "Oferta —") };
-        owned(&[(header, warning), (buy, false), (sell, false)])
-    };
-    let none = view_of(3, 0);
-    assert_eq!(texts(&none, false), dashes("Saco · sin cotización", false, false));
-    assert_eq!(texts(&none, true), dashes("Bag · no quote", false, true));
-    let pending = view_of(4, 0);
-    assert_eq!(texts(&pending, false), dashes("Saco · precio aún sin leer", false, false));
-    assert_eq!(texts(&pending, true), dashes("Bag · price not read yet", false, true));
-    // Stale frame has age 1260 s = 21 min; 5 s later still 21 min. Eleven minutes: see below.
-    let stale = view_of(5, 0);
-    assert_eq!(texts(&stale, false), dashes("Saco · precio caducado (hace 21 min)", true, false));
-    assert_eq!(texts(&stale, true), dashes("Bag · price expired (21 min ago)", true, true));
-    let mut eleven = stale.clone();
-    eleven.age = Some(660);
-    assert_eq!(texts(&eleven, false), dashes("Saco · precio caducado (hace 11 min)", true, false));
-    assert_eq!(texts(&eleven, true), dashes("Bag · price expired (11 min ago)", true, true));
-    assert!(
-        texts(&view_of(6, 0), false).is_empty(),
-        "idle paints nothing"
-    );
-    assert!(texts(&view_of(6, 0), true).is_empty());
-}
-
-/// The rule that keeps the panel from jumping: with the capability, and outside `idle`, the
-/// block is three lines whatever the status, the language, a missing side or the transport's
-/// age; without the capability, or on `idle`, it is none, fresh or not.
-#[test]
-fn the_block_takes_three_lines_in_every_state_it_is_painted_and_none_otherwise() {
-    use tyrian_companion_nexus_core::price::PANEL_LINES;
-    assert_eq!(PANEL_LINES, 3);
-    let mut one_side = frame(2);
-    one_side["sell"] = Value::Null;
-    one_side["sellStack"] = Value::Null;
-    let mut no_stack = frame(2);
-    no_stack["listStack"] = Value::Null;
-    let mut stale_without_age = frame(5);
-    stale_without_age["age"] = Value::Null;
-    let painted = [frame(2), frame(3), frame(4), frame(5), one_side, no_stack, stale_without_age];
-    for english in [false, true] {
-        // Capability, no frame yet.
-        let waiting = subscribed();
-        let now = Instant::now();
-        assert_eq!(panel_lines(&waiting.price_view(now), english).len(), PANEL_LINES);
-        for value in &painted {
-            let state = subscribed();
-            state.accept_price(reading(value), now);
-            // Second by second across the 5 s between frames, the 15 s expiry and well past it.
-            for seconds in 0..=40 {
-                let view = state.price_view(now + Duration::from_secs(seconds));
-                let lines = panel_lines(&view, english);
-                assert_eq!(lines.len(), PANEL_LINES, "{value} +{seconds}s");
-                assert!(lines[1..].iter().all(|line| !line.warning), "{value} +{seconds}s");
-                if !view.fresh {
-                    assert!(lines[1..].iter().all(|line| line.text.ends_with(" —")), "old figures at +{seconds}s: {lines:?}");
-                }
-            }
-        }
-        // `idle` and no capability: nothing, and it stays nothing once the transport expires.
-        let idle = subscribed();
-        idle.accept_price(reading(&frame(6)), now);
-        for seconds in 0..=40 {
-            assert!(panel_lines(&idle.price_view(now + Duration::from_secs(seconds)), english).is_empty(), "idle +{seconds}s");
-        }
-        let bare = SharedState::new();
-        assert!(panel_lines(&bare.price_view(now), english).is_empty(), "no connection");
-        bare.begin_price_connection(NONCE);
-        assert!(panel_lines(&bare.price_view(now), english).is_empty(), "no capability");
-        idle.disconnect_price();
-        assert!(panel_lines(&idle.price_view(now), english).is_empty(), "disconnected");
-    }
-}
-
-#[test]
-fn a_missing_side_paints_a_dash_and_no_age_is_painted_on_ok() {
-    let mut value = frame(2);
-    value["list"] = Value::Null;
-    value["listStack"] = Value::Null;
-    let state = subscribed();
-    let now = Instant::now();
-    state.accept_price(reading(&value), now);
-    let view = state.price_view(now);
-    assert_eq!(texts(&view, false)[2].0, "Oferta —");
-    assert_eq!(texts(&view, true)[2].0, "Sell offer —");
-    for (text, _) in texts(&view, false) {
-        assert!(!text.contains("hace") && !text.contains("412"), "{text}");
-    }
-}
-
-#[test]
-fn nothing_is_painted_without_capability_and_no_figure_without_a_fresh_frame() {
-    let state = SharedState::new();
-    let now = Instant::now();
-    assert!(
-        panel_lines(&state.price_view(now), false).is_empty(),
-        "no connection"
-    );
-    state.begin_price_connection(NONCE);
-    assert!(
-        panel_lines(&state.price_view(now), false).is_empty(),
-        "no capability"
-    );
-    state.enable_price(NONCE);
-    let unread = owned(&[
-        ("Saco · precio aún sin leer", false),
-        ("Pedido —", false),
-        ("Oferta —", false),
-    ]);
-    assert_eq!(texts(&state.price_view(now), false), unread, "no frame yet");
-    state.accept_price(reading(&frame(2)), now);
-    assert_eq!(texts(&state.price_view(now), false)[1].0, "Pedido 3s 45c · ×250 8g 62s 50c");
-    assert_eq!(
-        texts(&state.price_view(now + Duration::from_secs(15)), false),
-        unread,
-        "transport of 15 s"
-    );
-}
-
-#[test]
-fn every_line_fits_34_characters_for_realistic_amounts() {
-    for index in [2, 3, 4, 5, 6] {
-        for english in [false, true] {
-            for (text, warning) in texts(&view_of(index, 0), english) {
-                // Two texts the contract fixes go past the 34 the rest keep to: its stale
-                // header, "Saco · precio caducado (hace 11 min)", is 36 characters, and its
-                // short English label "Sell offer" makes 35 with these amounts. Neither is
-                // shortened here; whether they wrap depends on the game's font.
-                let limit = if warning { 36 } else if text.starts_with("Sell offer") { 35 } else { 34 };
-                assert!(text.chars().count() <= limit, "{text}");
-            }
-        }
-    }
-    // Largest realistic amounts: 99 999 g per stack of 250.
-    let mut value = frame(2);
-    value["sell"] = json!(9_999_999);
-    value["list"] = json!(9_999_999);
-    value["sellStack"] = json!(99_999_999);
-    value["listStack"] = json!(99_999_999);
-    let state = subscribed();
-    let now = Instant::now();
-    state.accept_price(reading(&value), now);
-    for english in [false, true] {
-        for (text, _) in texts(&state.price_view(now), english) {
-            assert!(text.chars().count() <= 50, "{text}");
-        }
     }
 }
