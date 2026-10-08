@@ -37,14 +37,23 @@ item totals. It changes no frame of `live1`; a host that already accepts `curren
 needs nothing else. See "Wallet coverage" below for what a listed balance does and does not
 mean.
 
-Version 0.7.0 adds the bag price block (`price1`) to the Labyrinth panel, stops painting the
-reading-age lines while measurement is normal, and adds two icons to Nexus's quick access bar.
-See "Bag price (`price1`)", "Lines that only appear with a problem" and "Quick access icons".
+Version 0.7.0 adds the bag price block (`price1`, replaced by `price2` in 0.7.2) to the
+Labyrinth panel, stops painting the reading-age lines while measurement is normal, and adds two
+icons to Nexus's quick access bar. See "Bag price (`price2`)", "Lines that only appear with a
+problem" and "Quick access icons".
 
 Version 0.7.1 retries `live_open` every 30 s after the plugin answers `source_conflict`, so the
 inventory source recovers without a change of map. While it waits, the panel keeps saying that
 another source owns the session and the game is not read between attempts. `unsupported_build`
 and `not_gameplay` still block until the game context changes.
+
+Version 0.7.2 shows the bag price gross, as the trading post shows it, over `price2`; it needs
+a plugin that announces `price2`, and with an older one the price block does not appear. The
+rate and price blocks keep a fixed number of lines, so the panel no longer jumps: what used to
+be lines under the rate is now its colour and tooltip. The DLL no longer imports
+`SuspendThread` or `SetThreadContext`, which no code of the addon ever called. See "Bag price
+(`price2`)", "A panel that does not jump" and "Why the DLL does not import `SuspendThread` or
+`SetThreadContext`".
 
 ## What it does, and does not do
 
