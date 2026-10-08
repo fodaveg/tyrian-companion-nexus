@@ -278,6 +278,33 @@ print(sorted({d.dll.decode().lower() for d in pe.DIRECTORY_ENTRY_IMPORT}))
 "
 ```
 
+#### Why the DLL does not import `SuspendThread` or `SetThreadContext`
+
+Linking winpthread statically used to leave those two `kernel32.dll` imports in the DLL, with
+no code in the addon calling either. libstdc++ and libgcc need a handful of pthread calls
+(`pthread_once`, the thread-specific keys, mutexes, condition variables), which pulls
+`libpthread.a(libwinpthread_la-thread.o)` into the link. That member also holds
+`pthread_cancel`, the only function in the link that references the two, and Fedora builds
+winpthreads without `-ffunction-sections`: the member is a single `.text` section, so
+`--gc-sections` cannot drop the unused part. Nothing reaches `pthread_cancel`: its only caller
+is `pthread_kill`, in the same member, which nothing references.
+
+`addon/src/absent_imports.rs` defines `__imp_SuspendThread` and `__imp_SetThreadContext`
+inside the DLL, so the linker never pulls them from `libkernel32.a` and they stay out of the
+import table. The unreachable `pthread_cancel` body is still in the DLL, bound to two local
+functions that only return failure. The same file notes what that means for any future code
+that would call either function.
+
+To check, this must print nothing:
+
+```sh
+x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll \
+  | grep -E 'SuspendThread|SetThreadContext'
+```
+
+`GetThreadContext` and `ResumeThread` are still imported: the first only from that same
+`pthread_cancel`, the second also from `pthread_create`.
+
 `nexus` itself is not published on crates.io under that name — a different, unrelated,
 abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git dependency at tag
 `0.12.0` from [`Zerthox/nexus-rs`](https://github.com/Zerthox/nexus-rs), matching the version

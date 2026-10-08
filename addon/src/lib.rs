@@ -21,6 +21,8 @@
 //! no such restriction; see its own doc.
 
 #[cfg(windows)]
+mod absent_imports;
+#[cfg(windows)]
 mod client;
 #[cfg(windows)]
 mod inventory;

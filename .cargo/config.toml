@@ -5,6 +5,21 @@
 # juego. La runtime de C++ entra por arcdps-imgui-sys, que nexus arrastra y que compila
 # ImGui en C++ con mingw, aunque este addon no toque ImGui. Enlazarlas dentro de la DLL es
 # lo que la hace instalable en una máquina cualquiera, sin copiar DLL sueltas a mano.
+#
+# Enlazar winpthread estático tiene un coste que se paga en otro sitio. libstdc++ (guard.o,
+# eh_alloc.o) y libgcc (emutls.o) piden pthread_once, pthread_key_create, pthread_getspecific,
+# pthread_setspecific y las llamadas de mutex y de condición, y eso mete en el enlace
+# libpthread.a(libwinpthread_la-thread.o) entero: Fedora compila winpthreads sin
+# -ffunction-sections, el miembro es una sola sección .text y --gc-sections no puede soltar
+# la parte que nadie usa. Ahí vive pthread_cancel, la única función de todo el enlace que
+# referencia SuspendThread y SetThreadContext, y por ella la DLL las importaba de kernel32
+# sin que ningún código las llamara. No se arregla con otra opción de enlazado aquí:
+# addon/src/absent_imports.rs define __imp_SuspendThread y __imp_SetThreadContext dentro de
+# la DLL, y así el enlazador no va a buscarlas a libkernel32.a. El README trae la
+# comprobación de la tabla de importaciones.
+#
+# En el mapa del enlazador el miembro sale bajo libpthread.a y no bajo libwinpthread.a: son
+# el mismo fichero con dos nombres (un inodo) y libpthread.a llega antes en la línea.
 [target.x86_64-pc-windows-gnu]
 rustflags = [
   "-C", "link-arg=-static-libgcc",
