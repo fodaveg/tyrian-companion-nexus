@@ -19,7 +19,9 @@
 //!
 //! `support/magic_find_field_by_field.rs` is the reader of 0.8.1 (`37e48df`), which copied
 //! every field on its own. It is the oracle here: what the reader gives, a value or a reason,
-//! is compared with what that one gives over the same bytes.
+//! is compared with what that one gives over the same bytes. It is also what the budget is
+//! measured against: `how_many_buffs_fit_the_budget_…` pins the most buffs a pass fits now and
+//! the most that one fitted.
 //!
 //! The last tests are those of `magic_find_cached`, which keeps the buffs' content between
 //! passes: what makes a pass read everything, what a pass that only verifies costs, and the
@@ -511,6 +513,116 @@ fn a_pass_over_the_live_shape_asks_for_349_copies_where_it_asked_for_557() {
     // The two looks at the route take 6 copies each and the twelve slots take 7.
     let (_, reads, bytes) = pass(&mut empty(), &verified);
     assert_eq!((reads, bytes), (6 + 7 + 1 + 6, 2 * 1016 + 328 + 8));
+}
+
+/// How the buffs of a crowded table hold their content.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// All of them the same definition of one record: the least a buff can bring with it.
+    Shared,
+    /// Each a definition of its own, of one record, as half the buffs of the live shape.
+    Own,
+    /// Each a definition of its own with `MAX_MODIFIERS` records: the most the reader accepts.
+    Largest,
+}
+/// A pass over `m` as [`most_buffs`] wants it: the total, the copies and the bytes.
+type Asked = (Result<f32, Uncovered>, usize, usize);
+/// `count` buffs in a table of `capacity` buckets, held as `held`. No record is of a Magic Find
+/// type and nothing is pushed: the value is the luck level, and what a pass asks for is what
+/// the reader costs.
+fn crowded(capacity: u32, count: u32, held: Held) -> Fixture {
+    let mut m = empty_at(4, capacity, 300);
+    let shared = m.plain(&[record(5, 1.0)]);
+    for index in 0..count {
+        let definition = match held {
+            Held::Shared => shared,
+            Held::Own => m.plain(&[record(5, 1.0)]),
+            Held::Largest => m.plain(&[record(5, 1.0); MAX_MODIFIERS as usize]),
+        };
+        m.buff(2000 + index, 600 + index, definition);
+    }
+    m
+}
+/// Whether `most` is the most buffs a pass fits in `MAX_BYTES` in a table of `capacity`
+/// buckets: that many give the value, and one more is `Bounds` unless the table is full. A
+/// buff only ever adds to what a pass asks for, so those two are the whole of it. Returns what
+/// the pass over `most` asked for, with `most`: buffs, copies, bytes.
+fn most_buffs(capacity: u32, held: Held, most: u32, read: impl Fn(&mut Fixture) -> Asked) -> (u32, usize, usize) {
+    let (total, reads, bytes) = read(&mut crowded(capacity, most, held));
+    assert_eq!(total, Ok(300.0), "{capacity} buckets, {held:?}: {most} buffs do not fit");
+    if most < capacity {
+        let (one_more, ..) = read(&mut crowded(capacity, most + 1, held));
+        assert_eq!(one_more, Err(Uncovered::Bounds), "{capacity} buckets, {held:?}: {} buffs", most + 1);
+    }
+    (most, reads, bytes)
+}
+
+/// Where the Magic Find pass stops fitting its budget. In blocks a buff costs 92 bytes, its
+/// node and its instance, where field by field it cost 40; a definition costs the same either
+/// way, and the buckets are copied twice whatever they hold. So the ceiling came down, and this
+/// pins where it is and where it was: in the largest table the reader accepts and in one of
+/// 256 buckets, which is the fixture of the live shape of 8 October 2026 with its 91 buffs,
+/// and with three ways of holding content.
+///
+/// Nothing here changes the reader or its budget. A pass that does not fit is `Bounds`: no
+/// coverage for that cycle, never a part of a total.
+#[test]
+fn how_many_buffs_fit_the_budget_now_and_at_0_8_1() {
+    let verified = verified();
+    // One pass over `m` through a reader with the whole budget. On the first cycle of a build
+    // the nineteen guards come out of that budget too; on every later one they do not.
+    let asked = |m: &mut Fixture, first: bool, blocks: bool| -> Asked {
+        let mut reader = Reader::bounded(m, MAX_BYTES);
+        let outcome = if first {
+            MagicFindProfile::verified_against(&mut reader, profile(), &synthetic_guards())
+        } else {
+            Ok(verified.clone())
+        }
+        .and_then(|verified| {
+            if blocks {
+                magic_find(&mut reader, &verified, CTX)
+            } else {
+                // The reader of 0.8.1 (`37e48df`), which copied every field on its own.
+                field_by_field::magic_find(&mut reader, BASE, |key| verified.key_hash(key), CTX)
+            }
+        });
+        (outcome.map(|(value, _)| value.total), reader.reads, reader.bytes)
+    };
+    // Buckets, content, first cycle or a later one; then the most buffs that fit, with the
+    // copies and the bytes of that pass, now and at 0.8.1.
+    let ceilings = [
+        // The largest table the reader accepts.
+        (512, Held::Shared, false, (418, 867, 65_532), (512, 2105, 45_580)),
+        (512, Held::Own, false, (172, 888, 65_472), (235, 1699, 65_388)),
+        (512, Held::Largest, false, (15, 103, 63_784), (16, 166, 63_432)),
+        (512, Held::Shared, true, (352, 754, 65_514), (512, 2124, 51_634)),
+        (512, Held::Own, true, (145, 772, 65_478), (200, 1473, 65_422)),
+        (512, Held::Largest, true, (13, 112, 64_926), (14, 171, 64_678)),
+        // The table of the live shape, which held 91.
+        (256, Held::Shared, false, (256, 539, 38_340), (256, 1077, 23_052)),
+        (256, Held::Own, false, (227, 1159, 65_504), (256, 1842, 56_712)),
+        (256, Held::Largest, false, (20, 124, 63_776), (21, 197, 63_164)),
+        (256, Held::Shared, true, (256, 558, 44_394), (256, 1096, 29_106)),
+        (256, Held::Own, true, (200, 1043, 65_510), (256, 1861, 62_766)),
+        (256, Held::Largest, true, (18, 133, 64_918), (19, 202, 64_410)),
+    ];
+    for (capacity, held, first, now, before) in ceilings {
+        let measured = (
+            most_buffs(capacity, held, now.0, |m| asked(m, first, true)),
+            most_buffs(capacity, held, before.0, |m| asked(m, first, false)),
+        );
+        assert_eq!(measured, (now, before), "{capacity} buckets, {held:?}, first cycle: {first}");
+    }
+    // The first that does not fit, and the whole of the largest table: with the least content
+    // there can be its 512 buffs fitted at 0.8.1, and from the 419th they do not.
+    let shared = |count| crowded(MAX_CAPACITY, count, Held::Shared);
+    assert_eq!(asked(&mut shared(418), false, true), (Ok(300.0), 867, 65_532));
+    assert_eq!(asked(&mut shared(419), false, true).0, Err(Uncovered::Bounds));
+    assert_eq!(asked(&mut shared(MAX_CAPACITY), false, true).0, Err(Uncovered::Bounds));
+    assert_eq!(asked(&mut shared(MAX_CAPACITY), false, false), (Ok(300.0), 2105, 45_580));
+    // What a buff adds to a pass: its node and its instance, 28 and 64 bytes, where it was 40.
+    let cost = |count, blocks| asked(&mut shared(count), false, blocks).2;
+    assert_eq!((cost(101, true) - cost(100, true), cost(101, false) - cost(100, false)), (92, 40));
 }
 
 #[test]

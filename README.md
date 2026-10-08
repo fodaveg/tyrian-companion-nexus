@@ -353,6 +353,31 @@ asks for 12195. The external probe's whole passes on 8 October asked for about 1
 without the position array, which adds 4 KiB per copy for 512 positions) and 29 to 33 KiB
 (Magic Find, with 81 and 92 buffs).
 
+How many buffs a Magic Find pass fits, which is fewer than at 0.8.1. A pass copies the route
+twice and the twelve slots (2368 bytes in all), the buckets twice whatever they hold (48 bytes a
+bucket: 12288 for a table of 256, 24576 for one of 512, the largest accepted), and then, for
+each buff, its node and its instance, and once for each definition in use its head, its group
+and its records (132 bytes with one record, 2364 with the 32 that are the most accepted).
+Copying an object as one block took the node and the instance from 40 bytes to 92: fewer
+copies, 349 against 557 over the live shape, and more bytes. The most buffs that fit, on any
+cycle but the first of a build, whose 6054 bytes of guards come out of the same budget:
+
+| Buckets | Definitions | Now | First cycle | At 0.8.1 | First cycle |
+| --- | --- | --- | --- | --- | --- |
+| 512 | one for all, one record | 418 | 352 | 512 | 512 |
+| 512 | one each, one record | 172 | 145 | 235 | 200 |
+| 512 | one each, 32 records | 15 | 13 | 16 | 14 |
+| 256 | one for all, one record | 256 | 256 | 256 | 256 |
+| 256 | one each, one record | 227 | 200 | 256 | 256 |
+| 256 | one each, 32 records | 20 | 18 | 21 | 19 |
+
+One more than that is `Bounds`: no coverage for that cycle, never part of a total.
+`core/tests/magic_find.rs` pins every figure, with the reader of 0.8.1 kept there as it was.
+What is not known is which row a game session is on. The fixture of the live shape of 8
+October 2026 (91 buffs in 256 buckets, 47 definitions of one record each) asks for 29328 of
+the 65536 bytes. When the game doubles its table, how many of its buffs share a definition and
+how many records a definition carries have not been observed.
+
 Cadence is the cycle's: once per second, in this order — inventory, wallet, bags, Magic Find.
 The last two run **before** the cycle hands the inventory sample to the client, which then
 reads the game context again and seals the sample or, if the context changed meanwhile,
@@ -1169,7 +1194,9 @@ covers what does not need a running game:
   live shapes of 8 October 2026 (414 capacity and 101 free; 333.0 and 363.0), covered zeroes,
   every identity on both routes, the bag class and definition type, both pointer rules with
   valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported
-  records, stacking, the boon rule, concurrent changes, failed copies and both budgets;
+  records, stacking, the boon rule, concurrent changes, failed copies and both budgets, and
+  the most buffs a Magic Find pass fits in its budget, with the first that is `Bounds`, in
+  tables of 512 and 256 buckets and three ways of holding content, now and at 0.8.1;
 - live1 canonical wire fixtures, 512/513 cap, old-host negotiation, epochs/baselines, context
   equality, ACK isolation, source/storage failure, partial samples and bounded chunks, and
   `currencies:listed` rows: their order and chunking, a failed wallet read next to a valid
