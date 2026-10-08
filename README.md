@@ -77,6 +77,26 @@ Version 0.8.1 draws the button that removes the panel's background as the usual 
 a ring with its left half filled, instead of a square that read as "stop". Nothing else
 changes.
 
+Version 0.8.2 is the audit's round on the readers and the settings. The inventory reader
+makes fewer reads per object, and a pass now fits 482 stacks of the class that is dearest to
+read (367 before). The executable's hash is done a second at a time; if it adds up 10 seconds
+without ending, the plugin gets `read_failed` and the hash goes on until it ends. What the
+executable itself decides is no longer taken for a transient failure, and a reading that did
+fail is tried again 30 seconds later. The Magic Find reader copies each object as one block:
+349 reads against 557 over the shape measured on 8 October, but more bytes, so fewer active
+buffs fit than at 0.8.1 (the table under "Bag slots and Magic Find"; accepted by the owner on
+8 October 2026), and above the limit the pass gives no coverage. A cycle whose context
+changed (another character, another map) publishes nothing to the panel. The panel is
+computed only when it can have changed, the highest Magic Find is kept per character for the
+session, and no character in a map is no longer counted as a capture that failed. The
+settings are saved in turns and without I/O under the mutex, and Options shows the reader's
+and the panel's timing counters. The protocol with the plugin does not change and neither
+does the DLL's import table (257).
+
+Nothing of 0.8.2 has been seen inside the game. `magic_find_cached` exists and is not wired:
+the addon still calls `magic_find`. The known limit stays: a context that names one
+character while the memory belongs to another.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
