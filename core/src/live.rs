@@ -166,6 +166,8 @@ pub struct Channel {
     reason: Option<&'static str>,
     blocked: bool,
     conflict_retry: Option<Duration>,
+    /// How many epochs this channel has declared with a `live_open`. Local diagnostics only.
+    opened: u64,
     pub status: LiveStatus,
 }
 impl Channel {
@@ -178,6 +180,13 @@ impl Channel {
     }
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+    /// How many epochs this channel has opened: every `live_open` it produced. An epoch is
+    /// opened on a connection's first capture and again after whatever cut the one before (a
+    /// context or owner change, a failed capture, a partial sample), so a number that keeps
+    /// growing in steady play is the source starting over. Never sent anywhere.
+    pub fn epochs_opened(&self) -> u64 {
+        self.opened
     }
     /// Returns false only when a negotiated live error requires closing/reconnecting TCP.
     pub fn accept(&mut self, reply: Reply, nonce: &str, now: Instant) -> bool {
@@ -346,6 +355,7 @@ impl Channel {
         if self.epoch.is_none() {
             let id = crate::instance::new_instance_id();
             self.last_declared_epoch = Some(id.clone());
+            self.opened = self.opened.saturating_add(1);
             let frame =
                 json!({"type":"live_open","epoch":id,"build":BUILD_SHA256,"profile":PROFILE});
             self.epoch = Some(Epoch {

@@ -100,6 +100,15 @@ pub struct SharedState {
     /// What happened, if anything, when this load tried to open the chosen app automatically. `None`
     /// until the client loop's first connection attempt has run.
     obsidian_launch_outcome: Mutex<Option<ObsidianLaunchOutcome>>,
+    /// Bumped after every change of something the Labyrinth panel is painted from: connection
+    /// status, the `farm1` and `price2` feeds, the inventory status, the game context and the
+    /// reader's diagnostics. The panel keeps what it computed while this stands still
+    /// (`panel::PanelCache`), so a setter of any of those that did not bump it would leave the
+    /// panel a quarter of a second behind, and one added later has to bump it too.
+    panel_generation: AtomicU64,
+    /// How many inventory epochs the source has opened since the addon loaded, over all its
+    /// connections. For the reader diagnostics of the Options window; never sent.
+    live_epochs: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,15 +141,55 @@ impl SharedState {
             open_obsidian_on_start: AtomicBool::new(true),
             launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
+            panel_generation: AtomicU64::new(0),
+            live_epochs: AtomicU64::new(0),
         }
+    }
+
+    /// Epochs the inventory source has opened since the addon loaded (`live::Channel::
+    /// epochs_opened`, added up over its connections).
+    pub fn live_epochs_opened(&self) -> u64 {
+        self.live_epochs.load(Ordering::Relaxed)
+    }
+
+    /// Adds the epochs a capture opened: none, or one.
+    pub fn count_live_epochs(&self, opened: u64) {
+        self.live_epochs.fetch_add(opened, Ordering::Relaxed);
+    }
+
+    /// The number of the state the panel is painted from: it changes whenever any of it does.
+    /// Read it BEFORE reading that state: a change that lands in between is then seen as a new
+    /// number on the next look, never as an old state under the new number.
+    pub fn panel_generation(&self) -> u64 {
+        self.panel_generation.load(Ordering::Acquire)
+    }
+
+    /// Called by every setter of that state AFTER it has stored the new value, for the same
+    /// reason: whoever sees the new number then sees the new value.
+    fn touch_panel(&self) {
+        self.panel_generation.fetch_add(1, Ordering::Release);
     }
 
     /// Latest reported character/map for local QA; never a memory address.
     pub fn live_context(&self) -> Option<crate::protocol::GameContext> { lock(&self.live_context).clone() }
-    pub fn set_live_context(&self, value: crate::protocol::GameContext) { *lock(&self.live_context) = Some(value); }
+    /// The client reports the context four times a second; only a different one is a change.
+    pub fn set_live_context(&self, value: crate::protocol::GameContext) {
+        let mut context = lock(&self.live_context);
+        if context.as_ref() != Some(&value) {
+            *context = Some(value);
+            drop(context);
+            self.touch_panel();
+        }
+    }
     /// Measurement state remains separate from TCP/game presence.
     pub fn live_status(&self) -> crate::live::LiveStatus { *lock(&self.live_status) }
-    pub fn set_live_status(&self, value: crate::live::LiveStatus) { *lock(&self.live_status) = value; }
+    /// Set on every pass of the client loop as well; only a different status is a change.
+    pub fn set_live_status(&self, value: crate::live::LiveStatus) {
+        let changed = std::mem::replace(&mut *lock(&self.live_status), value) != value;
+        if changed {
+            self.touch_panel();
+        }
+    }
     /// Wait override for the `source_conflict` retry, read when a connection starts.
     pub fn live_conflict_retry(&self) -> Option<std::time::Duration> { *lock(&self.live_conflict_retry) }
     pub fn set_live_conflict_retry(&self, value: Option<std::time::Duration>) { *lock(&self.live_conflict_retry) = value; }
@@ -150,7 +199,10 @@ impl SharedState {
     /// first one. Read together, so the pair is always of one capture.
     pub fn inventory_reading(&self) -> (crate::inventory::Diagnostics, Option<Instant>) { *lock(&self.inventory_diagnostics) }
     /// `at` is when the capture ran, on the caller's monotonic clock.
-    pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics, at: Instant) { *lock(&self.inventory_diagnostics) = (value, Some(at)); }
+    pub fn set_inventory_diagnostics(&self, value: crate::inventory::Diagnostics, at: Instant) {
+        *lock(&self.inventory_diagnostics) = (value, Some(at));
+        self.touch_panel();
+    }
 
     pub fn port(&self) -> u16 {
         self.port.load(Ordering::Relaxed)
@@ -213,7 +265,9 @@ impl SharedState {
     }
 
     pub fn set_status(&self, status: Status) {
-        self.status.store(status as u8, Ordering::Relaxed);
+        if self.status.swap(status as u8, Ordering::Relaxed) != status as u8 {
+            self.touch_panel();
+        }
     }
 
     pub fn connected(&self) -> bool {
@@ -223,20 +277,26 @@ impl SharedState {
     /// Starts a capability handshake for this connection; previous readings remain stale.
     pub fn begin_farming_connection(&self, nonce: &str) {
         lock(&self.farming).begin(nonce);
+        self.touch_panel();
     }
 
     pub fn disconnect_farming(&self) {
         lock(&self.farming).disconnect();
+        self.touch_panel();
     }
 
     pub fn enable_farming(&self, nonce: &str) -> bool {
-        lock(&self.farming).enable(nonce)
+        let enabled = lock(&self.farming).enable(nonce);
+        self.touch_panel();
+        enabled
     }
 
     /// Accepts only a subscribed connection's increasing farming sequence. This deliberately
     /// never touches alert deduplication, receipts or alert history.
     pub fn accept_farming(&self, reading: FarmingState, now: Instant) -> bool {
-        lock(&self.farming).accept(reading, now)
+        let accepted = lock(&self.farming).accept(reading, now);
+        self.touch_panel();
+        accepted
     }
 
     pub fn farming_view(&self, now: Instant) -> FarmingView {
@@ -246,20 +306,26 @@ impl SharedState {
     /// Starts a `price2` handshake for this connection.
     pub fn begin_price_connection(&self, nonce: &str) {
         lock(&self.price).begin(nonce);
+        self.touch_panel();
     }
 
     /// Drops capability and figures at once.
     pub fn disconnect_price(&self) {
         lock(&self.price).disconnect();
+        self.touch_panel();
     }
 
     pub fn enable_price(&self, nonce: &str) -> bool {
-        lock(&self.price).enable(nonce)
+        let enabled = lock(&self.price).enable(nonce);
+        self.touch_panel();
+        enabled
     }
 
     /// Independent of alert deduplication and of the farming sequence.
     pub fn accept_price(&self, reading: PriceState, now: Instant) -> bool {
-        lock(&self.price).accept(reading, now)
+        let accepted = lock(&self.price).accept(reading, now);
+        self.touch_panel();
+        accepted
     }
 
     pub fn price_view(&self, now: Instant) -> PriceView {
@@ -409,6 +475,65 @@ mod tests {
         assert_eq!(state.obsidian_launch_outcome(), None);
         state.set_obsidian_launch_outcome(ObsidianLaunchOutcome::NoHandler);
         assert_eq!(state.obsidian_launch_outcome(), Some(ObsidianLaunchOutcome::NoHandler));
+    }
+
+    /// The panel keeps what it computed while this number stands still, so every setter of
+    /// something it paints has to move it, and setting what was already there must not.
+    #[test]
+    fn every_change_of_what_the_panel_paints_moves_its_generation_and_a_repeat_does_not() {
+        use crate::live::LiveStatus;
+        use crate::protocol::{parse_server_line, GameContext, GameState, ServerLine};
+        const NONCE: &str = "Zk3m1Qw9Lr0aT7yUc2Vb5g";
+        let state = SharedState::new();
+        let now = Instant::now();
+        let farming = || {
+            let line = format!(
+                r#"{{"v":3,"type":"farming_state","tag":"farm1","nonce":"{NONCE}","seq":1,"ttl":15,"phase":"active","err":null,"elapsed":1,"observed":1,"net":null,"lo":null,"hi":null,"age":0,"slots":null,"slotSrc":"unknown","slotAge":null,"goal":"none","target":null,"progress":null,"eta":null,"mf":null,"mfKind":"unknown","prep":"unknown"}}"#
+            );
+            let ServerLine::FarmingState(reading) = parse_server_line(&line) else { panic!("{line}") };
+            reading
+        };
+        let price = || {
+            let line = format!(
+                r#"{{"v":3,"type":"price_state","tag":"price2","nonce":"{NONCE}","seq":1,"ttl":15,"st":"pending","sell":null,"sellStack":null,"list":null,"listStack":null,"age":null}}"#
+            );
+            let ServerLine::PriceState(reading) = parse_server_line(&line) else { panic!("{line}") };
+            reading
+        };
+        let in_labyrinth = || GameContext { state: GameState::Gameplay, map_id: Some(866), character: Some("Astra Uno".into()) };
+        let changes: [(&str, &dyn Fn()); 14] = [
+            ("the connection status", &|| state.set_status(Status::Connected)),
+            ("a farm1 connection", &|| state.begin_farming_connection(NONCE)),
+            ("the farm1 capability", &|| assert!(state.enable_farming(NONCE))),
+            ("a farm1 frame", &|| assert!(state.accept_farming(farming(), now))),
+            ("a price connection", &|| state.begin_price_connection(NONCE)),
+            ("the price capability", &|| assert!(state.enable_price(NONCE))),
+            ("a price frame", &|| assert!(state.accept_price(price(), now))),
+            ("the inventory status", &|| state.set_live_status(LiveStatus::Measuring)),
+            ("the game context", &|| state.set_live_context(in_labyrinth())),
+            ("another game context", &|| state.set_live_context(GameContext::character_select())),
+            ("the reader's diagnostics", &|| state.set_inventory_diagnostics(crate::inventory::Diagnostics::default(), now)),
+            // The same diagnostics of a later cycle are another reading: its instant is new.
+            ("the next cycle's diagnostics", &|| state.set_inventory_diagnostics(crate::inventory::Diagnostics::default(), now)),
+            ("the farm1 disconnection", &|| state.disconnect_farming()),
+            ("the price disconnection", &|| state.disconnect_price()),
+        ];
+        for (what, change) in changes {
+            let before = state.panel_generation();
+            change();
+            assert!(state.panel_generation() > before, "{what} did not move the generation");
+        }
+        // What the client loop sets again on every pass, with nothing new.
+        let before = state.panel_generation();
+        state.set_status(Status::Connected);
+        state.set_live_status(LiveStatus::Measuring);
+        state.set_live_context(GameContext::character_select());
+        assert_eq!(state.panel_generation(), before);
+        // And what the panel is not painted from leaves it alone.
+        state.apply_settings(50000, "t", false, LaunchApp::Hebra);
+        state.push_history(&alert(Some(1)));
+        state.set_obsidian_launch_outcome(ObsidianLaunchOutcome::NoHandler);
+        assert_eq!(state.panel_generation(), before);
     }
 
     #[test]

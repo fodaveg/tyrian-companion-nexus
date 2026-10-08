@@ -93,7 +93,8 @@ fn load() {
         Ok(dir) => settings::load(&dir),
         Err(error) => {
             log::warn!("could not resolve the addon's own directory ({error}); using default settings");
-            settings::Loaded { settings: settings::Settings::default(), discarded_api_key: false }
+            // No directory, so nothing can be saved either: there is no file to protect.
+            settings::Loaded { settings: settings::Settings::default(), discarded_api_key: false, unreadable: false }
         }
     };
     let settings = loaded.settings;
@@ -107,7 +108,7 @@ fn load() {
     } else {
         None
     };
-    render::init_pending(&settings, notice);
+    render::init_pending(&settings, notice, loaded.unreadable);
 
     register_render(
         RenderType::OptionsRender,
@@ -143,6 +144,9 @@ fn unload() {
     if let Some(handle) = handle {
         handle.stop();
     }
+    // The worker has ended: if it left the executable half hashed, its file and its hash
+    // object are closed here, as nothing drops a static when the DLL goes.
+    inventory::release_executable();
 }
 
 /// Watches the game window's messages for the one thing this addon needs from them: that the

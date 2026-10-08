@@ -111,6 +111,10 @@ struct Case {
     farming: FarmingView,
     price: PriceView,
     live: LiveStatus,
+    /// The reported game context is gameplay. False at character select and on a loading screen.
+    character_in_map: bool,
+    /// The character that context names, if it names one.
+    character: Option<String>,
     wallet: WalletCoverage,
     bags: BagCoverage,
     magic_find: MagicFindCoverage,
@@ -127,6 +131,8 @@ impl Case {
             farming: farming(Some(&farming_frame()), Duration::ZERO),
             price: price(Some(&price_frame("ok")), Duration::ZERO),
             live: LiveStatus::Measuring,
+            character_in_map: true,
+            character: Some("Astra Uno".to_string()),
             wallet: WalletCoverage::Listed(55),
             bags: BagCoverage::NotRead,
             magic_find: MagicFindCoverage::NotRead,
@@ -148,22 +154,25 @@ impl Case {
         self.with_frame(farming_frame(), change)
     }
 
+    /// What the addon hands the panel for this case.
+    fn input(&self) -> PanelInput<'_> {
+        PanelInput {
+            now: self.now,
+            read_at: self.read_at,
+            connection: self.connection,
+            farming: &self.farming,
+            price: &self.price,
+            live: self.live,
+            character_in_map: self.character_in_map,
+            character: self.character.as_deref(),
+            wallet: self.wallet,
+            bags: self.bags,
+            magic_find: self.magic_find,
+        }
+    }
+
     fn view_with(&self, memory: &mut PanelMemory, english: bool) -> PanelView {
-        panel::view(
-            &PanelInput {
-                now: self.now,
-                read_at: self.read_at,
-                connection: self.connection,
-                farming: &self.farming,
-                price: &self.price,
-                live: self.live,
-                wallet: self.wallet,
-                bags: self.bags,
-                magic_find: self.magic_find,
-            },
-            memory,
-            english,
-        )
+        panel::view(&self.input(), memory, english)
     }
 
     fn view(&self, english: bool) -> PanelView {
@@ -428,20 +437,7 @@ fn a_session_that_starts_while_the_panel_is_closed_does_not_inherit_the_highest(
         panel.case.now = panel.start + Duration::from_secs(seconds);
         panel.case.read_at = Some(panel.case.now);
         panel.case.magic_find = verified(300, 30.0, 3.0);
-        panel::observe(
-            &PanelInput {
-                now: panel.case.now,
-                read_at: panel.case.read_at,
-                connection: panel.case.connection,
-                farming: &panel.case.farming,
-                price: &panel.case.price,
-                live: panel.case.live,
-                wallet: panel.case.wallet,
-                bags: panel.case.bags,
-                magic_find: panel.case.magic_find,
-            },
-            &mut panel.memory,
-        );
+        panel::observe(&panel.case.input(), &mut panel.memory);
     };
     observe(&mut panel, 5, session("complete", 105));
     observe(&mut panel, 10, session("active", 2));
@@ -499,6 +495,211 @@ fn another_session_is_noticed_without_a_starting_frame() {
     assert_eq!(panel.memory.magic_find_peak(), None);
     panel.case.connection = Status::Connected;
     assert_eq!(panel.at(10, bags(41, 160), verified(300, 30.0, 3.0)).magic_find.tone, Tone::Normal);
+}
+
+/// The reader's output stays `Read` until another cycle replaces it, so in the first frame of a
+/// session it can still be a reading of up to five seconds before: of the game as it was then,
+/// not of this session. It is painted, as the last thing the reader verified, and it is not the
+/// session's highest.
+#[test]
+fn a_reading_from_before_the_session_does_not_become_its_highest() {
+    for before in ["complete", "idle", "starting"] {
+        let mut panel = Follow::new(Case::sketch());
+        panel.case.farming = session(before, 0);
+        panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+        assert_eq!(panel.memory.magic_find_peak(), None, "{before}: no session measuring yet");
+        // The session measures from here. The frame that says so comes four seconds later, and
+        // the plugin has been slow: no cycle has run since, the diagnostics still say `Read`.
+        panel.case.farming = session("active", 2);
+        panel.case.now = panel.start + Duration::from_secs(4);
+        let first = panel.case.view_with(&mut panel.memory, false).magic_find;
+        assert_eq!(first.text, "MF: 383%", "{before}: {first:?}");
+        assert!(has(&first, "Última lectura hace 4 s"), "{before}: {first:?}");
+        assert_eq!(panel.memory.magic_find_peak(), None, "{before}: read before the session measured");
+        // The next cycle is the session's first reading, and so its highest: no fall from a 383
+        // the session never had.
+        let next = panel.at(5, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+        assert_eq!((next.text.as_str(), next.tone), ("MF: 333%", Tone::Normal), "{before}: {next:?}");
+        assert!(!has(&next, "Bajó") && !has(&next, "383"), "{before}: {next:?}");
+        assert_eq!(panel.memory.magic_find_peak(), Some(333.0), "{before}");
+    }
+}
+
+/// Another character is another baseline: its Magic Find is not a fall from the highest of the
+/// one before, in the same session. Going through character select and coming back with the
+/// same character is not a change.
+#[test]
+fn another_character_does_not_inherit_the_highest() {
+    let character_select = |panel: &mut Follow, seconds: u64| {
+        panel.case.character = None;
+        panel.case.character_in_map = false;
+        panel.case.live = LiveStatus::Unavailable;
+        panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead)
+    };
+    let enters = |panel: &mut Follow, name: &str| {
+        panel.case.character = Some(name.to_string());
+        panel.case.character_in_map = true;
+        panel.case.live = LiveStatus::Measuring;
+    };
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // To character select and back with the same character: the highest is still the session's.
+    character_select(&mut panel, 10);
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0), "nobody named is not somebody else");
+    enters(&mut panel, "Astra Uno");
+    let same = panel.at(30, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!(same.tone, Tone::Warning, "{same:?}");
+    assert!(has(&same, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{same:?}");
+    // Another character, in the same session: 333 is its first reading, not a fall.
+    character_select(&mut panel, 40);
+    enters(&mut panel, "Bruma Dos");
+    let other = panel.at(60, bags(12, 80), verified(300, 30.0, 3.0));
+    assert_eq!((other.magic_find.text.as_str(), other.magic_find.tone), ("MF: 333%", Tone::Normal), "{:?}", other.magic_find);
+    assert!(!has(&other.magic_find, "Bajó") && !has(&other.magic_find, "383"), "{:?}", other.magic_find);
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
+    // And from there it is followed as any other: a fall from its own highest warns.
+    let fell = panel.at(61, bags(12, 80), verified(300, 0.0, 3.0)).magic_find;
+    assert_eq!(fell.tone, Tone::Warning, "{fell:?}");
+    assert!(has(&fell, "Bajó 30 puntos respecto al máximo de la sesión (333%)"), "{fell:?}");
+}
+
+/// What the two helpers below do to a followed panel: go to character select, and come into a
+/// map with a character.
+fn to_character_select(panel: &mut Follow, seconds: u64) {
+    panel.case.character = None;
+    panel.case.character_in_map = false;
+    panel.case.live = LiveStatus::Unavailable;
+    panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+}
+
+fn enter_with(panel: &mut Follow, name: &str) {
+    panel.case.character = Some(name.to_string());
+    panel.case.character_in_map = true;
+    panel.case.live = LiveStatus::Measuring;
+}
+
+/// The highest is kept per character for the length of the session: switching to another one
+/// and back does not start the first one over, and neither one's highest is the other's.
+#[test]
+fn coming_back_to_a_character_finds_its_own_highest() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // B reaches higher than A ever did.
+    to_character_select(&mut panel, 10);
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(20, bags(12, 80), verified(300, 30.0, 70.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(400.0));
+    // Back to A with its food gone: a fall from A's own 383, not from B's 400, and not a
+    // first reading either.
+    to_character_select(&mut panel, 30);
+    enter_with(&mut panel, "Astra Uno");
+    let back = panel.at(40, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((back.text.as_str(), back.tone), ("MF: 333%", Tone::Warning), "{back:?}");
+    assert!(has(&back, "Bajó 50 puntos respecto al máximo de la sesión (383%)") && !has(&back, "400"), "{back:?}");
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // A goes higher than before: that is its highest from here on.
+    panel.at(41, bags(41, 160), verified(300, 30.0, 60.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(390.0));
+    // And B's is still B's.
+    to_character_select(&mut panel, 50);
+    enter_with(&mut panel, "Bruma Dos");
+    let other = panel.at(60, bags(12, 80), verified(300, 30.0, 53.0)).magic_find;
+    assert_eq!(other.tone, Tone::Warning, "{other:?}");
+    assert!(has(&other, "Bajó 17 puntos respecto al máximo de la sesión (400%)"), "{other:?}");
+    // Straight from one to the other, with no frame at character select in between.
+    enter_with(&mut panel, "Astra Uno");
+    let direct = panel.at(70, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert!(has(&direct, "Bajó 57 puntos respecto al máximo de la sesión (390%)"), "{direct:?}");
+}
+
+/// What is kept per character is the session's. Another session starts every character over.
+#[test]
+fn another_session_forgets_the_highest_of_every_character() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 100);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    to_character_select(&mut panel, 10);
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(20, bags(12, 80), verified(300, 30.0, 70.0));
+    // The session ends and another one starts, on B.
+    panel.case.farming = session("complete", 125);
+    panel.at(25, bags(12, 80), verified(300, 30.0, 70.0));
+    panel.case.farming = session("active", 2);
+    let fresh = panel.at(30, bags(12, 80), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((fresh.text.as_str(), fresh.tone), ("MF: 333%", Tone::Normal), "{fresh:?}");
+    // And back on A, in the new session: nothing of the one before.
+    to_character_select(&mut panel, 40);
+    enter_with(&mut panel, "Astra Uno");
+    let back = panel.at(50, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((back.text.as_str(), back.tone), ("MF: 333%", Tone::Normal), "{back:?}");
+    assert!(!has(&back, "Bajó"), "{back:?}");
+    // A lost connection ends what is known of the session too.
+    panel.at(51, bags(41, 160), verified(300, 30.0, 53.0));
+    to_character_select(&mut panel, 60);
+    panel.case.connection = Status::WaitingForPlugin;
+    panel.at(61, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    panel.case.connection = Status::Connected;
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(70, bags(12, 80), verified(300, 30.0, 3.0));
+    to_character_select(&mut panel, 80);
+    enter_with(&mut panel, "Astra Uno");
+    let after = panel.at(90, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!(after.tone, Tone::Normal, "{after:?}");
+}
+
+/// The highest of at most `panel::CHARACTER_PEAKS` characters is kept, which is more than an
+/// account has. Past that the one not played for longest goes, and starts over if it comes back.
+#[test]
+fn the_highest_is_kept_for_a_bounded_number_of_characters() {
+    assert_eq!(panel::CHARACTER_PEAKS, 80);
+    let mut panel = Follow::new(Case::sketch());
+    // Eighty-two characters in a row, each reaching 383.
+    for (index, second) in (0..=81u64).zip((0..).step_by(10)) {
+        enter_with(&mut panel, &format!("Personaje {index}"));
+        panel.at(second, bags(41, 160), verified(300, 30.0, 53.0));
+        assert_eq!(panel.memory.magic_find_peak(), Some(383.0), "{index}");
+    }
+    let low = |panel: &mut Follow, index: u64, second: u64| {
+        enter_with(panel, &format!("Personaje {index}"));
+        panel.at(second, bags(41, 160), verified(300, 30.0, 3.0)).magic_find
+    };
+    // The first one played went when the eighty-first before the last was put away: it
+    // starts over.
+    let first = low(&mut panel, 0, 1_000);
+    assert_eq!((first.text.as_str(), first.tone), ("MF: 333%", Tone::Normal), "{first:?}");
+    // One played after it is still there.
+    let kept = low(&mut panel, 2, 1_010);
+    assert_eq!(kept.tone, Tone::Warning, "{kept:?}");
+    assert!(has(&kept, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{kept:?}");
+    // And the most recent ones, of course.
+    assert_eq!(low(&mut panel, 81, 1_020).tone, Tone::Warning);
+    assert_eq!(low(&mut panel, 80, 1_030).tone, Tone::Warning);
+}
+
+/// The frame in which the new character is first named can come before the reader's first
+/// cycle on it: the reader's output is then still the last reading of the character before.
+/// It is neither painted as this one's nor taken as its highest.
+#[test]
+fn a_reading_of_the_character_before_is_not_this_ones() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    // Three seconds later the context names another character, and no cycle has run since.
+    panel.case.character = Some("Bruma Dos".to_string());
+    panel.case.now = panel.start + Duration::from_secs(3);
+    let stale = panel.case.view_with(&mut panel.memory, false);
+    assert_eq!((stale.slots.text.as_str(), stale.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"), "the plugin's, not the other character's");
+    assert!(!has(&stale.slots, "verificado por el addon") && !has(&stale.magic_find, "verificado por el addon"));
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    // Still the same output a frame later: it does not come back.
+    panel.case.now = panel.start + Duration::from_millis(3_250);
+    assert_eq!(panel.case.view_with(&mut panel.memory, false).magic_find.text, "MF: 333% parcial");
+    assert_eq!(panel.memory.magic_find_peak(), None);
+    // The first cycle on the new character is its reading, and its highest.
+    let read = panel.at(4, bags(12, 80), verified(300, 30.0, 3.0));
+    assert_eq!((read.slots.text.as_str(), read.magic_find.text.as_str(), read.magic_find.tone), ("Huecos: 12 libres", "MF: 333%", Tone::Normal));
+    assert_eq!(panel.memory.magic_find_peak(), Some(333.0));
 }
 
 /// The highest is the session's while it measures: a reading after it is complete is compared
@@ -773,6 +974,55 @@ fn one_failed_wallet_read_does_not_blink_the_status_either() {
     let mut never = Follow::new(Case::sketch());
     never.case.wallet = WalletCoverage::Unavailable(WalletError::Guard);
     assert_eq!(never.at(0, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Warning);
+}
+
+/// At character select and on a loading screen the source is `Unavailable` too, but no capture
+/// failed: there is no character in a map to read, and the panel says that instead. The hold
+/// and the colours are the ones of any second without a capture.
+#[test]
+fn without_a_character_in_a_map_the_panel_does_not_say_that_a_capture_failed() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(8, 160), verified(300, 30.0, 53.0));
+    let before = panel.at(1, bags(8, 160), verified(300, 30.0, 3.0));
+    // What the client leaves when the context stops being gameplay.
+    panel.case.live = LiveStatus::Unavailable;
+    panel.case.character_in_map = false;
+    let during = panel.at(2, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((during.status_dot, during.status.text.as_str(), during.status.tone), (Tone::Good, "Midiendo", Tone::Normal), "{:?}", during.status);
+    assert!(has(&during.status, "No hay personaje en un mapa (selección de personaje o pantalla de carga)"), "{:?}", during.status);
+    assert!(has(&during.status, "Inventario: lectura no disponible") && !has(&during.status, "captura falló"), "{:?}", during.status);
+    for (held, was) in [(&during.slots, &before.slots), (&during.magic_find, &before.magic_find)] {
+        assert_eq!((held.text.as_str(), held.tone), (was.text.as_str(), was.tone), "{held:?}");
+        assert!(has(held, "Última lectura hace 1 s") && has(held, "Lectura del addon: no hay personaje en un mapa"), "{held:?}");
+        assert!(!has(held, "captura falló") && !has(held, "sin muestreo"), "{held:?}");
+    }
+    // A long stay at character select: the source cannot measure while the session needs it,
+    // as before, and what the tooltips give as the reason is still the true one.
+    let lasting = panel.at(8, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((lasting.status_dot, lasting.status.text.as_str(), lasting.status.tone), (Tone::Warning, "Midiendo", Tone::Warning));
+    assert!(has(&lasting.status, "No hay personaje en un mapa") && !has(&lasting.status, "captura falló"), "{:?}", lasting.status);
+    assert_eq!((lasting.slots.text.as_str(), lasting.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    for cell in [&lasting.slots, &lasting.magic_find] {
+        assert!(has(cell, "Lectura del addon: no hay personaje en un mapa") && !has(cell, "captura falló") && !has(cell, "Última lectura hace"), "{cell:?}");
+    }
+    let english = panel.case.view_with(&mut panel.memory, true);
+    assert!(has(&english.status, "No character in a map (character select or loading screen)") && !has(&english.status, "capture failed"), "{:?}", english.status);
+    assert!(has(&english.slots, "Addon reading: no character in a map"), "{:?}", english.slots);
+    // Back in a map, a capture that fails is still called that.
+    panel.case.character_in_map = true;
+    let failed = panel.at(9, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert!(has(&failed.status, "La última captura falló") && !has(&failed.status, "No hay personaje"), "{:?}", failed.status);
+    assert!(has(&failed.magic_find, "Lectura del addon: la última captura falló"), "{:?}", failed.magic_find);
+    // And while the reader samples, or has stopped, where the character is changes nothing.
+    for (connection, live) in [(Status::Connected, LiveStatus::Measuring), (Status::Connected, LiveStatus::Conflict), (Status::WaitingForPlugin, LiveStatus::Unavailable)] {
+        let mut case = Case::sketch();
+        case.connection = connection;
+        case.live = live;
+        case.bags = bags(41, 160);
+        let with = case.view(false);
+        case.character_in_map = false;
+        assert_eq!(case.view(false), with, "{connection:?} {live:?}");
+    }
 }
 
 /// One panel followed over time: the same memory, a clock that the test moves, and whatever
@@ -1494,6 +1744,9 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },
                                 live: if local == 0 { LiveStatus::Measuring } else { LiveStatus::Unavailable },
+                                // With and without a character in a map, across the states.
+                                character_in_map: index % 2 == 0,
+                                character: (index % 2 == 0).then(|| "Astra Uno".to_string()),
                                 wallet: WalletCoverage::Listed(55),
                                 bags: match read { 0 => BagCoverage::NotRead, 1 => bags(2, 160), _ => BagCoverage::Unavailable(Uncovered::Changed) },
                                 magic_find: match read { 0 => MagicFindCoverage::NotRead, 1 => verified(300, 30.5, 3.0), _ => MagicFindCoverage::Unavailable(Uncovered::Unsupported) },

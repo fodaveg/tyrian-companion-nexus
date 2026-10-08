@@ -26,6 +26,17 @@ struct FakeHost {
     capture_started: Arc<AtomicBool>,
     /// What the wallet read of the next capture yields; `None` is a failed or absent read.
     wallet: Arc<Mutex<Option<WalletSnapshot>>>,
+    /// How many more times the source is not ready to sample: the adapter still verifying the
+    /// game's executable, a slice at a time.
+    pending: Arc<AtomicU32>,
+    /// How many times the loop asked whether it is ready.
+    prepared: Arc<AtomicU32>,
+    /// What the verification comes to once it is done: `None` is a source that samples.
+    verdict: Arc<Mutex<Option<ReadError>>>,
+    /// The slice of pending work does not end until it is interrupted.
+    block_prepare: Arc<AtomicBool>,
+    /// The game window is closing.
+    exiting: Arc<AtomicBool>,
 }
 impl FakeHost {
     fn new() -> Self {
@@ -37,6 +48,11 @@ impl FakeHost {
             block_capture: Arc::new(AtomicBool::new(false)),
             capture_started: Arc::new(AtomicBool::new(false)),
             wallet: Arc::new(Mutex::new(None)),
+            pending: Arc::new(AtomicU32::new(0)),
+            prepared: Arc::new(AtomicU32::new(0)),
+            verdict: Arc::new(Mutex::new(None)),
+            block_prepare: Arc::new(AtomicBool::new(false)),
+            exiting: Arc::new(AtomicBool::new(false)),
             game: Arc::new(Mutex::new(GameReading {
                 is_gameplay: Some(true),
                 mumble: Some(MumbleSnapshot {
@@ -56,9 +72,30 @@ impl Host for FakeHost {
     fn read_game(&self) -> GameReading {
         self.game.lock().unwrap().clone()
     }
+    fn prepare_inventory(&self, _stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
+        self.prepared.fetch_add(1, Ordering::Relaxed);
+        // A slice that would go on for as long as it is let: only being interrupted ends it.
+        if self.block_prepare.load(Ordering::Relaxed) {
+            while !interrupted() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return false;
+        }
+        // One slice of the work that is left, as the adapter does on each call.
+        self.pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1)).is_err()
+    }
     fn read_inventory(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.capture_started.store(true, Ordering::Relaxed);
+        // What the adapter answers to a sample asked for while its verdict is pending: it does
+        // its slice and has no sample. That answer is a failed reading to whoever takes it for
+        // one, which is why the loop asks `prepare_inventory` first.
+        if self.pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1)).is_ok() {
+            return Err(ReadError::ReadFailed);
+        }
+        if let Some(error) = *self.verdict.lock().unwrap() {
+            return Err(error);
+        }
         if self.block_capture.load(Ordering::Relaxed) {
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(5));
@@ -81,7 +118,7 @@ impl Host for FakeHost {
         })
     }
     fn game_exiting(&self) -> bool {
-        false
+        self.exiting.load(Ordering::Relaxed)
     }
     fn open_app(&self, _: LaunchApp) -> ObsidianLaunchOutcome {
         ObsidianLaunchOutcome::Launched
@@ -150,6 +187,23 @@ impl Peer {
         let v = self.next();
         assert_eq!(v["type"], "live_open");
         v["epoch"].as_str().unwrap().into()
+    }
+    /// Every line on the wire up to and including the first that is not a heartbeat.
+    fn through_first_other(&mut self) -> Vec<Value> {
+        let mut wire = Vec::new();
+        loop {
+            wire.push(self.sequenced());
+            if wire.last().is_some_and(|line| line["type"] != "heartbeat") {
+                return wire;
+            }
+        }
+    }
+    /// The next `count` lines, which must all be heartbeats: nothing else is being said.
+    fn only_heartbeats(&mut self, count: usize) {
+        for _ in 0..count {
+            let line = self.sequenced();
+            assert_eq!(line["type"], "heartbeat", "{line}");
+        }
     }
     fn ready(&mut self, epoch: &str) {
         self.send(json!({"v":3,"type":"live_ready","nonce":self.nonce,"tag":"live1","epoch":epoch,"status":"ready"}));
@@ -229,6 +283,117 @@ fn real_worker_negotiates_zero_two_four_waits_for_ack_and_interleaves_alert_ack(
     p.ack(&epoch, 2, "stored");
     handle.stop();
 }
+/// Before its first sample the adapter verifies the game's executable, a slice of its hash on
+/// each pass. That is not a reading that failed: while it is under way the loop takes no sample
+/// and the plugin is told nothing, where a `live_status` would open a gap in the session that
+/// reads "the reader could not complete the sample" on every load. Then the source opens as it
+/// always did.
+#[test]
+fn a_pending_verdict_says_nothing_on_the_wire_and_then_the_source_opens_as_always() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    host.pending.store(3, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let wire = p.through_first_other();
+    let (open, before) = wire.split_last().unwrap();
+    assert!(before.iter().all(|line| line["type"] == "heartbeat"), "{wire:?}");
+    assert_eq!(open["type"], "live_open", "{wire:?}");
+    // Asked three times and told "not yet", and not once asked for a sample meanwhile.
+    assert_eq!(host.pending.load(Ordering::Relaxed), 0);
+    assert_eq!(host.prepared.load(Ordering::Relaxed), 4);
+    assert_eq!(host.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(state.live_epochs_opened(), 1);
+    // The baseline of that epoch: cursor 0, as on any other load.
+    let epoch = open["epoch"].as_str().unwrap().to_string();
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    p.ack(&epoch, 0, "stored");
+    handle.stop();
+}
+
+/// The verification ends in "another build": that is said once, as it always was, and only
+/// when it is known.
+#[test]
+fn a_pending_verdict_that_ends_in_another_build_says_unsupported_build_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    host.pending.store(3, Ordering::Relaxed);
+    *host.verdict.lock().unwrap() = Some(ReadError::UnsupportedBuild);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let wire = p.through_first_other();
+    let (status, before) = wire.split_last().unwrap();
+    assert!(before.iter().all(|line| line["type"] == "heartbeat"), "{wire:?}");
+    assert_eq!(
+        (status["type"].as_str(), status["status"].as_str(), status["reason"].as_str(), &status["epoch"]),
+        (Some("live_status"), Some("unavailable"), Some("unsupported_build"), &Value::Null),
+        "{wire:?}"
+    );
+    assert_eq!((host.pending.load(Ordering::Relaxed), host.calls.load(Ordering::Relaxed)), (0, 1));
+    // Once: the source is stopped, and is not asked again.
+    p.only_heartbeats(6);
+    assert_eq!(host.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(state.live_epochs_opened(), 0);
+    handle.stop();
+}
+
+/// The verification ends in a failure of the system, the file that cannot be read: that one is
+/// a reading that failed, and it is said when it happens, not while the hash was under way.
+#[test]
+fn a_pending_verdict_that_ends_in_a_system_failure_says_read_failed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    host.pending.store(3, Ordering::Relaxed);
+    *host.verdict.lock().unwrap() = Some(ReadError::ReadFailed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let wire = p.through_first_other();
+    let (status, before) = wire.split_last().unwrap();
+    assert!(before.iter().all(|line| line["type"] == "heartbeat"), "{wire:?}");
+    assert_eq!(
+        (status["type"].as_str(), status["status"].as_str(), status["reason"].as_str()),
+        (Some("live_status"), Some("unavailable"), Some("read_failed")),
+        "{wire:?}"
+    );
+    // It came from the one sample asked for after the verification was over.
+    assert_eq!((host.pending.load(Ordering::Relaxed), host.prepared.load(Ordering::Relaxed), host.calls.load(Ordering::Relaxed)), (0, 4, 1));
+    // Said once; the source goes on trying, a second apart, and has nothing new to say.
+    p.only_heartbeats(6);
+    assert_eq!(state.live_epochs_opened(), 0);
+    handle.stop();
+}
+
+/// A slice of the pending work lasts a second in the adapter. Told to stop, the worker cut it
+/// at once; with the game closing it did not, and the `bye` waited for the slice to run out.
+/// The slice here never runs out by itself: only being interrupted ends it.
+#[test]
+fn a_slice_of_pending_work_is_cut_short_when_the_game_is_closing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    host.block_prepare.store(true, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    // The worker is inside the slice.
+    let waiting = std::time::Instant::now();
+    while host.prepared.load(Ordering::Relaxed) == 0 {
+        assert!(waiting.elapsed() < Duration::from_secs(5), "the source was never asked to prepare");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let closing = std::time::Instant::now();
+    host.exiting.store(true, Ordering::Relaxed);
+    let bye = p.next();
+    assert_eq!((bye["type"].as_str(), bye["reason"].as_str()), (Some("bye"), Some("game_exit")), "{bye}");
+    assert!(closing.elapsed() < Duration::from_secs(1), "the bye took {:?}", closing.elapsed());
+    // Nothing was sampled and nothing said about the source on the way out.
+    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
+    handle.stop();
+}
+
 #[test]
 fn real_worker_lists_wallet_rows_and_a_lost_wallet_keeps_the_item_sample_epoch_and_status() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -295,14 +460,18 @@ fn v2_welcome_even_with_v3_capability_never_reads_inventory() {
 #[test]
 fn reconnect_uses_new_nonce_epoch_and_baseline_without_replaying_prior_increase() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (host, _state, handle) = start(&listener);
+    let (host, state, handle) = start(&listener);
+    assert_eq!(state.live_epochs_opened(), 0);
     let mut p = Peer::new(listener.accept().unwrap().0);
     p.auth(3, true);
     p.next();
     let first = p.open();
+    // Counted for the Options window before the `live_open` is written, and only there.
+    assert_eq!(state.live_epochs_opened(), 1);
     p.ready(&first);
     p.sample(&first, 0, 0);
     p.ack(&first, 0, "stored");
+    assert_eq!(state.live_epochs_opened(), 1, "a sample of the same epoch opens none");
     drop(p);
     host.quantity.store(9, Ordering::Relaxed);
     let mut p = Peer::new(listener.accept().unwrap().0);
@@ -310,6 +479,7 @@ fn reconnect_uses_new_nonce_epoch_and_baseline_without_replaying_prior_increase(
     assert_eq!(p.next()["type"], "context");
     let second = p.open();
     assert_ne!(first, second);
+    assert_eq!(state.live_epochs_opened(), 2, "added up over the connections of one load");
     p.ready(&second);
     p.sample(&second, 0, 9);
     p.ack(&second, 0, "stored");

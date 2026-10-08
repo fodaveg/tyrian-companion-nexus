@@ -123,6 +123,47 @@ No session pointer or PID is hardcoded. The currently certified executable is
 `27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c`, profile
 `owned-bags-v3`. All other builds are unavailable until separately certified.
 
+That verification starts on the first cycle and its answer is kept for the whole load only
+when it is final, which is whenever the file or its loaded image decides it: the certified
+build, or another one, by a size that cannot be the certified build's (no bytes, or more than
+128 MiB), a hash that was computed and is not its, or a header in memory that is not its. A
+"no" of those is `unsupported_build` to the host and stops the source, as it always did.
+
+The hash is done a second at a time (`executable::SLICE`), once on each pass of the thread
+that keeps the connection to the plugin alive, going on from where the pass before left it,
+with the same calls to the system's SHA-256. It used to be done in one go, with 10 seconds
+for it, on that thread: on a cold, slow disk it sent no heartbeat for as long as the hash
+took, and the plugin takes the connection for lost after 15 seconds without one. Now a pass
+of that thread is at most the second of the slice, the one read of the file that was under
+way when it ran out, and the quarter of a second it waits on its socket: about a second and
+a quarter between two chances to send a heartbeat, and the slice is cut short at once when
+the worker is told to stop or the game is closing.
+
+The hash has no time limit of its own, and nothing shows how far it has got. For as long as
+it takes, the source stays in "waiting for confirmation", nothing of the game is read and
+there is no sample. It ends in a verdict, or in a failure of the system if the file stops
+being readable; being slow never ends it. On a disk slow enough, that is a source that goes
+on waiting with nothing on screen that says why.
+
+**While that verdict is pending the addon says nothing about it to the plugin.** It is not a
+reading that failed: the source is not ready to sample yet (`Host::prepare_inventory`), so the
+loop takes no sample, opens no epoch and sends no `live_status`, exactly as when it is not
+time to sample. A `live_status` would open a gap in the plugin's session on every load, and
+`docs/SPEC-live-loot.md` asks for nothing between `live_cap` and the first `live_open`: the
+plugin only starts expecting samples once it has answered a `live_open` with `ready`. On the
+wire there are heartbeats and then the `live_open` and its baseline, as on any load; the first
+sample comes those few seconds later than when the hash ran in one go. Meanwhile Options and
+the panel's status tooltip say "Inventory: waiting for confirmation", the state the source is
+in before its first capture.
+
+What the system fails to do is not a verdict: the file cannot be opened or read, it is
+written while it is hashed, or a copy of the header fails. That used to be kept as
+"unsupported game build" until the addon was loaded again. That one is a reading that
+failed, said as `read_failed` when it happens, and tried again 30 seconds later, from the
+start if it happened during the hash and without hashing again if the file was already known
+to be the certified build's. Which builds are accepted, and the hash they are told by, are
+unchanged.
+
 Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
 including coherence rechecks and TEB discovery. The Windows adapter also checks a
 750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 128 own threads
@@ -302,6 +343,8 @@ does widen the window in which a context change discards that copy. To bound it 
 deadline of their own: 250 ms from the moment they start, and never past the cycle's 750 ms.
 A pass cut by that clock is no coverage with the reason "deadline", distinct from a failed
 copy. Neither the 250 ms nor the real duration of a pass has been measured in a running game.
+The reader diagnostics of Options show how long each pass takes, last and longest, so that a
+session in the game can say.
 Reading them after the sample is sealed would remove that effect altogether; it needs a second
 call from the client loop and is not done here.
 
@@ -328,7 +371,8 @@ This is a two-crate Cargo workspace, and that split is deliberate:
   `context`, `heartbeat` and `bye` exactly as the plugin validates them, reading `welcome`,
   `alert`, `error` and the optional `farm1` capability/state), the client loop itself (`client.rs`: connect, authenticate, report,
   reconnect), reading the game context out of the Mumble Link bytes, the `\n` line framer,
-  the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table, settings persistence, and
+  the `[250, 500, 1000, 2000, 5000]` ms reconnect backoff table (see "Reconnecting" for which
+  wait comes when), settings persistence, and
   shared in-memory state, the safe inventory and wallet interpreters and negotiated live1 producer. No dependency on `nexus` or `windows`: the loop reaches the game
   only through a `Host` trait. This is what `cargo test` exercises, and it builds and tests on
   any host, this repository's Linux dev machine included.
@@ -623,6 +667,39 @@ token below, which only take effect after **Save**:
 Changes take effect on the addon's next connection attempt, right away if the plugin had
 rejected the previous token; they do not tear down a connection that is already up.
 
+`settings.json` is replaced whole or not at all: the new contents are written next to it, in
+`settings.json.tmp`, and renamed over it, so a write cut short (the game killed, a full disk)
+leaves the file of before instead of half of a new one. It is not flushed to the disk before
+the rename, so this does not cover a power cut.
+
+A save is asked for on one of two threads: the frame's, for everything clicked in a window,
+and Nexus's input thread, for a quick access icon or its key. The settings are read under
+their lock and the file is written after that lock is let go, so neither thread waits for
+the other's disk on it. Each save takes a number while it still holds the lock; one that
+reaches the file after a newer one writes nothing, and only one writes at a time, so two of
+them never share `settings.json.tmp`. A click in a window still writes the file on the frame
+of that click.
+
+A save that fails used to go to the log and nowhere else, and the window looked as it does
+after one that worked. Options now says so in red above the port, in English and Spanish,
+until the newest settings are on disk: the file is as it was before, what was changed is in
+use until the game closes, and **Save** tries again. The settings the disk refused are kept,
+and the next save that gets through writes the newest there are, its own or those: an older
+save that crossed a newer one that failed neither puts its own settings on disk nor turns
+the notice off. And if the game dies between the write of
+`settings.json.tmp` and its rename, that file stays behind with the token in it: it is
+removed, without being read, the next time the addon loads its settings, before anything can
+save.
+
+If the file is there and cannot be loaded, because it cannot be read or does not parse, the
+addon runs on the default settings, leaves the file as it is and **saves nothing by itself**:
+the checkboxes, the buttons of the panel's bar and the quick access icon still work for that
+load, but they are not written. Only **Save**, with the token pasted again, writes, and it
+replaces that file; from then on everything saves as usual. Until then Options says so above
+the port, in English and Spanish. Before this a file that did not parse was loaded as the
+defaults and the first click on a checkbox wrote them, with an empty token, over it. A file
+that is not there is a first run and nothing of this applies.
+
 ## Labyrinth farming panel
 
 In Nexus Options, enable **Show Labyrinth farming panel / Mostrar panel de Laberinto**.
@@ -709,7 +786,19 @@ The session's highest Magic Find, the one a fall is measured against:
 
 - is fed only by a reading the reader has just returned, never by one that is being held, and
   only while the session measures: not while it prepares, and not once it is complete;
+- is fed only by a reading whose own cycle ran once the session was seen measuring. The
+  reader's last output stays in place until the next cycle, so the one that is there when a
+  session starts can be up to 5 seconds older than the session: it is painted, as the last
+  thing the reader verified, and it is not taken as the highest;
 - only goes up;
+- is each character's own, for the length of the session. When the game context names a
+  different character, the highest of the one that was being played is put away under its
+  name and the one that comes in gets back its own, or starts one if it has none: A's
+  highest is still there after playing B, and B's is never A's. Nothing read of the
+  character before is painted as the new one's. Going to character select and coming back
+  with the same character changes nothing. It is kept for 80 characters
+  (`panel::CHARACTER_PEAKS`), the one not played for longest going first, and all of it ends
+  with the session;
 - is the session's. `farm1` carries no session id, so another session is one that starts
   running after one that was not, or one whose declared duration goes back by more than a
   minute or to under a minute; the host sends a frame every 5 seconds, so a short `starting`
@@ -729,10 +818,37 @@ Reader: last pass 1 s ago
 They show the outcome with its exact reason, the bytes and reads of that pass against its
 budget, taken from the reader's own constants, and how long ago the pass ran. These lines are
 the reader's raw last pass: they do not hold anything, so they show a failed cycle the panel
-is painting over, and "not read" for a capture that failed as a whole. The readers do not time
-themselves, so there is no duration, but a pass cut by the clock has its own reason: `Deadline`
-means the 250 ms the two readers share, or the cycle's 750 ms, ran out, and `Bounds` that a
-pass asked for more than its byte budget.
+is painting over, and "not read" for a capture that failed as a whole. A pass cut by the clock
+has its own reason: `Deadline` means the 250 ms the two readers share, or the cycle's 750 ms,
+ran out, and `Bounds` that a pass asked for more than its byte budget.
+
+Under **Reader diagnostics**, four more lines say what the cycles and the panel take, counted
+since the addon loaded:
+
+```
+Pass times in µs, last cycle (max): threads 210 (max 1900); inventory 3400 (max 5200); wallet 300 (max 450); bags 150 (max 300); Magic Find 9000 (max 41000); whole cycle 13200 (max 48900)
+Captures: 1234 ok; 3 Changed; 1 ReadFailed; 0 Deadline; 0 Bounds; 12 other; epochs opened: 7
+Most own threads in a cycle: 61 / 128
+Panel frame in µs: mean 0.4, max 41.3, over 123456 frames (2345 computed)
+```
+
+- **Pass times**: microseconds each pass of the last cycle took and the longest it has ever
+  taken: finding the game's context among the process's own threads, the inventory, the
+  wallet, the bags, the Magic Find, and the whole cycle. "not run" is a pass the last cycle
+  did not reach. The cycle has 750 ms, and the bags and the Magic Find 250 ms between them.
+- **Captures**, by how they ended: `Changed` is an inventory that changed under the copy,
+  `ReadFailed` a copy that failed with time left, `Deadline` one refused because the cycle's
+  750 ms had run out, `Bounds` a count, a pointer or a budget out of bounds, and "other" no
+  character to read, a profile that does not match or another build. "Epochs opened" is how
+  many times the source has started an epoch (a `live_open`), over all its connections.
+- **Most own threads**: against the 128 the reader stops at.
+- **Panel frame**: what the panel's render callback takes, mean and longest, and how many of
+  those frames had to compute the panel (see "What a frame of the panel costs").
+
+They are the clock read around the passes the cycle already ran: no read of the game, no
+pass and no guard is added or moved for them. None of them is sent to the plugin, in `live1`
+or in `farm1`. They are there to answer in the game what has only been estimated outside it,
+and none of these numbers has been looked at in a running game yet.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -873,6 +989,16 @@ connection, the game closing, no negotiated source, a source conflict, an unsupp
 storage down) changes the status at once, and so does a failure when no capture of this
 connection has worked yet: there is nothing to hold on to.
 
+The source is also unavailable while there is no character in a map, at character select and
+on a loading screen, and then no capture has failed: there is nothing to read. The panel
+tells the two apart by the game context the addon already reports to the plugin (`gameplay`
+or not, from `NexusLink` and the Mumble Link; no reader is involved). Without a character in
+a map the status tooltip says "No character in a map (character select or loading screen)"
+and the Slots and MF tooltips "Addon reading: no character in a map", where they used to say
+that the last capture failed. Nothing else changes: the readings are held for the same 5
+seconds, so a short loading screen moves nothing, and a longer stay turns the dot orange as a
+source that cannot measure while a session needs it.
+
 Still to be looked at in the game; none of the panel's painting has been seen there:
 
 - That the two readers work in this DLL at all: they have only run against fixtures. The
@@ -900,6 +1026,39 @@ Still to be looked at in the game; none of the panel's painting has been seen th
 - When the source loses coverage, as on a change of map, the host sends `err: observe`: the
   status turns red and says "Could not update" until coverage is back. The line stays where it
   is; only its colour and text change.
+
+### What a frame of the panel costs
+
+The panel used to be worked out from scratch on every frame, also to paint only the bar of a
+folded one: the texts of its cells and their tooltips, some two hundred allocations, and the
+forty measurements its reserved width takes. At the game's frame rate nearly every frame
+repeats the one before, so the panel is computed only when it can have changed
+(`panel::PanelCache`):
+
+- the shared state changed: every setter of something the panel is painted from bumps a
+  counter (`SharedState::panel_generation`), and setting what was already there does not;
+- the language changed, or what the frame does with the panel (closed, folded, painted);
+- a whole second went by since one of the instants the panel counts from: a `farm1` or a
+  price frame, the reading each of the two lines has, the last capture and the last wallet
+  that worked. The ages are written in whole seconds and the 2 s, 5 s and 15 s rules turn on
+  whole seconds of those, so with the same state nothing can change in between;
+- a quarter of a second went by, whatever else.
+
+With the first three the panel that is kept is the very panel that frame would compute, and
+nothing that is painted changes: the 5 seconds a reading is held, the dot, the lines and the
+ages are where they were. `core/tests/panel_cache.rs` plays a session of 80 seconds, some
+6000 frames a few milliseconds apart plus frames exactly on those whole seconds, against a
+panel computed on every frame, and compares the view and the memory after each one. The
+quarter of a second alone does not give that: the 5 seconds of a held reading would run out
+up to 250 ms late, and that test fails with it. It stays as a bound, for a setter that some
+day forgets the counter. In that session about one frame in ten is computed (some 650 of
+6400), the frames forced onto the whole seconds included.
+
+Folded, no cell is built at all: the memory is moved on as a painted frame would leave it
+(`panel::observe_folded`), which is the rate's range-or-average choice besides what a closed
+panel already followed. The width samples are built once per language, and the reserved
+width is measured once per language and font, the font being its size, the frame height,
+the line height and the width of the ten digits.
 
 ### Quick access icons
 
@@ -929,9 +1088,21 @@ changing those four files and rebuilding.
 The addon does not need the plugin, or the game, to start first. If there is no server
 listening yet — the common case right when the game launches, since the plugin lives inside
 Obsidian and the player is free to start either one first — the addon just keeps retrying,
-forever, on the backoff table above, without surfacing that as an error. A connection that
-drops is retried the same way, well inside the ten minutes the plugin waits before it closes
-the session, so a short hiccup continues the same session instead of starting a new one.
+forever, without surfacing that as an error.
+
+The waits between retries come from the table `[250, 500, 1000, 2000, 5000]` ms, and the
+first one after a failure is **500 ms, not 250**: an attempt that fails moves one step up the
+table before its wait is taken. With nobody listening the addon tries, waits 500 ms, tries,
+waits 1 s, then 2 s, and then 5 s between tries for as long as it takes. The 250 ms is only
+the wait after a connection that had lived for 10 seconds since the plugin's `welcome`:
+that one starts the table over and is retried a quarter of a second after it drops, and if
+that retry fails the waits are 500 ms, 1 s, 2 s and 5 s again.
+
+A connection that drops is retried that way, well inside the ten minutes the plugin waits
+before it closes the session, so a short hiccup continues the same session instead of
+starting a new one. One the plugin welcomes and closes before those 10 seconds is one more
+step up the table, like one that never got a `welcome`: a plugin that keeps closing at once
+is retried after 500 ms, 1 s, 2 s and then every 5 seconds, not four times a second.
 Only two answers stop the retries until the settings change: a rejected token
 (`auth_rejected`) and a protocol version the plugin does not speak (`version_unsupported`).
 It shows "update the Nexus addon" when the plugin's `v` is 3 or more, and "update Tyrian
@@ -979,10 +1150,31 @@ covers what does not need a running game:
   figure, the fall of a verified Magic Find from the session's highest, the hold of the last
   verified reading (one failed cycle or one capture that fails as a whole changes neither
   cell, six seconds let go, a stopped reader at once, a new session, and that a held reading
-  does not move the highest), a reading being as old as its own cycle, another session noticed
+  does not move the highest), a reading being as old as its own cycle, no character in a map
+  told apart from a capture that failed, a reading from before the session or of another
+  character not becoming the highest, another session noticed
   with the panel closed and without a `starting` frame, a complete session not feeding the
   highest, the two diagnostics lines of Options, and that every text the panel produces is
   covered by a width reserved for its own cell. None of the painting itself is tested;
+- the panel that is kept between frames (`core/tests/panel_cache.rs`): the same view and the
+  same memory as a panel computed on every frame, frame by frame through a whole session, a
+  folded panel leaving the memory a painted one would, and every setter of what the panel
+  paints moving the counter the cache looks at;
+- the check of the executable (`core/src/executable.rs`, `core/src/verdict.rs`), over a file,
+  a hash and a memory handed in: a size out of range decided without reading a byte, the
+  digest deciding the build, the hash going on across slices with every byte in it once, a
+  header that is not the certified one decided for good, everything the system can fail at
+  deciding nothing, and a verdict kept only when final, an unfinished slice neither kept nor
+  waited for and a failure tried again after its wait. On the real loop
+  (`core/tests/client_live.rs`), a source whose verdict is pending puts nothing but heartbeats
+  on the wire, then opens with its baseline as always, or says `unsupported_build` once, or
+  `read_failed` for a failure of the system. The adapter that opens the real file and calls
+  the system's SHA-256 is not tested;
+- the counters of the reader diagnostics (`core/src/perf.rs`): last and longest time of a
+  pass, captures counted by how they ended with a copy refused by the clock kept apart from
+  one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and
+  every `live_open` counted as one epoch opened. The clock readings themselves are taken in
+  the Windows adapter and are not tested;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the
@@ -1000,7 +1192,9 @@ covers what does not need a running game:
 - what Save accepts as the token (`core/src/token.rs`): an API key refused in either case, a
   43-character token accepted, surrounding whitespace trimmed, too short or too long refused;
 - the `\n` framer, the backoff table, settings persistence (an API key saved by 0.2.0 dropped
-  and removed from disk on load), and the token never showing up in `Debug` output.
+  and removed from disk on load; a save that a concurrent reader never sees half of; a file
+  that cannot be loaded told apart from a missing one, left as it is and not replaced by an
+  automatic save until an explicit one), and the token never showing up in `Debug` output.
 
 It does not, and cannot, cover the actual Nexus load/unload cycle, what `NexusLink` and the
 Mumble Link really contain in each game state, the `WndProc` callback, or the ImGui panel —

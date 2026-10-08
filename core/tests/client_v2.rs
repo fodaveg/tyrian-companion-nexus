@@ -360,13 +360,60 @@ fn start_client_launching(
     (state, host, handle)
 }
 
-/// A loopback port with nobody listening on it: binding then dropping the listener frees the
-/// port back to the OS, so a `connect()` to it comes back refused almost at once, the same
-/// signal H18.27 measured for "Obsidian is closed" (see `docs/audit/sonda-h18-27-...` in the
-/// `tyrian-companion` repo).
+/// The range this host serves a `bind` to port 0 from, which is where every [`FakePlugin`] gets
+/// its port. Linux says it in `/proc`; elsewhere it is taken to be the IANA dynamic range, which
+/// is what Windows and macOS use.
+fn ephemeral_ports() -> (u16, u16) {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|text| {
+            let mut bounds = text.split_whitespace().map(str::parse::<u16>);
+            Some((bounds.next()?.ok()?, bounds.next()?.ok()?))
+        })
+        .unwrap_or((49152, 65535))
+}
+
+/// A loopback port with nobody listening on it, so a `connect()` to it comes back refused almost
+/// at once, the same signal H18.27 measured for "Obsidian is closed" (see
+/// `docs/audit/sonda-h18-27-...` in the `tyrian-companion` repo).
+///
+/// It is the first port outside [`ephemeral_ports`] that refuses a connection. It used to be a
+/// port of that range, bound and freed at once, and four tests leave a client retrying theirs:
+/// the OS was free to give that same port to the [`FakePlugin`] of another test, here or in
+/// another run of this binary at the same time. Then the retrying client walked into a plugin
+/// that expected nobody, and, the other way round, a "refused" first connection was accepted
+/// and launched nothing. A port the OS never gives to a `bind` to port 0 cannot collide in
+/// either direction; two tests sharing it only see each other's refusals.
 fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    listener.local_addr().unwrap().port()
+    let (low, high) = ephemeral_ports();
+    let refuses = |port: &u16| {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
+        matches!(TcpStream::connect_timeout(&address, Duration::from_secs(1)), Err(error) if error.kind() == ErrorKind::ConnectionRefused)
+    };
+    // The unprivileged ports just under the range first, then the ones over it. A port
+    // something of this machine listens on is skipped; 64 of them are more than enough.
+    (1024..low)
+        .rev()
+        .chain(high.saturating_add(1)..=u16::MAX)
+        .filter(|port| !(low..=high).contains(port))
+        .take(64)
+        .find(refuses)
+        .unwrap_or_else(|| panic!("no closed loopback port next to the ephemeral range {low}-{high}"))
+}
+
+/// The control for [`closed_port`]: the port a client is left retrying must not be one the OS
+/// can hand to a [`FakePlugin`], of this test binary or of another run of it.
+#[test]
+fn a_closed_port_is_never_one_a_fake_plugin_can_be_given() {
+    let (low, high) = ephemeral_ports();
+    let closed = closed_port();
+    assert!(!(low..=high).contains(&closed), "closed port {closed} is inside {low}-{high}, where bind(0) is served from");
+    // And the range is the right one for this host: that is where the plugins really land.
+    for _ in 0..64 {
+        let port = FakePlugin::start().port();
+        assert!((low..=high).contains(&port), "a fake plugin got {port}, outside {low}-{high}");
+        assert_ne!(port, closed);
+    }
 }
 
 // --- Scenarios ---
@@ -630,6 +677,33 @@ fn a_retryable_error_reconnects_on_the_backoff() {
     let mut again = plugin.try_accept(Duration::from_secs(3)).expect("reconnected after capacity");
     again.authenticate(SERVER_A, NONCE_1, 5000);
     again.expect_sequenced();
+    assert!(host.alerts().is_empty(), "a retryable error shows nothing to the player");
+    handle.stop();
+}
+
+/// A plugin that welcomes the addon and closes the connection at once, every time. A `welcome`
+/// alone used to start the backoff over, so this was a reconnection every 250 ms for ever. Each
+/// wait is measured from the plugin's `error` to the next connection, so it cannot come out
+/// shorter than what the client slept.
+#[test]
+fn a_plugin_that_welcomes_and_closes_at_once_is_retried_on_growing_waits() {
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, TOKEN);
+    let mut waits = Vec::new();
+    let mut closed_at: Option<Instant> = None;
+    for _ in 0..4 {
+        let mut connection = plugin.accept();
+        waits.extend(closed_at.map(|closed_at| closed_at.elapsed()));
+        connection.authenticate(SERVER_A, NONCE_1, 5000);
+        // The context is the client acting on the welcome: this connection was authenticated.
+        assert_eq!(connection.expect_sequenced()["type"], "context");
+        closed_at = Some(Instant::now());
+        connection.send(r#"{"v":3,"type":"error","code":"frame_schema"}"#);
+        drop(connection);
+    }
+    for (wait, at_least) in waits.iter().zip([500, 1_000, 2_000]) {
+        assert!(*wait >= Duration::from_millis(at_least), "waited {wait:?} of {waits:?}, expected at least {at_least} ms");
+    }
     assert!(host.alerts().is_empty(), "a retryable error shows nothing to the player");
     handle.stop();
 }

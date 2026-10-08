@@ -26,7 +26,8 @@ use crate::live::LiveStatus;
 use crate::magic_find::{MagicFind, MagicFindCoverage};
 use crate::passive::Uncovered;
 use crate::price::{format_coins, PriceStatus, PriceView};
-use crate::state::Status;
+use crate::protocol::{GameContext, GameState};
+use crate::state::{SharedState, Status};
 use crate::wallet::{WalletCoverage, WalletError};
 
 /// What a cell says when there is no figure.
@@ -69,6 +70,10 @@ pub const READING_HOLD: Duration = Duration::from_secs(5);
 /// one means a cycle is missing, and the tooltip then says how old the reading is.
 const READING_CURRENT: Duration = Duration::from_secs(2);
 
+/// For how many characters the highest Magic Find of the session is kept while another one is
+/// played. More than an account has; past it the one not played for longest goes.
+pub const CHARACTER_PEAKS: usize = 80;
+
 /// The declared duration of a session falling by more than this many seconds, or back under
 /// them, is another session and not a correction of the same one.
 const SESSION_RESTART: i32 = 60;
@@ -83,6 +88,20 @@ pub struct PanelMemory {
     /// The highest verified Magic Find of the current session, with its addends. Only readings
     /// the reader returned while the session measures feed it, and it only goes up.
     magic_find_peak: Option<MagicFind>,
+    /// From when a reading can be that highest: the frame in which this session, with this
+    /// character, was first seen measuring. The reader's output stays as it is until another
+    /// cycle replaces it, so without this a reading of up to [`READING_HOLD`] before the session
+    /// started, or of the character before this one, would still be taken.
+    peak_from: Option<Instant>,
+    /// The last character the game context named, and since when the readings are its own: the
+    /// frame in which a different one was first seen. Another character is another baseline.
+    character: Option<String>,
+    character_since: Option<Instant>,
+    /// The session's highest of the characters played before the current one, by name, the
+    /// least recently played first and at most [`CHARACTER_PEAKS`] of them: coming back to one
+    /// finds its own highest. The current character's is `magic_find_peak` and is not in here.
+    /// Emptied with the session.
+    peaks: Vec<(String, MagicFind)>,
     /// The last verified reading of each line and the instant of the reader's cycle that
     /// returned it, kept for [`READING_HOLD`].
     bags: Option<(BagSlots, Instant)>,
@@ -101,7 +120,20 @@ pub struct PanelMemory {
 impl PanelMemory {
     /// Nothing remembered: a range is a range and no reading has been seen.
     pub const fn new() -> Self {
-        Self { rate_averaged: false, magic_find_peak: None, bags: None, magic_find: None, session_running: false, elapsed: None, good_capture: None, good_wallet: None }
+        Self {
+            rate_averaged: false,
+            magic_find_peak: None,
+            peak_from: None,
+            character: None,
+            character_since: None,
+            peaks: Vec::new(),
+            bags: None,
+            magic_find: None,
+            session_running: false,
+            elapsed: None,
+            good_capture: None,
+            good_wallet: None,
+        }
     }
 
     /// The highest verified Magic Find total of the current session, if any reading fed it.
@@ -110,12 +142,22 @@ impl PanelMemory {
     }
 }
 
+/// Why a live source has no capture of this second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// The last capture failed as a whole.
+    CaptureFailed,
+    /// There is no character in a map, so no capture was tried: character select, or a loading
+    /// screen. Nothing failed.
+    NoCharacter,
+}
+
 /// Whether the reader's output can describe the game now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
-    /// Cycles are running, or the last one failed as a whole: a reading counts for
-    /// [`READING_HOLD`] from the instant of its own cycle.
-    Live { capture_failed: bool },
+    /// Cycles are running, or there is none of this second and `gap` says why: a reading counts
+    /// for [`READING_HOLD`] from the instant of its own cycle.
+    Live { gap: Option<Gap> },
     /// No connection, no negotiated source, a source conflict, an unsupported build, storage
     /// down or the game closing: nothing is read, so nothing counts and nothing is kept.
     Stopped,
@@ -125,13 +167,18 @@ enum Source {
 /// ran out of time) leaves `Unavailable` for the second until the next one. That is a failed
 /// cycle, not a reader that stopped, and what was read just before is held through it. The
 /// same status after the connection is lost is the reader stopped.
+///
+/// `Unavailable` is also what the source says while there is no character in a map. That is
+/// held through in the same way, a loading screen being a matter of seconds, but it is told
+/// apart ([`Gap`]), so that the panel does not call it a capture that failed.
 fn source(input: &PanelInput<'_>) -> Source {
     if input.connection != Status::Connected {
         return Source::Stopped;
     }
     match input.live {
-        live if live.is_sampling() => Source::Live { capture_failed: false },
-        LiveStatus::Unavailable => Source::Live { capture_failed: true },
+        live if live.is_sampling() => Source::Live { gap: None },
+        LiveStatus::Unavailable if input.character_in_map => Source::Live { gap: Some(Gap::CaptureFailed) },
+        LiveStatus::Unavailable => Source::Live { gap: Some(Gap::NoCharacter) },
         _ => Source::Stopped,
     }
 }
@@ -141,8 +188,8 @@ fn source(input: &PanelInput<'_>) -> Source {
 enum Why {
     /// The reader ran and said why it has none.
     Reader(Uncovered),
-    /// The whole capture failed before this reader ran.
-    CaptureFailed,
+    /// No capture of this second, for this reason.
+    Gap(Gap),
     /// No new cycle has run: the plugin is slow to confirm the last one.
     NoCycle,
 }
@@ -170,7 +217,7 @@ fn take<T: Copy>(
     read_at: Option<Instant>,
     now: Instant,
 ) -> Option<Taken<T>> {
-    let Source::Live { capture_failed } = source else {
+    let Source::Live { gap } = source else {
         *slot = None;
         return None;
     };
@@ -187,18 +234,35 @@ fn take<T: Copy>(
     let held = if fresh.is_some() && age < READING_CURRENT {
         None
     } else {
-        let why = match reason {
-            Some(reason) => Why::Reader(reason),
-            None if capture_failed => Why::CaptureFailed,
-            None => Why::NoCycle,
+        let why = match (reason, gap) {
+            (Some(reason), _) => Why::Reader(reason),
+            (None, Some(gap)) => Why::Gap(gap),
+            (None, None) => Why::NoCycle,
         };
         Some((age.as_secs(), why))
     };
     Some(Taken { value, read: fresh.is_some(), held })
 }
 
-fn capture_failed(english: bool) -> String {
-    tr(english, "Lectura del addon: la última captura falló", "Addon reading: the last capture failed").to_string()
+/// Why the addon's reader has nothing of this second, for the tooltip of a line it feeds.
+fn no_capture(gap: Gap, english: bool) -> String {
+    let (es, en) = match gap {
+        Gap::CaptureFailed => ("Lectura del addon: la última captura falló", "Addon reading: the last capture failed"),
+        Gap::NoCharacter => ("Lectura del addon: no hay personaje en un mapa", "Addon reading: no character in a map"),
+    };
+    tr(english, es, en).to_string()
+}
+
+/// The same for the status, whose tooltip already names the inventory source above it.
+fn no_capture_status(gap: Gap, english: bool) -> String {
+    let (es, en) = match gap {
+        Gap::CaptureFailed => ("La última captura falló", "The last capture failed"),
+        Gap::NoCharacter => (
+            "No hay personaje en un mapa (selección de personaje o pantalla de carga)",
+            "No character in a map (character select or loading screen)",
+        ),
+    };
+    tr(english, es, en).to_string()
 }
 
 /// The tooltip lines of a reading that is being held: how old it is and why there is no new one.
@@ -207,7 +271,7 @@ fn held_lines(held: Option<(u64, Why)>, english: bool) -> Vec<String> {
     let mut lines = vec![if english { format!("Last reading {age} s ago") } else { format!("Última lectura hace {age} s") }];
     match why {
         Why::Reader(reason) => lines.push(no_coverage(reason, english)),
-        Why::CaptureFailed => lines.push(capture_failed(english)),
+        Why::Gap(gap) => lines.push(no_capture(gap, english)),
         Why::NoCycle => {}
     }
     lines
@@ -218,8 +282,9 @@ struct Readings {
     source: Source,
     bags: Option<Taken<BagSlots>>,
     magic_find: Option<Taken<MagicFind>>,
-    /// The last capture failed, and the one before it that worked is no older than
-    /// [`READING_HOLD`]: one failed cycle, which the status does not change colour for.
+    /// There is no capture of this second, and the last one that worked is no older than
+    /// [`READING_HOLD`]: one failed cycle or a short loading screen, which the status does not
+    /// change colour for.
     capture_failed_briefly: bool,
     /// The wallet was read well no more than [`READING_HOLD`] ago: if it has no coverage now,
     /// that is one failed read of it, not a wallet without coverage.
@@ -244,34 +309,63 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
     let another = (running && !memory.session_running) || restarted;
     memory.session_running = running;
     memory.elapsed = elapsed;
-    if another {
+    // Another character: nothing read of the one before is this one's. A context that names
+    // nobody (character select, or no link yet) is not a change, so the same character coming
+    // back keeps what it had. `previous` is the one that was being played, when it is another.
+    let named = input.character.filter(|now| memory.character.as_deref() != Some(*now));
+    let previous = named.and_then(|now| memory.character.replace(now.to_string()));
+    if another || previous.is_some() {
         memory.bags = None;
         memory.magic_find = None;
     }
     // No highest without a session that has started measuring, nor across a lost connection:
-    // what happened while the addon was not being told is not this session's as far as it knows.
+    // what happened while the addon was not being told is not this session's as far as it
+    // knows. That goes for every character played in it.
     if another || input.connection != Status::Connected || matches!(phase, None | Some(Phase::Idle | Phase::Starting)) {
         memory.magic_find_peak = None;
+        memory.peak_from = None;
+        memory.peaks.clear();
+    }
+    // The highest is each character's own, for the length of the session: the one that was
+    // being played is put away with its own, and the one that comes in gets back what it had.
+    // Taken out before the other is put away, so that a full store cannot drop it just then.
+    if let Some(before) = previous {
+        memory.character_since = Some(input.now);
+        let kept = named.and_then(|now| memory.peaks.iter().position(|(name, _)| name == now));
+        let incoming = kept.map(|at| memory.peaks.remove(at).1);
+        if let Some(peak) = std::mem::replace(&mut memory.magic_find_peak, incoming) {
+            memory.peaks.push((before, peak));
+            if memory.peaks.len() > CHARACTER_PEAKS {
+                memory.peaks.remove(0);
+            }
+        }
+        // Its readings count again from the first frame it is seen measuring.
+        memory.peak_from = None;
+    }
+    // The highest counts from the first frame in which this session is seen measuring.
+    let measuring = matches!(phase, Some(Phase::Active | Phase::Stopping | Phase::Provisional));
+    if measuring && memory.peak_from.is_none() {
+        memory.peak_from = Some(input.now);
     }
     let source = source(input);
     // When the reader last captured well, by the instant of that capture. A reader that has
     // stopped has nothing to hold on to, and neither has a connection that never captured.
     // The same for the wallet, which is read in the same capture and can fail on its own.
     match source {
-        Source::Live { capture_failed: false } => {
+        Source::Live { gap: None } => {
             memory.good_capture = input.read_at.or(memory.good_capture);
             if matches!(input.wallet, WalletCoverage::Listed(_)) {
                 memory.good_wallet = input.read_at.or(memory.good_wallet);
             }
         }
-        Source::Live { capture_failed: true } => {}
+        Source::Live { gap: Some(_) } => {}
         Source::Stopped => {
             memory.good_capture = None;
             memory.good_wallet = None;
         }
     }
     let recent = |at: Option<Instant>| at.is_some_and(|at| input.now.saturating_duration_since(at) <= READING_HOLD);
-    let capture_failed_briefly = source == Source::Live { capture_failed: true } && recent(memory.good_capture);
+    let capture_failed_briefly = matches!(source, Source::Live { gap: Some(_) }) && recent(memory.good_capture);
     let wallet_failed_briefly = recent(memory.good_wallet);
     let (bags, bags_reason) = match input.bags {
         BagCoverage::Read(slots) => (Some(slots), None),
@@ -283,14 +377,19 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
         MagicFindCoverage::Unavailable(reason) => (None, Some(reason)),
         MagicFindCoverage::NotRead => (None, None),
     };
-    let bags = take(&mut memory.bags, source, bags, bags_reason, input.read_at, input.now);
-    let magic_find = take(&mut memory.magic_find, source, magic_find, magic_find_reason, input.read_at, input.now);
+    // A cycle that ran before this character was the one in the game read the one before: its
+    // output is still there until the next cycle, and is not a reading of this one.
+    let since = |from: Option<Instant>| input.read_at.is_some_and(|at| from.is_none_or(|from| at >= from));
+    let own = since(memory.character_since);
+    let bags = take(&mut memory.bags, source, bags.filter(|_| own), bags_reason, input.read_at, input.now);
+    let magic_find = take(&mut memory.magic_find, source, magic_find.filter(|_| own), magic_find_reason, input.read_at, input.now);
     // Only a reading the reader has just returned, while the session measures, can be its
     // highest; and the highest only goes up. A held reading is compared with it and never
-    // moves it, and neither does one read after the session is complete.
+    // moves it, and neither does one read after the session is complete, nor one whose cycle
+    // ran before this session was measuring: `read` only says the reader's output is a figure.
     if let Some(Taken { value, read: true, .. }) = magic_find {
-        let measuring = matches!(phase, Some(Phase::Active | Phase::Stopping | Phase::Provisional));
-        if measuring && memory.magic_find_peak.is_none_or(|peak| value.total > peak.total) {
+        let of_this_session = memory.peak_from.is_some() && since(memory.peak_from);
+        if measuring && of_this_session && memory.magic_find_peak.is_none_or(|peak| value.total > peak.total) {
             memory.magic_find_peak = Some(value);
         }
     }
@@ -303,6 +402,15 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
 /// second one's look like a fall.
 pub fn observe(input: &PanelInput<'_>, memory: &mut PanelMemory) {
     advance(input, memory);
+}
+
+/// The same for a frame of the panel folded down to its bar: no cell is painted, and `memory`
+/// is left exactly as [`view`] would leave it. Besides what [`observe`] follows that is the
+/// rate's range-or-average choice, which a closed panel does not follow and a folded one
+/// always did, when it still built the whole view to paint only its bar.
+pub fn observe_folded(input: &PanelInput<'_>, memory: &mut PanelMemory) {
+    advance(input, memory);
+    rate_shape(input.farming, memory);
 }
 
 /// Everything the panel is painted from.
@@ -319,6 +427,15 @@ pub struct PanelInput<'a> {
     pub farming: &'a FarmingView,
     pub price: &'a PriceView,
     pub live: LiveStatus,
+    /// A character is in a map: the game context the client reports is `gameplay`
+    /// (`SharedState::character_in_map`, from `NexusLink` and the Mumble Link, not from the
+    /// memory readers). Without one the source says `Unavailable` because there is nothing to
+    /// capture, which is not a capture that failed.
+    pub character_in_map: bool,
+    /// The character the same game context names, `None` when it names none (character select,
+    /// or nothing read from the link yet). Only compared with the one before: a different one
+    /// starts the session's highest Magic Find over, and nothing read of the other is kept.
+    pub character: Option<&'a str>,
     pub wallet: WalletCoverage,
     /// What the addon's own reader says about the bags in its last cycle
     /// (`inventory::Diagnostics::bags`). Only `Read` is a verified figure; without it the line
@@ -467,20 +584,30 @@ fn averaged(lo: i32, hi: i32, was: bool) -> bool {
 
 const RATE_UNIT: &str = "b/h";
 
+/// Moves the rate's range-or-average choice on by this frame's band: only a band more than one
+/// unit wide has the choice, and [`averaged`] makes it from what it was. It is what the rate
+/// carries from one frame to the next, so a frame that paints nothing of the rate but must
+/// leave the memory as a painted one would ([`observe_folded`]) runs this and no more.
+fn rate_shape(view: &FarmingView, memory: &mut PanelMemory) {
+    memory.rate_averaged = match view.reading.as_ref().map(|reading| (reading.lo, reading.hi)) {
+        Some((Some(lo), Some(hi))) if i64::from(hi) - i64::from(lo) > 1 => averaged(lo, hi, memory.rate_averaged),
+        _ => false,
+    };
+}
+
 /// The rate. A band is shown as `lo–hi`, or as `~mean` while it is wide (see [`averaged`]),
 /// with the band itself in the tooltip. A band one unit wide is one number rounded down and
 /// up, which is what a live session sends, and is shown as that number. Notes about the rate
 /// ([`FarmingView::rate_notes`]) go to the tooltip and paint it in the warning tone.
 fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cell {
+    rate_shape(view, memory);
     let mut tooltip = vec![tr(english, "Bolsas por hora", "Bags per hour").to_string()];
     let Some(reading) = view.reading.as_ref() else {
-        memory.rate_averaged = false;
         tooltip.push(tr(english, "Sin lectura", "No reading").to_string());
         return cell(format!("{NO_DATA} {RATE_UNIT}"), Tone::Muted, tooltip);
     };
     let figure = match (reading.lo, reading.hi) {
         (Some(lo), Some(hi)) if i64::from(hi) - i64::from(lo) > 1 => {
-            memory.rate_averaged = averaged(lo, hi, memory.rate_averaged);
             if memory.rate_averaged {
                 let mean = (i64::from(lo) + i64::from(hi) + 1) / 2;
                 tooltip.push(format!("{}: {lo}–{hi} {RATE_UNIT}", tr(english, "Rango", "Range")));
@@ -490,13 +617,9 @@ fn rate_cell(view: &FarmingView, memory: &mut PanelMemory, english: bool) -> Cel
             }
         }
         (Some(lo), hi) => {
-            memory.rate_averaged = false;
             if hi.is_some() { lo.to_string() } else { format!("≥{lo}") }
         }
-        (None, _) => {
-            memory.rate_averaged = false;
-            NO_DATA.to_string()
-        }
+        (None, _) => NO_DATA.to_string(),
     };
     let notes = view.rate_notes(english);
     let tone = if notes.is_empty() { Tone::Normal } else { Tone::Warning };
@@ -691,14 +814,14 @@ fn no_coverage(reason: Uncovered, english: bool) -> String {
 }
 
 /// Why a line's figure is not the addon's own, for the branches that paint the plugin's or `—`:
-/// the reader is stopped, it said why it has none, or the whole capture failed. `None` when the
-/// reader simply has not produced one.
+/// the reader is stopped, it said why it has none, the whole capture failed, or there is no
+/// character in a map. `None` when the reader simply has not produced one.
 fn fallback(source: Source, reason: Option<Uncovered>, english: bool) -> Option<String> {
     match (source, reason) {
         (Source::Stopped, _) => Some(not_sampling(english)),
         (_, Some(reason)) => Some(no_coverage(reason, english)),
-        (Source::Live { capture_failed: true }, None) => Some(capture_failed(english)),
-        (Source::Live { capture_failed: false }, None) => None,
+        (Source::Live { gap: Some(gap) }, None) => Some(no_capture(gap, english)),
+        (Source::Live { gap: None }, None) => None,
     }
 }
 
@@ -964,8 +1087,9 @@ fn status_cell(input: &PanelInput<'_>, readings: &Readings, english: bool) -> (T
         tone = Tone::Warning;
     }
     source(&mut tooltip);
-    if input.live == LiveStatus::Unavailable {
-        tooltip.push(line("La última captura falló", "The last capture failed"));
+    // Why the source has no capture now: one that failed, or no character in a map to read.
+    if let Source::Live { gap: Some(gap) } = readings.source {
+        tooltip.push(no_capture_status(gap, english));
     }
     // A wallet that has no coverage is a lasting problem; one read of it that fails, after one
     // that worked, is not, and says so only in the tooltip line above.
@@ -1008,9 +1132,196 @@ pub fn view(input: &PanelInput<'_>, memory: &mut PanelMemory, english: bool) -> 
         sell,
         slots: slots_cell(input, readings.source, readings.bags, english),
         magic_find: magic_find_cell(input, readings.source, readings.magic_find, memory.magic_find_peak, english),
-        status_label: tr(english, "Estado:", "Status:").to_string(),
+        status_label: status_label(english).to_string(),
         status_dot,
         status,
+    }
+}
+
+/// The label in front of the status dot. The addon needs its width to reserve the window's,
+/// also in a frame for which no view was built.
+pub fn status_label(english: bool) -> &'static str {
+    tr(english, "Estado:", "Status:")
+}
+
+/// One frame's copy of what the panel is painted from, taken out of the shared state. The
+/// addon and the tests build a [`PanelInput`] from it in the same way.
+#[derive(Debug, Clone)]
+pub struct PanelSources {
+    now: Instant,
+    read_at: Option<Instant>,
+    connection: Status,
+    farming: FarmingView,
+    price: PriceView,
+    live: LiveStatus,
+    /// The game context the client last reported, from `NexusLink` and the Mumble Link.
+    context: Option<GameContext>,
+    wallet: WalletCoverage,
+    bags: BagCoverage,
+    magic_find: MagicFindCoverage,
+}
+
+impl PanelSources {
+    /// `now` is the frame's instant on the monotonic clock the readings are dated by.
+    pub fn read(state: &SharedState, now: Instant) -> Self {
+        // What the addon's own reader got in its last cycle, and the instant of that cycle: a
+        // reading is as old as that, not as this frame.
+        let (diagnostics, read_at) = state.inventory_reading();
+        Self {
+            now,
+            read_at,
+            connection: state.status(),
+            farming: state.farming_view(now),
+            price: state.price_view(now),
+            live: state.live_status(),
+            context: state.live_context(),
+            wallet: diagnostics.wallet,
+            bags: diagnostics.bags,
+            magic_find: diagnostics.magic_find,
+        }
+    }
+
+    pub fn input(&self) -> PanelInput<'_> {
+        PanelInput {
+            now: self.now,
+            read_at: self.read_at,
+            connection: self.connection,
+            farming: &self.farming,
+            price: &self.price,
+            live: self.live,
+            // `gameplay`, and not `loading` or `character_select`. Before any context was
+            // reported nothing is known, and a reading that is missing is not put down to the
+            // character.
+            character_in_map: self.context.as_ref().is_none_or(|context| context.state == GameState::Gameplay),
+            character: self.context.as_ref().and_then(|context| context.character.as_deref()),
+            wallet: self.wallet,
+            bags: self.bags,
+            magic_find: self.magic_find,
+        }
+    }
+}
+
+/// What a frame does with the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frame {
+    /// The window is closed: nothing is painted and the memory follows the session
+    /// ([`observe`]).
+    Hidden,
+    /// The window is folded down to its bar: no cell is painted and the memory is left as a
+    /// painted frame would leave it ([`observe_folded`]).
+    Folded,
+    /// The whole panel is painted ([`view`]).
+    Painted,
+}
+
+/// The longest that what was computed for one frame is used for the ones after it, whatever
+/// else says it still stands. A setter of the shared state that forgot to count its change
+/// (`SharedState::panel_generation`) would then show a quarter of a second late, not never.
+pub const REFRESH_TICK: Duration = Duration::from_millis(250);
+
+/// What a computed frame was computed from, and until when it stands.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    generation: u64,
+    english: bool,
+    frame: Frame,
+    computed_at: Instant,
+    stands_until: Instant,
+}
+
+/// The panel as computed for one frame, kept for the frames after it that would compute the
+/// very same: [`view`] is some two hundred allocations, and at the game's frame rate nearly
+/// every frame repeats the one before.
+///
+/// A frame is computed again when the shared state changed, the language or what the frame
+/// does with the panel changed, [`REFRESH_TICK`] went by, or a whole second went by since one
+/// of the instants the panel counts from (see [`stands_until`]). In between, computing it
+/// again would give the same view and leave the same memory, which is what
+/// `tests/panel_cache.rs` checks frame by frame against a panel that computes every frame.
+#[derive(Debug, Default)]
+pub struct PanelCache {
+    stamp: Option<Stamp>,
+    view: Option<PanelView>,
+    computed: u64,
+}
+
+impl PanelCache {
+    pub const fn new() -> Self {
+        Self { stamp: None, view: None, computed: 0 }
+    }
+
+    /// The panel of the frame at `now`, computed only if the last one computed does not stand
+    /// for it. `Some` for [`Frame::Painted`], `None` for the two that paint no cell. `memory`
+    /// is advanced only by a frame that is computed, which leaves it as every frame would.
+    pub fn frame(&mut self, state: &SharedState, memory: &mut PanelMemory, now: Instant, english: bool, frame: Frame) -> Option<&PanelView> {
+        // Before the state it numbers is read: see `SharedState::panel_generation`.
+        let generation = state.panel_generation();
+        let stands = self.stamp.is_some_and(|stamp| {
+            stamp.generation == generation
+                && stamp.english == english
+                && stamp.frame == frame
+                && now >= stamp.computed_at
+                && now < stamp.stands_until
+        });
+        if !stands {
+            let sources = PanelSources::read(state, now);
+            let input = sources.input();
+            self.view = match frame {
+                Frame::Hidden => {
+                    observe(&input, memory);
+                    None
+                }
+                Frame::Folded => {
+                    observe_folded(&input, memory);
+                    None
+                }
+                Frame::Painted => Some(view(&input, memory, english)),
+            };
+            self.stamp = Some(Stamp { generation, english, frame, computed_at: now, stands_until: stands_until(&input, memory) });
+            self.computed += 1;
+        }
+        self.view.as_ref()
+    }
+
+    /// How many frames had to be computed since this cache was made; every other one used what
+    /// was there.
+    pub fn computed(&self) -> u64 {
+        self.computed
+    }
+}
+
+/// The first instant after this frame's at which the same state could give another panel.
+///
+/// Everything the panel takes from the clock is how long ago something happened: a `farm1` or
+/// a price frame was received, the reading each line has was read, the last capture or the
+/// last wallet worked. Each is used in whole seconds (the ages that are written) or compared
+/// with a whole number of them (the 2 s and 5 s of a reading, the 15 s of a feed). So with the
+/// same state nothing changes until a whole second has gone by since one of those instants,
+/// and the earliest of those moments is until when this frame stands.
+///
+/// `memory` is the one this frame left. The instant of the reader's last cycle is not in the
+/// list by itself: the panel never counts from it except through the reading a line took in
+/// that cycle and the capture it remembers as good, which are.
+fn stands_until(input: &PanelInput<'_>, memory: &PanelMemory) -> Instant {
+    let counted_from = [
+        input.farming.received,
+        input.price.received,
+        memory.bags.map(|(_, at)| at),
+        memory.magic_find.map(|(_, at)| at),
+        memory.good_capture,
+        memory.good_wallet,
+    ];
+    counted_from.into_iter().flatten().map(|since| next_second(since, input.now)).fold(input.now + REFRESH_TICK, Instant::min)
+}
+
+/// When the whole seconds elapsed since `since` next change, seen from `now`.
+fn next_second(since: Instant, now: Instant) -> Instant {
+    match now.checked_duration_since(since) {
+        Some(elapsed) if elapsed.subsec_nanos() != 0 => since + Duration::from_secs(elapsed.as_secs() + 1),
+        // Exactly on a whole second the very next instant can differ: an age is "more than
+        // 5 s" right after five seconds sharp and not at them. No later frame is taken to be
+        // this one, and neither is one before the instant itself.
+        _ => now,
     }
 }
 

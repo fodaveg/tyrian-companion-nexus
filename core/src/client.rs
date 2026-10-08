@@ -10,7 +10,8 @@
 //! One connection, as the SPEC's "Ejemplo completo" lays it out:
 //!
 //! 1. `hello` with `client`, `clientVersion`, this process's `instance` and the token;
-//! 2. the plugin's `welcome` (`server`, `nonce`, `heartbeatIntervalMs`), which resets the backoff;
+//! 2. the plugin's `welcome` (`server`, `nonce`, `heartbeatIntervalMs`); a connection that then
+//!    lives for 10 s (`STABLE_CONNECTION`) starts the backoff over when it ends;
 //! 3. a `context` straight away, and again every time state, map or character changes;
 //! 4. a `heartbeat` whenever nothing has been sent for `heartbeatIntervalMs`;
 //! 5. `alert` lines in between, shown once per `(server, seq)`, each confirmed with an `alert_ack`
@@ -21,9 +22,14 @@
 //!
 //! What the plugin's `error` means is in [`ErrorCode::retries`]: after `auth_rejected` or
 //! `version_unsupported` this client stops trying until the user saves the settings again.
-//! Every other end of a connection, the plugin missing included, is retried forever on
-//! `[250, 500, 1000, 2000, 5000]` ms, well inside the plugin's 10-minute grace, so a dropped
-//! connection comes back as the same presence rather than as a new session.
+//! Every other end of a connection, the plugin missing included, is retried forever on the
+//! table `[250, 500, 1000, 2000, 5000]` ms, well inside the plugin's 10-minute grace, so a
+//! dropped connection comes back as the same presence rather than as a new session. An attempt
+//! that fails moves one step up the table before its wait is taken, so the waits after
+//! failures are 500 ms, 1 s, 2 s and then 5 s; the 250 ms is only the wait after a connection
+//! that had lived those 10 s. A connection the plugin welcomes and closes before them is one
+//! more step up, like one that was never welcomed: the retries slow down instead of going on
+//! at the fastest step.
 //!
 //! The token goes into the `hello` and nowhere else: no log line in this module formats it.
 
@@ -65,6 +71,18 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// the heartbeat into a flood.
 const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a connection has to live after its `welcome` for its end to start the backoff table
+/// over. A `welcome` alone is not enough: a plugin that welcomes and closes at once, for a line
+/// of this addon it rejects or for a fault of its own, was retried every 250 ms for ever.
+///
+/// Ten seconds, for two reasons. The plugin asks for a heartbeat every 5 s and closes over a
+/// line it rejects as soon as it reads it, so a connection that dies on its context, on its
+/// first inventory frames or on its first heartbeat is gone within about five and a half: ten
+/// is past all of those, and one that got there has had a heartbeat accepted. And it is not
+/// shorter than the slowest step of the table (5 s), so starting over can never make the
+/// reconnections more frequent than the table itself allows.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
+
 /// One reading of what the host exposes about the game.
 #[derive(Debug, Clone, Default)]
 pub struct GameReading {
@@ -86,6 +104,17 @@ pub trait Host: Send + 'static {
         Err(crate::inventory::ReadError::RootUnavailable)
     }
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
+    /// Does a bounded part of whatever the source has to do before it can take a sample at all,
+    /// and says whether that is done. Asked on this worker right before each sample. While it
+    /// says `false` there is no sample to take on this pass and nothing has failed: the loop
+    /// does not call [`Host::read_inventory`], opens no epoch and tells the plugin nothing, as
+    /// when it is not time to sample yet. The Windows adapter verifies the game's executable
+    /// here, a slice of its hash at a time. A host with nothing to prepare is always ready.
+    ///
+    /// `interrupted` says when that part of the work has to be cut short at once: the worker
+    /// was told to stop, or the game is closing and its `bye` is owed. The loop decides that,
+    /// not the host; `stop` is the worker's own flag, as [`Host::read_inventory`] gets it.
+    fn prepare_inventory(&self, _stop: &AtomicBool, _interrupted: &dyn Fn() -> bool) -> bool { true }
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
@@ -321,17 +350,17 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             Ok(stream) => serve(stream, &hello, state, host, &mut tracker, stop),
             Err(_) => ConnectionEnd::default(),
         };
+        // How long it lived after its `welcome`, if it got one.
+        let lasted = end.welcomed_at.map(|welcomed_at| welcomed_at.elapsed());
         state.disconnect_farming();
         state.disconnect_price();
         if !matches!(state.live_status(), crate::live::LiveStatus::NotNegotiated | crate::live::LiveStatus::StorageUnavailable | crate::live::LiveStatus::Conflict) {
             state.set_live_status(crate::live::LiveStatus::Unavailable);
         }
-        if end.welcomed {
-            backoff.record_success();
+        if lasted.is_some() {
             log::info!("disconnected from the Tyrian Companion plugin");
-        } else {
-            backoff.record_failure();
         }
+        record_connection(&mut backoff, lasted);
         if state.status() == Status::Connected {
             state.set_status(Status::WaitingForPlugin);
         }
@@ -385,11 +414,23 @@ fn connect(port: u16) -> std::io::Result<TcpStream> {
     TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
 }
 
+/// Moves the backoff on after a connection ended. `lasted` is how long it lived after its
+/// `welcome`, `None` when it never got one or never connected. Only a connection that lived
+/// for [`STABLE_CONNECTION`] starts the table over; every other end is one more step up it.
+fn record_connection(backoff: &mut Backoff, lasted: Option<Duration>) {
+    if lasted.is_some_and(|lasted| lasted >= STABLE_CONNECTION) {
+        backoff.record_success();
+    } else {
+        backoff.record_failure();
+    }
+}
+
 /// How one connection ended.
 #[derive(Debug, Default)]
 struct ConnectionEnd {
-    /// The plugin sent a `welcome`: the connection was authenticated at some point.
-    welcomed: bool,
+    /// When the client first acted on the plugin's `welcome`: the connection was authenticated
+    /// from then on. `None` if no `welcome` came.
+    welcomed_at: Option<Instant>,
     /// The `error` the plugin closed it with, if any.
     error: Option<ErrorCode>,
 }
@@ -452,7 +493,7 @@ fn serve(
 
         match session.as_mut() {
             Some(session) => {
-                end.welcomed = true;
+                end.welcomed_at.get_or_insert_with(Instant::now);
                 if session.next_seq > crate::live::MAX_SAFE || session.live.timed_out(Instant::now()) {
                     state.set_live_status(crate::live::LiveStatus::Unavailable);
                     return end;
@@ -467,7 +508,12 @@ fn serve(
                 let ctx = session.last_context_seq.unwrap_or(0);
                 let mut frames = session.live.gameplay_status();
                 if let Some(pending) = session.live.pending_frames(ctx, now) { frames.extend(pending); }
-                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) {
+                // A source that is still getting ready has no sample and no failure to report:
+                // the pass goes by like one in which it is not time to sample, and it is asked
+                // again on the next. Nothing about it is put on the wire.
+                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context)
+                    && host.prepare_inventory(stop, &|| stop.load(Ordering::Relaxed) || host.game_exiting())
+                {
                     let sample = host.read_inventory(stop);
                     if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
                     state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());
@@ -479,7 +525,12 @@ fn serve(
                         if let Some(line) = session.next_outgoing(captured_at, &after) {
                             if stream.write_all(line.as_bytes()).is_err() { return end; }
                         }
-                    } else { frames.extend(session.live.capture(sample, ctx, captured_at)); }
+                    } else {
+                        let opened = session.live.epochs_opened();
+                        frames.extend(session.live.capture(sample, ctx, captured_at));
+                        // For the Options window only: how often the source starts an epoch.
+                        state.count_live_epochs(session.live.epochs_opened().saturating_sub(opened));
+                    }
                 }
                 state.set_live_status(session.live.status);
                 let Some(lines) = session.live_lines(frames, Instant::now()) else { return end; };
@@ -658,6 +709,41 @@ mod tests {
         session.next_outgoing(start, &gameplay(50)).unwrap();
         session.next_outgoing(start + Duration::from_secs(4), &gameplay(866)).unwrap();
         assert_eq!(session.next_outgoing(start + Duration::from_secs(8), &gameplay(866)), None, "4 s since the last context");
+    }
+
+    #[test]
+    fn only_a_connection_that_lasted_starts_the_backoff_over() {
+        let slowest = Duration::from_millis(*crate::backoff::DELAYS_MS.last().unwrap());
+        let mut backoff = Backoff::new();
+        // Never welcomed, or welcomed and gone before it settled: each one is a step up.
+        for lasted in [None, Some(Duration::ZERO), Some(Duration::from_millis(300)), Some(STABLE_CONNECTION - Duration::from_millis(1))] {
+            let before = backoff.delay();
+            record_connection(&mut backoff, lasted);
+            assert!(backoff.delay() > before, "{lasted:?}: {before:?} then {:?}", backoff.delay());
+        }
+        assert_eq!(backoff.delay(), slowest);
+        // One that lived long enough is a server worth retrying quickly again.
+        record_connection(&mut backoff, Some(STABLE_CONNECTION));
+        assert_eq!(backoff.delay(), Duration::from_millis(250));
+        // A reset can never make the reconnections more frequent than the table's slowest step.
+        assert!(STABLE_CONNECTION >= slowest);
+    }
+
+    /// What the README says about the waits, as the loop takes them: it records how the
+    /// attempt ended and then reads the delay.
+    #[test]
+    fn the_first_wait_after_a_failure_is_500_ms_and_250_only_follows_a_connection_that_lasted() {
+        let mut backoff = Backoff::new();
+        let mut wait_after = |lasted: Option<Duration>| {
+            record_connection(&mut backoff, lasted);
+            backoff.delay().as_millis()
+        };
+        // Nobody listening, from the first attempt on.
+        let waits: Vec<u128> = (0..6).map(|_| wait_after(None)).collect();
+        assert_eq!(waits, [500, 1_000, 2_000, 5_000, 5_000, 5_000]);
+        // A connection that lived its ten seconds, and what comes if the retry after it fails.
+        assert_eq!(wait_after(Some(STABLE_CONNECTION)), 250);
+        assert_eq!([wait_after(None), wait_after(None)], [500, 1_000]);
     }
 
     #[test]

@@ -123,6 +123,12 @@ pub fn register_pending(english: bool) {
 
 /// Puts the tooltips in the language the panel is set to now: the bar takes the text when an
 /// icon is added, so each icon already there is removed and added again.
+///
+/// The caller must not hold `render`'s `PENDING`: this calls Nexus, and a keybind Nexus
+/// dispatches meanwhile takes that lock (`render::activate_shortcut`). The registry stays
+/// locked through the calls on purpose, so `unregister` cannot run between a removal and the
+/// addition that follows it. The keybind handler does not take the registry: its other takers
+/// are `register_pending`, from the render callback, and `unregister`, from `unload`.
 pub fn refresh_tooltips(english: bool) {
     let registry = registry();
     for (index, shortcut) in Shortcut::ALL.into_iter().enumerate() {

@@ -21,11 +21,12 @@ use std::sync::{Mutex, OnceLock};
 use nexus::imgui::{Condition, DrawListMut, StyleColor, StyleVar, TreeNodeFlags, Ui, Window};
 
 use tyrian_companion_nexus_core::quick_access::{PanelWindows, Shortcut};
-use tyrian_companion_nexus_core::panel::{self, Cell, PanelInput, PanelMemory, Tone};
+use tyrian_companion_nexus_core::panel::{self, Cell, Frame, PanelCache, PanelMemory, Tone};
+use tyrian_companion_nexus_core::perf::FrameTime;
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
-use tyrian_companion_nexus_core::settings::{self, Settings};
+use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, SaveTicket, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
 use tyrian_companion_nexus_core::token::{self, TokenRejection};
 
@@ -47,12 +48,82 @@ struct Pending {
 /// Seeded from the loaded settings once, at `load()`; see `init_pending`.
 static PENDING: OnceLock<Mutex<Pending>> = OnceLock::new();
 
-/// What the panel carries from one frame to the next (`panel::PanelMemory`).
-static PANEL_MEMORY: Mutex<PanelMemory> = Mutex::new(PanelMemory::new());
+/// What the panel carries from one frame to the next: what it remembers of the session
+/// (`panel::PanelMemory`), the last frame computed (`panel::PanelCache`) and the widths reserved
+/// for the window. Only the render callback takes it.
+struct PanelState {
+    memory: PanelMemory,
+    cache: PanelCache,
+    reserved: Option<Reserved>,
+}
+
+static PANEL: Mutex<PanelState> = Mutex::new(PanelState { memory: PanelMemory::new(), cache: PanelCache::new(), reserved: None });
+
+/// How long `farming_render` takes, every frame since the addon loaded. For Options only.
+static RENDER_TIME: Mutex<FrameTime> = Mutex::new(FrameTime::new());
+
+/// The widths the window is reserved from, and the language and the font they were measured in.
+#[derive(Clone, Copy, PartialEq)]
+struct Reserved {
+    english: bool,
+    /// The font size, the frame height, the line height and the width of the ten digits, as
+    /// bits: a host that changes its font, its scale or its style changes one of them.
+    font: [u32; 4],
+    /// The left column.
+    left: f32,
+    /// The whole window.
+    width: f32,
+}
+
+/// `panel::width_samples`, built once for each language.
+fn width_samples(english: bool) -> &'static panel::WidthSamples {
+    static SAMPLES: [OnceLock<panel::WidthSamples>; 2] = [OnceLock::new(), OnceLock::new()];
+    SAMPLES[usize::from(english)].get_or_init(|| panel::width_samples(english))
+}
+
+/// The widths of the panel in this language and this font: measured once, and again only when
+/// either changes. Measuring is some forty texts, each built for the purpose, and the result
+/// is the same on every frame in between.
+fn reserve(ui: &Ui, reserved: &mut Option<Reserved>, english: bool, scale: f32) -> Reserved {
+    let (button, line) = (ui.frame_height(), ui.text_line_height());
+    let font = [ui.current_font_size(), button, line, ui.calc_text_size("0123456789")[0]].map(f32::to_bits);
+    if let Some(measured) = reserved.filter(|measured| measured.english == english && measured.font == font) {
+        return measured;
+    }
+    let samples = width_samples(english);
+    // The samples write their figures with 9s; measure them with whichever digit is widest in
+    // this font, so no figure can be wider than what was reserved for it.
+    let digit = ('0'..='9')
+        .map(|digit| (ui.calc_text_size(digit.to_string())[0], digit))
+        .fold((0.0, '9'), |widest, candidate| if candidate.0 > widest.0 { candidate } else { widest })
+        .1;
+    let widest = |texts: &[String]| {
+        texts.iter().map(|text| ui.calc_text_size(text.replace('9', &digit.to_string()))[0]).fold(0.0, f32::max)
+    };
+    let gap = 16.0 * scale;
+    let title = translated(english, "Tyrian · Laberinto", "Tyrian · Labyrinth");
+    let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
+    let status_start = ui.calc_text_size(panel::status_label(english))[0] + 8.0 * scale + line + 8.0 * scale;
+    let width = (left + gap + widest(&samples.right))
+        .max(widest(&samples.lines))
+        .max(status_start + widest(&samples.status))
+        .max(button + 8.0 * scale + ui.calc_text_size(title)[0] + gap + 2.0 * button + 8.0 * scale);
+    *reserved.insert(Reserved { english, font, left, width })
+}
+
+/// Keeps what saves by itself (a checkbox, a button of the panel's bar, a quick access icon)
+/// from replacing a `settings.json` that could not be loaded: only the Save button writes while
+/// it holds, and Options says so (`settings::SaveGuard`).
+static SAVE_GUARD: SaveGuard = SaveGuard::new();
 
 /// `notice` is shown under the fields from the first frame: `load()` passes one when it removed
-/// an API key from `settings.json`.
-pub fn init_pending(settings: &Settings, notice: Option<&'static str>) {
+/// an API key from `settings.json`. `unreadable` is `settings::Loaded::unreadable`: the file is
+/// there and could not be loaded, so `settings` are the defaults and nothing but the user's own
+/// Save may replace it.
+pub fn init_pending(settings: &Settings, notice: Option<&'static str>, unreadable: bool) {
+    if unreadable {
+        SAVE_GUARD.hold();
+    }
     let _ = PENDING.set(Mutex::new(Pending { port: i32::from(settings.port), token: settings.token.clone(), notice,
         windows: PanelWindows::from_settings(settings), farming_english: settings.farming_english,
         reset_farming_position: false }));
@@ -133,13 +204,37 @@ pub fn options_render(ui: &Ui) {
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
         ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
             tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
+        // What the cycles and the panel's frame take, and how the captures end, since the addon
+        // loaded: the numbers that say whether the reader fits its deadlines in this game.
+        // They are shown here and nowhere else. 128 is the adapter's cap on own threads.
+        for line in crate::inventory::counters().lines(shared.live_epochs_opened(), 128) {
+            ui.text_wrapped(line);
+        }
+        let computed = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cache.computed();
+        ui.text_wrapped(RENDER_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).line(computed));
         if let Some(context) = shared.live_context() {
             ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
         }
     }
 
+    // What the Save button asks to be written, once the settings are no longer locked.
+    let mut explicit_save = None;
     {
         let mut pending = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `settings.json` could not be loaded: nothing below is what the user had, and the
+        // checkboxes save nothing until the Save button replaces the file.
+        if SAVE_GUARD.held() {
+            for notice in settings::UNREADABLE_NOTICE {
+                text_colored_wrapped(ui, ORANGE, notice);
+            }
+        }
+        // The last save did not reach the file: said here until one does, as nothing else in
+        // this window looks different after a save that failed.
+        if SAVE_GUARD.failed() {
+            for notice in settings::SAVE_FAILED_NOTICE {
+                text_colored_wrapped(ui, RED, notice);
+            }
+        }
         ui.input_int("Port", &mut pending.port).build();
         ui.input_text("Token", &mut pending.token).password(true).build();
         ui.same_line();
@@ -167,7 +262,9 @@ pub fn options_render(ui: &Ui) {
                     let open_obsidian_on_start = shared.open_obsidian_on_start();
                     let launch_app = shared.launch_app();
                     shared.apply_settings(port, &token, open_obsidian_on_start, launch_app);
-                    save_panel_settings(&pending);
+                    // The one save the user asks for by name: it also replaces a file that
+                    // could not be loaded.
+                    explicit_save = Some(prepare_save(&pending, SaveRequest::Explicit));
                 }
                 Err(rejection) => {
                     if rejection == TokenRejection::Gw2ApiKey {
@@ -182,6 +279,9 @@ pub fn options_render(ui: &Ui) {
         if let Some(hint) = hint {
             text_colored_wrapped(ui, ORANGE, hint);
         }
+    }
+    if let Some(save) = explicit_save {
+        write_settings(save);
     }
     ui.text_wrapped(
         "In Obsidian, open Tyrian Companion's settings and press \"Copy token\", then paste it here \
@@ -210,8 +310,11 @@ pub fn options_render(ui: &Ui) {
             }
         }
         if changed {
-            let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            save_panel_settings(&panel);
+            let save = {
+                let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                prepare_save(&panel, SaveRequest::Automatic)
+            };
+            write_settings(save);
         }
         if let Some(outcome) = shared.obsidian_launch_outcome() {
             let (color, text) = launch_line(launch_app, outcome);
@@ -220,12 +323,15 @@ pub fn options_render(ui: &Ui) {
     }
 
     ui.separator();
+    // The language the quick access tooltips have to change to, when its checkbox was clicked.
+    let mut tooltips_language = None;
+    let mut panel_save = None;
     {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut changed = ui.checkbox("Show Labyrinth farming panel / Mostrar panel de Laberinto", &mut panel.windows.show_panel);
         if ui.checkbox("Farming panel in English / Panel en inglés", &mut panel.farming_english) {
             changed = true;
-            crate::quick_access::refresh_tooltips(panel.farming_english);
+            tooltips_language = Some(panel.farming_english);
         }
         // The same switch as the button on the panel's own title bar, for when the panel is
         // hard to hit against the game.
@@ -233,8 +339,19 @@ pub fn options_render(ui: &Ui) {
         if ui.button("Reset farming panel position / Restablecer posición") {
             panel.reset_farming_position = true;
         }
-        if changed { save_panel_settings(&panel); }
+        if changed { panel_save = Some(prepare_save(&panel, SaveRequest::Automatic)); }
         ui.text_wrapped("Read-only: session, goal and preparation are managed in Hebra or Obsidian.");
+    }
+    // Only now, with `PENDING` released. Removing and adding an icon goes into Nexus's quick
+    // access bar, and Nexus's input thread comes the other way: a keybind of this addon ends in
+    // `activate_shortcut`, which takes `PENDING`. Calling Nexus while holding it is one lock
+    // taken in each order by two threads. The same for the disk: nobody waits for it on
+    // `PENDING`.
+    if let Some(save) = panel_save {
+        write_settings(save);
+    }
+    if let Some(english) = tooltips_language {
+        crate::quick_access::refresh_tooltips(english);
     }
 
     ui.separator();
@@ -249,17 +366,50 @@ pub fn options_render(ui: &Ui) {
     }
 }
 
-/// Saves only applied settings, so toggling the panel cannot save an unfinished token paste:
-/// port, token and the launch choice come from the shared state, never from the input boxes.
-fn save_panel_settings(panel: &Pending) {
+/// A save that was asked for and is not written yet: the settings as they were applied when it
+/// was asked, and its place in line. Both are taken while `PENDING` is held; the file is
+/// written after it is let go.
+struct PendingSave {
+    settings: Settings,
+    ticket: SaveTicket,
+    request: SaveRequest,
+}
+
+/// What a save needs, taken under `PENDING`, which the caller holds. Only applied settings, so
+/// toggling the panel cannot save an unfinished token paste: port, token and the launch choice
+/// come from the shared state, never from the input boxes. No file and no call to Nexus here.
+fn prepare_save(panel: &Pending, request: SaveRequest) -> PendingSave {
     let shared = state::shared();
-    if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-        let settings = panel.windows.apply_to(Settings {
+    PendingSave {
+        settings: panel.windows.apply_to(Settings {
             port: shared.port(), token: shared.token(),
             open_obsidian_on_start: shared.open_obsidian_on_start(), launch_app: shared.launch_app(),
             farming_english: panel.farming_english, ..Settings::default()
-        });
-        if let Err(error) = settings::save(&dir, &settings) { log::error!("failed to save settings: {error}"); }
+        }),
+        ticket: SAVE_GUARD.ticket(),
+        request,
+    }
+}
+
+/// Writes a save, with `PENDING` released: the write and the rename wait for the disk, and the
+/// other thread, the frame or Nexus's input one, must not wait for them on that lock. Two saves
+/// that cross are put in order by their tickets and never write at once (`SAVE_GUARD`).
+///
+/// After a `settings.json` that could not be loaded, an automatic request writes nothing: the
+/// applied settings are then the defaults, with no token, and the file may still hold the
+/// user's. The change stays in memory for this load and Options says why.
+///
+/// A save that fails goes to the log and is told in Options until one is written
+/// (`SaveGuard::failed`): the window that asked for it looks the same either way.
+fn write_settings(save: PendingSave) {
+    match nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
+        Ok(dir) => {
+            if let Err(error) = SAVE_GUARD.save(&dir, &save.settings, save.request, save.ticket) { log::error!("failed to save settings: {error}"); }
+        }
+        Err(error) => {
+            log::error!("failed to save settings: no addon directory ({error})");
+            SAVE_GUARD.could_not_try(&save.settings, save.request, save.ticket);
+        }
     }
 }
 
@@ -268,11 +418,19 @@ fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
 }
 
 /// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
-/// input thread; only flips a window flag and, for the panel, saves the shared setting.
+/// input thread; only flips a window flag and, for the panel, saves the shared setting. The
+/// flag is flipped under `PENDING`, which every frame takes, and the file is written after it
+/// is let go: a frame that saves nothing does not wait for this thread's disk. A frame that
+/// saves, on a click, can: it waits on the guard's own lock for this write to end.
 pub fn activate_shortcut(shortcut: Shortcut) {
-    let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    shortcut.activate(&mut panel.windows);
-    if shortcut == Shortcut::Panel { save_panel_settings(&panel); }
+    let save = {
+        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        shortcut.activate(&mut panel.windows);
+        (shortcut == Shortcut::Panel).then(|| prepare_save(&panel, SaveRequest::Automatic))
+    };
+    if let Some(save) = save {
+        write_settings(save);
+    }
 }
 
 /// Per-frame housekeeping and the addon's own Options window, opened from the quick access bar.
@@ -399,38 +557,39 @@ struct BarClicks {
 /// button. Its width, and so the window's, is reserved from `panel::width_samples`, not from
 /// what the cells say now, so nothing moves when a text changes.
 pub fn farming_render(ui: &Ui) {
-    let shared = state::shared();
+    // Timed for the reader diagnostics of Options: what this callback costs every frame.
     let now = std::time::Instant::now();
-    let (farming, price) = (shared.farming_view(now), shared.price_view(now));
-    let (diagnostics, read_at) = shared.inventory_reading();
-    let input = PanelInput {
-        now,
-        // The instant of the reader's cycle these diagnostics are from: a reading is as old as
-        // that, not as this frame.
-        read_at,
-        connection: shared.status(),
-        farming: &farming,
-        price: &price,
-        live: shared.live_status(),
-        wallet: diagnostics.wallet,
-        // What the addon's own reader got in its last cycle. Only a `Read` is painted as
-        // verified; otherwise the lines use what the plugin sends in `farm1`.
-        bags: diagnostics.bags,
-        magic_find: diagnostics.magic_find,
-    };
+    farming_frame(ui, now);
+    RENDER_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record(now.elapsed());
+}
+
+/// One frame of the panel at `now`, the instant the callback was entered.
+fn farming_frame(ui: &Ui, now: std::time::Instant) {
+    let shared = state::shared();
     let (windows, english, reset) = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !panel.windows.show_panel {
-            // Closed, the panel still follows the session: a session that ends and another
-            // that starts meanwhile must not be one session to its memory when it is reopened.
-            panel::observe(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            return;
-        }
-        let reset = std::mem::take(&mut panel.reset_farming_position);
+        // Only a panel that is shown takes the reset; closed, the request waits for it.
+        let reset = panel.windows.show_panel && std::mem::take(&mut panel.reset_farming_position);
         (panel.windows, panel.farming_english, reset)
     };
-    let view = panel::view(&input, &mut PANEL_MEMORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), english);
-    let samples = panel::width_samples(english);
+    // Closed, the panel still follows the session: a session that ends and another that starts
+    // meanwhile must not be one session to its memory when it is reopened. Folded, only its bar
+    // is painted, so no cell is built for it.
+    let frame = if !windows.show_panel {
+        Frame::Hidden
+    } else if windows.collapsed {
+        Frame::Folded
+    } else {
+        Frame::Painted
+    };
+    let mut carried = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let PanelState { memory, cache, reserved } = &mut *carried;
+    // Computed only when it can differ from the last frame computed: at the game's frame rate
+    // nearly every frame repeats the one before (`panel::PanelCache`).
+    let view = cache.frame(shared, memory, now, english, frame);
+    if frame == Frame::Hidden {
+        return;
+    }
     let scale = (ui.current_font_size() / 13.0).max(1.0);
     let tr = |es, en| translated(english, es, en);
     let outlined = windows.transparent;
@@ -445,23 +604,9 @@ pub fn farming_render(ui: &Ui) {
         .bg_alpha(1.0)
         .build(ui, || {
             let draw = ui.get_window_draw_list();
-            // The samples write their figures with 9s; measure them with whichever digit is
-            // widest in this font, so no figure can be wider than what was reserved for it.
-            let digit = ('0'..='9')
-                .map(|digit| (ui.calc_text_size(digit.to_string())[0], digit))
-                .fold((0.0, '9'), |widest, candidate| if candidate.0 > widest.0 { candidate } else { widest })
-                .1;
-            let widest = |texts: &[String]| {
-                texts.iter().map(|text| ui.calc_text_size(text.replace('9', &digit.to_string()))[0]).fold(0.0, f32::max)
-            };
             let (gap, button, line) = (16.0 * scale, ui.frame_height(), ui.text_line_height());
             let title = tr("Tyrian · Laberinto", "Tyrian · Labyrinth");
-            let left = widest(&samples.left).max(widest(&samples.left_large) * LARGE);
-            let status_start = ui.calc_text_size(&view.status_label)[0] + 8.0 * scale + line + 8.0 * scale;
-            let width = (left + gap + widest(&samples.right))
-                .max(widest(&samples.lines))
-                .max(status_start + widest(&samples.status))
-                .max(button + 8.0 * scale + ui.calc_text_size(title)[0] + gap + 2.0 * button + 8.0 * scale);
+            let Reserved { left, width, .. } = reserve(ui, reserved, english, scale);
             let origin = ui.cursor_pos()[0];
 
             // The title bar: fold, title, and on the right the background switch and the cross.
@@ -482,7 +627,8 @@ pub fn farming_render(ui: &Ui) {
                 else { tr("Quitar el fondo del panel", "Remove the panel's background") }, outlined);
             ui.same_line();
             clicks.close = icon_button(ui, &draw, "##close", button, Icon::Close, tr("Cerrar el panel", "Close the panel"), outlined);
-            if windows.collapsed { return clicks; }
+            // Folded, the bar is all there is, and no view was built.
+            let Some(view) = view else { return clicks };
 
             // Two columns: bags and their rate, the stack and its two prices.
             let second = origin + left + gap;
@@ -521,11 +667,18 @@ pub fn farming_render(ui: &Ui) {
         .unwrap_or_default();
     spacing.pop();
     padding.pop();
+    // Released before the settings are taken: the two locks are never held together.
+    drop(carried);
     if clicks.fold || clicks.background || clicks.close {
-        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
-        if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
-        if clicks.close { panel.windows.show_panel = false; }
-        save_panel_settings(&panel);
+        let save = {
+            let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
+            if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
+            if clicks.close { panel.windows.show_panel = false; }
+            prepare_save(&panel, SaveRequest::Automatic)
+        };
+        // Still this frame's own disk I/O, on the frame of the click; `PENDING` is not held
+        // through it any more, so the input thread does not wait for it.
+        write_settings(save);
     }
 }

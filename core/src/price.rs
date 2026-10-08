@@ -77,6 +77,9 @@ pub struct PriceView {
     pub fresh: bool,
     /// Quote age: the frame's `age` plus the local time since it was received.
     pub age: Option<u64>,
+    /// When `reading` was received, on the caller's monotonic clock: with the same reading,
+    /// `fresh` and `age` change only when a whole second since then goes by.
+    pub received: Option<Instant>,
 }
 
 /// Per-connection capability and sequence, plus the last reading retained across disconnects.
@@ -137,6 +140,7 @@ impl PriceFeed {
                     .age
                     .map(|age| age as u64 + now.saturating_duration_since(*received).as_secs())
             }),
+            received: current.map(|(_, received)| *received),
         }
     }
 }
