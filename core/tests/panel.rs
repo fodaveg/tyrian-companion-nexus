@@ -465,6 +465,26 @@ fn magic_find_without_coverage_falls_back_to_the_plugin_or_a_dash_and_says_why()
     assert!(has(&live_state.view(false).magic_find, "Lectura del addon: sin cobertura (un efecto necesita estado en vivo)"));
 }
 
+#[test]
+fn points_are_whole_when_they_are_and_have_one_decimal_when_not() {
+    for (value, text) in [
+        (0.0, "0"),
+        (333.0, "333"),
+        (332.5, "332.5"),
+        (12.49, "12.5"),
+        (12.44, "12.4"),
+        (12.04, "12"),
+        (12.96, "13"),
+        (0.05, "0.1"),
+        (-5.0, "-5"),
+        (-0.5, "-0.5"),
+        (-12.26, "-12.3"),
+        (9999.9, "9999.9"),
+    ] {
+        assert_eq!(panel::points(value), text, "{value}");
+    }
+}
+
 /// What the Options window shows of each reader's last pass, for a screenshot.
 #[test]
 fn the_reader_diagnostics_name_the_outcome_the_exact_reason_and_the_cost() {

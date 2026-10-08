@@ -540,12 +540,17 @@ fn magic_find_text(figure: Option<&str>, from_plugin: bool, english: bool) -> St
 }
 
 /// Percentage points as the panel writes them: whole when they are, else with one decimal.
+///
+/// Rounded to tenths with a cast, on purpose: `f64::round` makes the Windows DLL import a
+/// rounding function from the C runtime, and its import table is meant not to grow.
 pub fn points(value: f32) -> String {
-    let tenths = (f64::from(value) * 10.0).round() / 10.0;
-    if tenths.fract() == 0.0 {
-        format!("{tenths:.0}")
+    let scaled = f64::from(value) * 10.0;
+    let tenths = if scaled >= 0.0 { (scaled + 0.5) as i64 } else { (scaled - 0.5) as i64 };
+    let (sign, tenths) = (if tenths < 0 { "-" } else { "" }, tenths.abs());
+    if tenths % 10 == 0 {
+        format!("{sign}{}", tenths / 10)
     } else {
-        format!("{tenths:.1}")
+        format!("{sign}{}.{}", tenths / 10, tenths % 10)
     }
 }
 
