@@ -33,6 +33,10 @@ struct FakeHost {
     prepared: Arc<AtomicU32>,
     /// What the verification comes to once it is done: `None` is a source that samples.
     verdict: Arc<Mutex<Option<ReadError>>>,
+    /// The slice of pending work does not end until it is interrupted.
+    block_prepare: Arc<AtomicBool>,
+    /// The game window is closing.
+    exiting: Arc<AtomicBool>,
 }
 impl FakeHost {
     fn new() -> Self {
@@ -47,6 +51,8 @@ impl FakeHost {
             pending: Arc::new(AtomicU32::new(0)),
             prepared: Arc::new(AtomicU32::new(0)),
             verdict: Arc::new(Mutex::new(None)),
+            block_prepare: Arc::new(AtomicBool::new(false)),
+            exiting: Arc::new(AtomicBool::new(false)),
             game: Arc::new(Mutex::new(GameReading {
                 is_gameplay: Some(true),
                 mumble: Some(MumbleSnapshot {
@@ -66,8 +72,15 @@ impl Host for FakeHost {
     fn read_game(&self) -> GameReading {
         self.game.lock().unwrap().clone()
     }
-    fn prepare_inventory(&self, _stop: &AtomicBool) -> bool {
+    fn prepare_inventory(&self, _stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
         self.prepared.fetch_add(1, Ordering::Relaxed);
+        // A slice that would go on for as long as it is let: only being interrupted ends it.
+        if self.block_prepare.load(Ordering::Relaxed) {
+            while !interrupted() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return false;
+        }
         // One slice of the work that is left, as the adapter does on each call.
         self.pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1)).is_err()
     }
@@ -105,7 +118,7 @@ impl Host for FakeHost {
         })
     }
     fn game_exiting(&self) -> bool {
-        false
+        self.exiting.load(Ordering::Relaxed)
     }
     fn open_app(&self, _: LaunchApp) -> ObsidianLaunchOutcome {
         ObsidianLaunchOutcome::Launched
@@ -351,6 +364,33 @@ fn a_pending_verdict_that_ends_in_a_system_failure_says_read_failed() {
     // Said once; the source goes on trying, a second apart, and has nothing new to say.
     p.only_heartbeats(6);
     assert_eq!(state.live_epochs_opened(), 0);
+    handle.stop();
+}
+
+/// A slice of the pending work lasts a second in the adapter. Told to stop, the worker cut it
+/// at once; with the game closing it did not, and the `bye` waited for the slice to run out.
+/// The slice here never runs out by itself: only being interrupted ends it.
+#[test]
+fn a_slice_of_pending_work_is_cut_short_when_the_game_is_closing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    host.block_prepare.store(true, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    // The worker is inside the slice.
+    let waiting = std::time::Instant::now();
+    while host.prepared.load(Ordering::Relaxed) == 0 {
+        assert!(waiting.elapsed() < Duration::from_secs(5), "the source was never asked to prepare");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let closing = std::time::Instant::now();
+    host.exiting.store(true, Ordering::Relaxed);
+    let bye = p.next();
+    assert_eq!((bye["type"].as_str(), bye["reason"].as_str()), (Some("bye"), Some("game_exit")), "{bye}");
+    assert!(closing.elapsed() < Duration::from_secs(1), "the bye took {:?}", closing.elapsed());
+    // Nothing was sampled and nothing said about the source on the way out.
+    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
     handle.stop();
 }
 

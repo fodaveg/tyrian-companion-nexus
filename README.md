@@ -136,8 +136,14 @@ for it, on that thread: on a cold, slow disk it sent no heartbeat for as long as
 took, and the plugin takes the connection for lost after 15 seconds without one. Now a pass
 of that thread is at most the second of the slice, the one read of the file that was under
 way when it ran out, and the quarter of a second it waits on its socket: about a second and
-a quarter between two chances to send a heartbeat. The hash has no time limit of its own: a
-disk however slow gets its verdict, some passes later.
+a quarter between two chances to send a heartbeat, and the slice is cut short at once when
+the worker is told to stop or the game is closing.
+
+The hash has no time limit of its own, and nothing shows how far it has got. For as long as
+it takes, the source stays in "waiting for confirmation", nothing of the game is read and
+there is no sample. It ends in a verdict, or in a failure of the system if the file stops
+being readable; being slow never ends it. On a disk slow enough, that is a source that goes
+on waiting with nothing on screen that says why.
 
 **While that verdict is pending the addon says nothing about it to the plugin.** It is not a
 reading that failed: the source is not ready to sample yet (`Host::prepare_inventory`), so the
@@ -656,8 +662,11 @@ of that click.
 
 A save that fails used to go to the log and nowhere else, and the window looked as it does
 after one that worked. Options now says so in red above the port, in English and Spanish,
-until a save is written: the file is as it was before, what was changed is in use until the
-game closes, and **Save** tries again. And if the game dies between the write of
+until the newest settings are on disk: the file is as it was before, what was changed is in
+use until the game closes, and **Save** tries again. The settings the disk refused are kept,
+and the next save that gets through writes the newest there are, its own or those: an older
+save that crossed a newer one that failed neither puts its own settings on disk nor turns
+the notice off. And if the game dies between the write of
 `settings.json.tmp` and its rename, that file stays behind with the token in it: it is
 removed, without being read, the next time the addon loads its settings, before anything can
 save.

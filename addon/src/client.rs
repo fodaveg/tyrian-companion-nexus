@@ -61,8 +61,8 @@ impl Host for NexusHost {
 
     /// The game's executable is verified before the first sample, a slice of its hash on each
     /// pass: not ready, and nothing to tell the plugin, while that is under way.
-    fn prepare_inventory(&self, stop: &AtomicBool) -> bool {
-        crate::inventory::prepare(stop)
+    fn prepare_inventory(&self, stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
+        crate::inventory::prepare(stop, interrupted)
     }
 
     fn game_exiting(&self) -> bool {

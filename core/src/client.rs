@@ -110,7 +110,11 @@ pub trait Host: Send + 'static {
     /// does not call [`Host::read_inventory`], opens no epoch and tells the plugin nothing, as
     /// when it is not time to sample yet. The Windows adapter verifies the game's executable
     /// here, a slice of its hash at a time. A host with nothing to prepare is always ready.
-    fn prepare_inventory(&self, _stop: &AtomicBool) -> bool { true }
+    ///
+    /// `interrupted` says when that part of the work has to be cut short at once: the worker
+    /// was told to stop, or the game is closing and its `bye` is owed. The loop decides that,
+    /// not the host; `stop` is the worker's own flag, as [`Host::read_inventory`] gets it.
+    fn prepare_inventory(&self, _stop: &AtomicBool, _interrupted: &dyn Fn() -> bool) -> bool { true }
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
@@ -507,7 +511,9 @@ fn serve(
                 // A source that is still getting ready has no sample and no failure to report:
                 // the pass goes by like one in which it is not time to sample, and it is asked
                 // again on the next. Nothing about it is put on the wire.
-                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) && host.prepare_inventory(stop) {
+                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context)
+                    && host.prepare_inventory(stop, &|| stop.load(Ordering::Relaxed) || host.game_exiting())
+                {
                     let sample = host.read_inventory(stop);
                     if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
                     state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());

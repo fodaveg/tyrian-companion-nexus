@@ -248,13 +248,26 @@ pub enum Saved {
 #[derive(Debug, Default)]
 pub struct SaveGuard {
     held: std::sync::atomic::AtomicBool,
-    /// The last save that reached the disk failed there: the file is not what is in use.
+    /// The newest settings that were asked to be saved are not on disk: the file is not what is
+    /// in use. Kept next to `line`, where it is decided, so that a frame can ask without
+    /// taking that lock.
     failed: std::sync::atomic::AtomicBool,
     /// The last ticket handed out.
     issued: std::sync::atomic::AtomicU64,
-    /// The ticket of the settings on disk, and the lock every write is made under. Taken only
-    /// to write: never by a frame that saves nothing.
-    written: std::sync::Mutex<u64>,
+    /// What is on disk and what is not, and the lock every write is made under. Taken only to
+    /// write: never by a frame that saves nothing.
+    line: std::sync::Mutex<Line>,
+}
+
+/// Where the saves stand.
+#[derive(Debug, Default)]
+struct Line {
+    /// The ticket of the settings on disk.
+    written: u64,
+    /// The newest settings that reached the disk and were refused by it, with their ticket.
+    /// They are still what the user asked for last: the next save that gets through writes
+    /// them, if its own are older, and until one does the notice stays.
+    unwritten: Option<(u64, Settings)>,
 }
 
 impl SaveGuard {
@@ -263,7 +276,7 @@ impl SaveGuard {
             held: std::sync::atomic::AtomicBool::new(false),
             failed: std::sync::atomic::AtomicBool::new(false),
             issued: std::sync::atomic::AtomicU64::new(0),
-            written: std::sync::Mutex::new(0),
+            line: std::sync::Mutex::new(Line { written: 0, unwritten: None }),
         }
     }
 
@@ -288,37 +301,60 @@ impl SaveGuard {
     /// [`save`], unless the guard holds and `request` is automatic, or settings with a later
     /// `ticket` are already on disk. Call it with no other lock held: it waits for the disk,
     /// and for a write that is under way.
+    ///
+    /// What is written is the newest settings there are: these, or newer ones that an earlier
+    /// save could not get onto the disk. Two saves can cross and the newer one fail; the older
+    /// one, coming after it, then carries the newer settings instead of putting its own on
+    /// disk under settings that are in use and not saved.
     pub fn save(&self, dir: &Path, settings: &Settings, request: SaveRequest, ticket: SaveTicket) -> std::io::Result<Saved> {
-        let mut written = self.written.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut line = self.line.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Asked under the lock: an automatic save that waited for the explicit one that lifts
         // the hold goes through after it.
         if request == SaveRequest::Automatic && self.held() {
             return Ok(Saved::Held);
         }
-        if ticket.0 < *written {
+        if ticket.0 < line.written {
             return Ok(Saved::Superseded);
         }
-        let saved = save(dir, settings);
-        // Told to the user until a save works: the error itself only goes to the log, and the
-        // window that asked for the save looks the same whether it was written or not.
-        self.failed.store(saved.is_err(), std::sync::atomic::Ordering::Relaxed);
-        saved?;
-        *written = ticket.0;
-        self.held.store(false, std::sync::atomic::Ordering::Relaxed);
-        Ok(Saved::Written)
+        let (newest, newest_settings) = match &line.unwritten {
+            Some((refused, refused_settings)) if *refused > ticket.0 => (*refused, refused_settings),
+            _ => (ticket.0, settings),
+        };
+        let saved = save(dir, newest_settings);
+        if saved.is_ok() {
+            line.written = newest;
+            line.unwritten = None;
+            self.held.store(false, std::sync::atomic::Ordering::Relaxed);
+        } else if newest == ticket.0 {
+            line.unwritten = Some((ticket.0, settings.clone()));
+        }
+        // Told to the user until what was asked for last is on disk: the error itself only
+        // goes to the log, and the window that asked looks the same either way.
+        self.failed.store(line.unwritten.is_some(), std::sync::atomic::Ordering::Relaxed);
+        saved.map(|()| Saved::Written)
     }
 
-    /// Whether the last save that reached the disk failed there, which is when Options shows
-    /// [`SAVE_FAILED_NOTICE`]. A save that was held or overtaken wrote nothing and changes
-    /// nothing here; the next one that is written clears it.
+    /// Whether the newest settings that were asked to be saved are not on disk, which is when
+    /// Options shows [`SAVE_FAILED_NOTICE`]. A save that was held or overtaken changes nothing
+    /// here, and neither does an older one that is written while a newer one is not: it is
+    /// cleared when the newest settings there are get written.
     pub fn failed(&self) -> bool {
         self.failed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// A save that could not even be tried: the caller has no directory to write in. Told like
-    /// one that failed on the disk.
-    pub fn could_not_try(&self) {
-        self.failed.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// A save that could not even be tried: the caller has no directory to write in. Its
+    /// settings are kept and told like those of one that failed on the disk, unless it is one
+    /// the guard would have held anyway.
+    pub fn could_not_try(&self, settings: &Settings, request: SaveRequest, ticket: SaveTicket) {
+        let mut line = self.line.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if request == SaveRequest::Automatic && self.held() {
+            return;
+        }
+        let newer = line.unwritten.as_ref().is_none_or(|(refused, _)| ticket.0 >= *refused);
+        if ticket.0 >= line.written && newer {
+            line.unwritten = Some((ticket.0, settings.clone()));
+        }
+        self.failed.store(line.unwritten.is_some(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -620,15 +656,60 @@ mod tests {
         assert!(!guard.failed());
         assert_eq!(load(&dir).settings.port, 50062);
         // No directory to save in is told the same way, and cleared the same way.
-        guard.could_not_try();
+        let nowhere = Settings { port: 50063, ..settings.clone() };
+        guard.could_not_try(&nowhere, SaveRequest::Automatic, guard.ticket());
         assert!(guard.failed());
         assert_eq!(guard.save(&dir, &settings, SaveRequest::Automatic, guard.ticket()).expect("save succeeds"), Saved::Written);
+        assert!(!guard.failed());
+        assert_eq!(load(&dir).settings.port, 50060, "the save after it is newer, and writes its own");
+        // One the guard would have held anyway is not a failure to tell.
+        guard.hold();
+        guard.could_not_try(&nowhere, SaveRequest::Automatic, guard.ticket());
         assert!(!guard.failed());
         let [english, spanish] = SAVE_FAILED_NOTICE;
         assert_ne!(english, spanish);
         for notice in SAVE_FAILED_NOTICE {
             assert!(notice.contains("settings.json") && notice.contains("Save"), "{notice}");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two saves cross, and the newer one fails on the disk. The older one, which gets there
+    /// after it, must not leave its own settings on disk and the notice off: what the user
+    /// asked for last would be in use and not saved, with nothing saying so.
+    #[test]
+    fn an_older_save_that_works_does_not_hide_a_newer_one_that_failed() {
+        let dir = temp_dir("newer-failed");
+        let guard = SaveGuard::new();
+        let start = Settings { port: 50070, ..Settings::default() };
+        assert_eq!(guard.save(&dir, &start, SaveRequest::Explicit, guard.ticket()).expect("save succeeds"), Saved::Written);
+        let older = (Settings { show_farming_panel: true, ..start.clone() }, guard.ticket());
+        let newer = (Settings { farming_panel_collapsed: true, ..older.0.clone() }, guard.ticket());
+        // The newer one reaches the disk first, and the disk refuses it.
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        assert!(guard.save(&dir, &newer.0, SaveRequest::Automatic, newer.1).is_err());
+        assert!(guard.failed());
+        fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        // The older one comes after it and the disk takes it: what is written is the newest
+        // settings there are, and only because of that the notice goes.
+        assert_eq!(guard.save(&dir, &older.0, SaveRequest::Automatic, older.1).expect("save succeeds"), Saved::Written);
+        assert_eq!(load(&dir).settings, newer.0, "what the user asked for last is what is on disk");
+        assert!(!guard.failed());
+        // The same when the disk goes on refusing: nothing is written and the notice stays,
+        // whichever of the two is tried.
+        let (third, fourth) = (guard.ticket(), guard.ticket());
+        let latest = Settings { farming_english: true, ..newer.0.clone() };
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        assert!(guard.save(&dir, &latest, SaveRequest::Automatic, fourth).is_err());
+        assert!(guard.save(&dir, &newer.0, SaveRequest::Automatic, third).is_err());
+        assert!(guard.failed());
+        assert_eq!(load(&dir).settings, newer.0);
+        fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        // A save newer than the one that failed carries its own settings, which are newer still.
+        let newest = Settings { farming_panel_transparent: true, ..latest.clone() };
+        assert_eq!(guard.save(&dir, &newest, SaveRequest::Automatic, guard.ticket()).expect("save succeeds"), Saved::Written);
+        assert_eq!(load(&dir).settings, newest);
+        assert!(!guard.failed());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -652,14 +733,15 @@ mod tests {
         let next = (Settings { farming_english: true, ..folded.0.clone() }, guard.ticket());
         assert_eq!(guard.save(&dir, &next.0, SaveRequest::Automatic, next.1).expect("save succeeds"), Saved::Written);
         assert_eq!(load(&dir).settings, next.0);
-        // A newer save that failed is not on disk: the older one after it is the best there is.
+        // A newer save that failed is not on disk, and an older one after it is not overtaken:
+        // it goes through, with the newer settings (the test below).
         let older = (Settings { port: 50040, ..next.0.clone() }, guard.ticket());
-        let newest = guard.ticket();
+        let newest = (Settings { port: 50041, ..next.0.clone() }, guard.ticket());
         fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
-        assert!(guard.save(&dir, &Settings::default(), SaveRequest::Automatic, newest).is_err());
+        assert!(guard.save(&dir, &newest.0, SaveRequest::Automatic, newest.1).is_err());
         fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
         assert_eq!(guard.save(&dir, &older.0, SaveRequest::Automatic, older.1).expect("save succeeds"), Saved::Written);
-        assert_eq!(load(&dir).settings.port, 50040);
+        assert_eq!(load(&dir).settings.port, 50041);
         let _ = fs::remove_dir_all(&dir);
     }
 

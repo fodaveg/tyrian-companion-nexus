@@ -408,7 +408,7 @@ fn write_settings(save: PendingSave) {
         }
         Err(error) => {
             log::error!("failed to save settings: no addon directory ({error})");
-            SAVE_GUARD.could_not_try();
+            SAVE_GUARD.could_not_try(&save.settings, save.request, save.ticket);
         }
     }
 }
@@ -420,7 +420,8 @@ fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
 /// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
 /// input thread; only flips a window flag and, for the panel, saves the shared setting. The
 /// flag is flipped under `PENDING`, which every frame takes, and the file is written after it
-/// is let go: a frame never waits for this thread's disk.
+/// is let go: a frame that saves nothing does not wait for this thread's disk. A frame that
+/// saves, on a click, can: it waits on the guard's own lock for this write to end.
 pub fn activate_shortcut(shortcut: Shortcut) {
     let save = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());

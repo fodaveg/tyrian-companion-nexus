@@ -275,7 +275,9 @@ static READER: Verdict<Option<NativeReader>, Unverified> = Verdict::new(VERIFY_R
 
 /// One step of verifying the executable: at most `executable::SLICE` of hashing, and once the
 /// file is the certified build's, the check of its loaded image.
-fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, Unverified> {
+///
+/// `interrupted` cuts the slice of hashing short: the worker told to stop, or the game closing.
+fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<NativeReader>, Unverified> {
     // Safety: OS module metadata; no game function is resolved or called.
     let Ok(module) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else {
         return Attempt::Failed(Unverified::Failed);
@@ -294,7 +296,7 @@ fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, Unverified> {
     }
     if let Check::Hashing(hashing) = &mut *check {
         let until = Instant::now() + executable::SLICE;
-        let step = hashing.advance(|| stop.load(Ordering::Relaxed) || Instant::now() >= until);
+        let step = hashing.advance(|| interrupted() || Instant::now() >= until);
         match step {
             Step::Unfinished => return Attempt::Unfinished(Unverified::Pending),
             Step::Decided(Build::Certified) => *check = Check::Certified,
@@ -319,8 +321,11 @@ fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, Unverified> {
 /// bridge worker asks this before every sample and takes none while it says no, so a verdict
 /// that is pending never reaches the plugin as a reading that failed. Once there is a verdict,
 /// or the system has failed, [`sample`] says which.
-pub fn prepare(stop: &AtomicBool) -> bool {
-    READER.get_or_try(Instant::now, || verify(stop)).err() != Some(Unverified::Pending)
+///
+/// `interrupted` is the worker's: it cuts the slice short when it was told to stop or the game
+/// is closing, so that neither waits for the hash.
+pub fn prepare(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
+    READER.get_or_try(Instant::now, || verify(stop, interrupted)).err() != Some(Unverified::Pending)
 }
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     threads: 0,
@@ -368,7 +373,7 @@ pub fn sample(stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
     // `Pending` is only here for a caller that did not ask `prepare`: with no sample to give,
     // the one answer left in `ReadError` that does not stop the source.
     let native = READER
-        .get_or_try(Instant::now, || verify(stop))
+        .get_or_try(Instant::now, || verify(stop, &|| stop.load(Ordering::Relaxed)))
         .map_err(|_: Unverified| ReadError::ReadFailed)?;
     native
         .as_ref()
