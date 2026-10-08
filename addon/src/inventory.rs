@@ -32,6 +32,7 @@ use tyrian_companion_nexus_core::magic_find::{
     self, MagicFind, MagicFindCoverage, MagicFindProfile,
 };
 use tyrian_companion_nexus_core::passive::Uncovered;
+use tyrian_companion_nexus_core::perf::{CycleTimes, ReaderCounters};
 use tyrian_companion_nexus_core::verdict::Verdict;
 use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
@@ -195,6 +196,12 @@ static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
 pub fn diagnostics() -> Diagnostics {
     *DIAGNOSTICS.lock().unwrap_or_else(|p| p.into_inner())
 }
+/// What the cycles have taken and how they have ended since the addon loaded, for the reader
+/// diagnostics of the Options window. Local: none of it goes to the plugin.
+static COUNTERS: Mutex<ReaderCounters> = Mutex::new(ReaderCounters::new());
+pub fn counters() -> ReaderCounters {
+    *COUNTERS.lock().unwrap_or_else(|p| p.into_inner())
+}
 fn publish(d: Diagnostics) {
     *DIAGNOSTICS.lock().unwrap_or_else(|p| p.into_inner()) = d;
 }
@@ -326,7 +333,12 @@ impl NativeReader {
         wallet::wallet_snapshot(reader, profile, context)
     }
     fn sample(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
-        let deadline = Instant::now() + Duration::from_millis(750);
+        // The cycle's start, read once: its deadline counts from it, and so do the times taken
+        // below for the reader diagnostics. Those are the clock read around the passes this
+        // cycle runs anyway: no read of the game, no pass and no guard is added or moved.
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(750);
+        let mut took = CycleTimes::default();
         let mut reader = Reader::new(ProcessMemory::until(stop, deadline));
         let mut wallet_reader =
             Reader::bounded(ProcessMemory::until(stop, deadline), wallet::MAX_BYTES);
@@ -409,11 +421,16 @@ impl NativeReader {
                     break;
                 }
             }
+            let found = Instant::now();
+            took.threads = Some(found.saturating_duration_since(started));
             let context = contexts
                 .into_iter()
                 .next()
                 .ok_or(ReadError::RootUnavailable)?;
-            let mut snapshot = inventory::inventory_snapshot(&mut reader, self.profile, context)?;
+            let read = inventory::inventory_snapshot(&mut reader, self.profile, context);
+            let after_inventory = Instant::now();
+            took.inventory = Some(after_inventory.saturating_duration_since(found));
+            let mut snapshot = read?;
             // Only after a whole inventory sample. Whatever happens here, that sample stands:
             // without a wallet it goes out with `currencies:none`.
             match self.wallet(&mut wallet_reader, context) {
@@ -423,9 +440,13 @@ impl NativeReader {
                 }
                 Err(error) => coverage = WalletCoverage::Unavailable(error),
             }
+            // The one reading of the clock there was here: the wallet's time ends at it and the
+            // two extras' deadline counts from it, as it did.
+            let after_wallet = Instant::now();
+            took.wallet = Some(after_wallet.saturating_duration_since(after_inventory));
             // These two stay in the local diagnostics, where the panel and Options read them.
             // Nothing here changes the sample that goes out, whose `free_slots` remains `None`.
-            let extras = deadline.min(Instant::now() + EXTRAS_TIME);
+            let extras = deadline.min(after_wallet + EXTRAS_TIME);
             // A copy refused by the clock comes back as `ReadFailed`; name it for what it was.
             let named = |error: Uncovered, expired: &AtomicBool| match error {
                 Uncovered::ReadFailed if expired.load(Ordering::Relaxed) => Uncovered::Deadline,
@@ -439,6 +460,8 @@ impl NativeReader {
                 Ok(slots) => BagCoverage::Read(slots),
                 Err(error) => BagCoverage::Unavailable(named(error, &bags_expired)),
             };
+            let after_bags = Instant::now();
+            took.bags = Some(after_bags.saturating_duration_since(after_wallet));
             let reader = magic_find_reader.insert(Reader::bounded(
                 ProcessMemory::timed(stop, extras, &magic_find_expired),
                 magic_find::MAX_BYTES,
@@ -447,8 +470,20 @@ impl NativeReader {
                 Ok(value) => MagicFindCoverage::Read(value),
                 Err(error) => MagicFindCoverage::Unavailable(named(error, &magic_find_expired)),
             };
+            took.magic_find = Some(after_bags.elapsed());
             Ok(snapshot)
         })();
+        // For Options only: what the cycle and each of its passes took, how it ended, and how
+        // many threads of its own the process had. A cycle that ended while still looking for
+        // the game's context spent all of its time there. `ReadFailed` after the deadline is a
+        // copy the clock refused, which the count keeps apart from one that failed.
+        let ended = Instant::now();
+        took.cycle = ended.saturating_duration_since(started);
+        took.threads = took.threads.or(Some(took.cycle));
+        COUNTERS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(took, result.as_ref().err().copied(), ended >= deadline, own as u32);
         publish(Diagnostics {
             threads: own as u32,
             bytes: reader.bytes as u32,

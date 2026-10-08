@@ -290,6 +290,8 @@ does widen the window in which a context change discards that copy. To bound it 
 deadline of their own: 250 ms from the moment they start, and never past the cycle's 750 ms.
 A pass cut by that clock is no coverage with the reason "deadline", distinct from a failed
 copy. Neither the 250 ms nor the real duration of a pass has been measured in a running game.
+The reader diagnostics of Options show how long each pass takes, last and longest, so that a
+session in the game can say.
 Reading them after the sample is sealed would remove that effect altogether; it needs a second
 call from the client loop and is not done here.
 
@@ -738,10 +740,37 @@ Reader: last pass 1 s ago
 They show the outcome with its exact reason, the bytes and reads of that pass against its
 budget, taken from the reader's own constants, and how long ago the pass ran. These lines are
 the reader's raw last pass: they do not hold anything, so they show a failed cycle the panel
-is painting over, and "not read" for a capture that failed as a whole. The readers do not time
-themselves, so there is no duration, but a pass cut by the clock has its own reason: `Deadline`
-means the 250 ms the two readers share, or the cycle's 750 ms, ran out, and `Bounds` that a
-pass asked for more than its byte budget.
+is painting over, and "not read" for a capture that failed as a whole. A pass cut by the clock
+has its own reason: `Deadline` means the 250 ms the two readers share, or the cycle's 750 ms,
+ran out, and `Bounds` that a pass asked for more than its byte budget.
+
+Under **Reader diagnostics**, four more lines say what the cycles and the panel take, counted
+since the addon loaded:
+
+```
+Pass times in µs, last cycle (max): threads 210 (max 1900); inventory 3400 (max 5200); wallet 300 (max 450); bags 150 (max 300); Magic Find 9000 (max 41000); whole cycle 13200 (max 48900)
+Captures: 1234 ok; 3 Changed; 1 ReadFailed; 0 Deadline; 0 Bounds; 12 other; epochs opened: 7
+Most own threads in a cycle: 61 / 128
+Panel frame in µs: mean 0.4, max 41.3, over 123456 frames (2345 computed)
+```
+
+- **Pass times**: microseconds each pass of the last cycle took and the longest it has ever
+  taken: finding the game's context among the process's own threads, the inventory, the
+  wallet, the bags, the Magic Find, and the whole cycle. "not run" is a pass the last cycle
+  did not reach. The cycle has 750 ms, and the bags and the Magic Find 250 ms between them.
+- **Captures**, by how they ended: `Changed` is an inventory that changed under the copy,
+  `ReadFailed` a copy that failed with time left, `Deadline` one refused because the cycle's
+  750 ms had run out, `Bounds` a count, a pointer or a budget out of bounds, and "other" no
+  character to read, a profile that does not match or another build. "Epochs opened" is how
+  many times the source has started an epoch (a `live_open`), over all its connections.
+- **Most own threads**: against the 128 the reader stops at.
+- **Panel frame**: what the panel's render callback takes, mean and longest, and how many of
+  those frames had to compute the panel (see "What a frame of the panel costs").
+
+They are the clock read around the passes the cycle already ran: no read of the game, no
+pass and no guard is added or moved for them. None of them is sent to the plugin, in `live1`
+or in `farm1`. They are there to answer in the game what has only been estimated outside it,
+and none of these numbers has been looked at in a running game yet.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -1045,6 +1074,11 @@ covers what does not need a running game:
   same memory as a panel computed on every frame, frame by frame through a whole session, a
   folded panel leaving the memory a painted one would, and every setter of what the panel
   paints moving the counter the cache looks at;
+- the counters of the reader diagnostics (`core/src/perf.rs`): last and longest time of a
+  pass, captures counted by how they ended with a copy refused by the clock kept apart from
+  one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and
+  every `live_open` counted as one epoch opened. The clock readings themselves are taken in
+  the Windows adapter and are not tested;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the

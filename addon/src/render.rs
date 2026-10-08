@@ -22,6 +22,7 @@ use nexus::imgui::{Condition, DrawListMut, StyleColor, StyleVar, TreeNodeFlags, 
 
 use tyrian_companion_nexus_core::quick_access::{PanelWindows, Shortcut};
 use tyrian_companion_nexus_core::panel::{self, Cell, Frame, PanelCache, PanelMemory, Tone};
+use tyrian_companion_nexus_core::perf::FrameTime;
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
@@ -57,6 +58,9 @@ struct PanelState {
 }
 
 static PANEL: Mutex<PanelState> = Mutex::new(PanelState { memory: PanelMemory::new(), cache: PanelCache::new(), reserved: None });
+
+/// How long `farming_render` takes, every frame since the addon loaded. For Options only.
+static RENDER_TIME: Mutex<FrameTime> = Mutex::new(FrameTime::new());
 
 /// The widths the window is reserved from, and the language and the font they were measured in.
 #[derive(Clone, Copy, PartialEq)]
@@ -200,6 +204,14 @@ pub fn options_render(ui: &Ui) {
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
         ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
             tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
+        // What the cycles and the panel's frame take, and how the captures end, since the addon
+        // loaded: the numbers that say whether the reader fits its deadlines in this game.
+        // They are shown here and nowhere else. 128 is the adapter's cap on own threads.
+        for line in crate::inventory::counters().lines(shared.live_epochs_opened(), 128) {
+            ui.text_wrapped(line);
+        }
+        let computed = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cache.computed();
+        ui.text_wrapped(RENDER_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).line(computed));
         if let Some(context) = shared.live_context() {
             ui.text_wrapped(format!("Character: {}; map: {}", context.character.as_deref().unwrap_or("unknown"), context.map_id.map_or_else(|| "unknown".into(), |id|id.to_string())));
         }
@@ -488,8 +500,15 @@ struct BarClicks {
 /// button. Its width, and so the window's, is reserved from `panel::width_samples`, not from
 /// what the cells say now, so nothing moves when a text changes.
 pub fn farming_render(ui: &Ui) {
-    let shared = state::shared();
+    // Timed for the reader diagnostics of Options: what this callback costs every frame.
     let now = std::time::Instant::now();
+    farming_frame(ui, now);
+    RENDER_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record(now.elapsed());
+}
+
+/// One frame of the panel at `now`, the instant the callback was entered.
+fn farming_frame(ui: &Ui, now: std::time::Instant) {
+    let shared = state::shared();
     let (windows, english, reset) = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Only a panel that is shown takes the reset; closed, the request waits for it.

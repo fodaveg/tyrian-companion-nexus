@@ -295,14 +295,18 @@ fn v2_welcome_even_with_v3_capability_never_reads_inventory() {
 #[test]
 fn reconnect_uses_new_nonce_epoch_and_baseline_without_replaying_prior_increase() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (host, _state, handle) = start(&listener);
+    let (host, state, handle) = start(&listener);
+    assert_eq!(state.live_epochs_opened(), 0);
     let mut p = Peer::new(listener.accept().unwrap().0);
     p.auth(3, true);
     p.next();
     let first = p.open();
+    // Counted for the Options window before the `live_open` is written, and only there.
+    assert_eq!(state.live_epochs_opened(), 1);
     p.ready(&first);
     p.sample(&first, 0, 0);
     p.ack(&first, 0, "stored");
+    assert_eq!(state.live_epochs_opened(), 1, "a sample of the same epoch opens none");
     drop(p);
     host.quantity.store(9, Ordering::Relaxed);
     let mut p = Peer::new(listener.accept().unwrap().0);
@@ -310,6 +314,7 @@ fn reconnect_uses_new_nonce_epoch_and_baseline_without_replaying_prior_increase(
     assert_eq!(p.next()["type"], "context");
     let second = p.open();
     assert_ne!(first, second);
+    assert_eq!(state.live_epochs_opened(), 2, "added up over the connections of one load");
     p.ready(&second);
     p.sample(&second, 0, 9);
     p.ack(&second, 0, "stored");

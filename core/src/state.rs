@@ -106,6 +106,9 @@ pub struct SharedState {
     /// (`panel::PanelCache`), so a setter of any of those that did not bump it would leave the
     /// panel a quarter of a second behind, and one added later has to bump it too.
     panel_generation: AtomicU64,
+    /// How many inventory epochs the source has opened since the addon loaded, over all its
+    /// connections. For the reader diagnostics of the Options window; never sent.
+    live_epochs: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -139,7 +142,19 @@ impl SharedState {
             launch_app: Mutex::new(LaunchApp::default()),
             obsidian_launch_outcome: Mutex::new(None),
             panel_generation: AtomicU64::new(0),
+            live_epochs: AtomicU64::new(0),
         }
+    }
+
+    /// Epochs the inventory source has opened since the addon loaded (`live::Channel::
+    /// epochs_opened`, added up over its connections).
+    pub fn live_epochs_opened(&self) -> u64 {
+        self.live_epochs.load(Ordering::Relaxed)
+    }
+
+    /// Adds the epochs a capture opened: none, or one.
+    pub fn count_live_epochs(&self, opened: u64) {
+        self.live_epochs.fetch_add(opened, Ordering::Relaxed);
     }
 
     /// The number of the state the panel is painted from: it changes whenever any of it does.

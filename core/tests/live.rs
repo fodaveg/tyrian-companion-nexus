@@ -176,6 +176,37 @@ fn owner_character_map_loading_reconnect_and_read_failure_all_require_baseline()
         "live_open"
     );
 }
+/// For the reader diagnostics: every `live_open` is one epoch opened, and nothing else is.
+#[test]
+fn every_live_open_is_counted_as_one_epoch_opened_and_nothing_else_is() {
+    let now = Instant::now();
+    let mut c = channel(now);
+    assert_eq!(c.epochs_opened(), 0);
+    let open = c.capture(Ok(sample(0)), 0, now).remove(0);
+    assert_eq!((open["type"].as_str(), c.epochs_opened()), (Some("live_open"), 1));
+    ready(&mut c, &open, now);
+    c.pending_frames(0, now);
+    ack(&mut c, &open, 0, "stored", now);
+    // Samples of the same epoch open none.
+    for cursor in 1..=3 {
+        let time = now + Duration::from_secs(cursor);
+        assert_eq!(c.capture(Ok(sample(cursor as u32)), 0, time)[0]["type"], "live_begin");
+        ack(&mut c, &open, cursor, "stored", time);
+        assert_eq!(c.epochs_opened(), 1);
+    }
+    // A capture that fails cuts the epoch and opens none; the one after it opens the next.
+    let failed = c.capture(Err(ReadError::ReadFailed), 0, now + Duration::from_secs(4));
+    assert_eq!((failed[0]["type"].as_str(), c.epochs_opened()), (Some("live_status"), 1));
+    assert_eq!(c.capture(Ok(sample(4)), 0, now + Duration::from_secs(5))[0]["type"], "live_open");
+    assert_eq!(c.epochs_opened(), 2);
+    // And so does a change of context.
+    let mut other_map = context();
+    other_map.map_id = Some(15);
+    c.context_changed(&other_map);
+    assert_eq!(c.epochs_opened(), 2);
+    assert_eq!(c.capture(Ok(sample(4)), 1, now + Duration::from_secs(6))[0]["type"], "live_open");
+    assert_eq!(c.epochs_opened(), 3);
+}
 #[test]
 fn unavailable_status_before_any_open_has_null_epoch_and_invalidated_ready_is_ignored() {
     let now = Instant::now();

@@ -27,6 +27,7 @@ pub mod magic_find;
 pub mod obsidian_launch;
 pub mod panel;
 pub mod passive;
+pub mod perf;
 pub mod price;
 pub mod protocol;
 pub mod quick_access;

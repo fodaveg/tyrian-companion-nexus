@@ -506,7 +506,12 @@ fn serve(
                         if let Some(line) = session.next_outgoing(captured_at, &after) {
                             if stream.write_all(line.as_bytes()).is_err() { return end; }
                         }
-                    } else { frames.extend(session.live.capture(sample, ctx, captured_at)); }
+                    } else {
+                        let opened = session.live.epochs_opened();
+                        frames.extend(session.live.capture(sample, ctx, captured_at));
+                        // For the Options window only: how often the source starts an epoch.
+                        state.count_live_epochs(session.live.epochs_opened().saturating_sub(opened));
+                    }
                 }
                 state.set_live_status(session.live.status);
                 let Some(lines) = session.live_lines(frames, Instant::now()) else { return end; };
