@@ -912,6 +912,10 @@ Obsidian and the player is free to start either one first — the addon just kee
 forever, on the backoff table above, without surfacing that as an error. A connection that
 drops is retried the same way, well inside the ten minutes the plugin waits before it closes
 the session, so a short hiccup continues the same session instead of starting a new one.
+A connection that had lived for 10 seconds since the plugin's `welcome` starts the table over
+and is retried after 250 ms. One the plugin welcomes and closes before that is one more step
+up the table, like one that never got a `welcome`: a plugin that keeps closing at once is
+retried every 5 seconds in the end, not four times a second.
 Only two answers stop the retries until the settings change: a rejected token
 (`auth_rejected`) and a protocol version the plugin does not speak (`version_unsupported`).
 It shows "update the Nexus addon" when the plugin's `v` is 3 or more, and "update Tyrian

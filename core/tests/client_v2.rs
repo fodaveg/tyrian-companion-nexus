@@ -681,6 +681,33 @@ fn a_retryable_error_reconnects_on_the_backoff() {
     handle.stop();
 }
 
+/// A plugin that welcomes the addon and closes the connection at once, every time. A `welcome`
+/// alone used to start the backoff over, so this was a reconnection every 250 ms for ever. Each
+/// wait is measured from the plugin's `error` to the next connection, so it cannot come out
+/// shorter than what the client slept.
+#[test]
+fn a_plugin_that_welcomes_and_closes_at_once_is_retried_on_growing_waits() {
+    let plugin = FakePlugin::start();
+    let (_state, host, handle) = start_client(&plugin, TOKEN);
+    let mut waits = Vec::new();
+    let mut closed_at: Option<Instant> = None;
+    for _ in 0..4 {
+        let mut connection = plugin.accept();
+        waits.extend(closed_at.map(|closed_at| closed_at.elapsed()));
+        connection.authenticate(SERVER_A, NONCE_1, 5000);
+        // The context is the client acting on the welcome: this connection was authenticated.
+        assert_eq!(connection.expect_sequenced()["type"], "context");
+        closed_at = Some(Instant::now());
+        connection.send(r#"{"v":3,"type":"error","code":"frame_schema"}"#);
+        drop(connection);
+    }
+    for (wait, at_least) in waits.iter().zip([500, 1_000, 2_000]) {
+        assert!(*wait >= Duration::from_millis(at_least), "waited {wait:?} of {waits:?}, expected at least {at_least} ms");
+    }
+    assert!(host.alerts().is_empty(), "a retryable error shows nothing to the player");
+    handle.stop();
+}
+
 #[test]
 fn a_closing_game_says_game_exit_and_does_not_reconnect() {
     let plugin = FakePlugin::start();
