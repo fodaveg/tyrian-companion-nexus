@@ -236,7 +236,7 @@ impl SharedState {
         lock(&self.farming).view(now)
     }
 
-    /// Starts a `price1` handshake for this connection.
+    /// Starts a `price2` handshake for this connection.
     pub fn begin_price_connection(&self, nonce: &str) {
         lock(&self.price).begin(nonce);
     }

@@ -188,7 +188,7 @@ impl Session {
         Some(line)
     }
 
-    /// Same for the `price1` subscription, sent once and only after its `price_cap`.
+    /// Same for the `price2` subscription, sent once and only after its `price_cap`.
     pub fn subscribe_price(&mut self, now: Instant) -> Option<String> {
         if self.next_seq > crate::live::MAX_SAFE { return None; }
         let line = build_price_sub_line(&self.nonce, self.next_seq)?;

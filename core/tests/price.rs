@@ -1,4 +1,4 @@
-//! `price1` frames, freshness, formatting and the painted lines, against the fixture shared
+//! `price2` frames, freshness, formatting and the painted lines, against the fixture shared
 //! byte for byte with the plugin.
 
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ const NONCE: &str = "AQEBAQEBAQEBAQEBAQEBAQ";
 const OTHER_NONCE: &str = "Yk3m1Qw9Lr0aT7yUc2Vb5g";
 
 fn fixture() -> Vec<Value> {
-    let text = include_str!("fixtures/price1.json");
+    let text = include_str!("fixtures/price2.json");
     serde_json::from_str::<Value>(text).unwrap()["frames"]
         .as_array()
         .unwrap()
@@ -69,10 +69,10 @@ fn every_fixture_frame_parses_and_the_sub_line_matches_byte_for_byte() {
         ),
         (
             PriceStatus::Ok,
-            Some(293),
-            Some(73312),
-            Some(312),
-            Some(77987),
+            Some(345),
+            Some(86250),
+            Some(367),
+            Some(91750),
             Some(412)
         )
     );
@@ -173,10 +173,11 @@ fn a_status_other_than_ok_with_any_amount_is_discarded() {
 }
 
 #[test]
-fn cap_and_state_require_v3_price1_a_22_character_nonce_ttl_and_int32_sequence() {
+fn cap_and_state_require_v3_price2_a_22_character_nonce_ttl_and_int32_sequence() {
     for (key, invalid) in [
         ("v", json!(2)),
-        ("tag", json!("price2")),
+        ("tag", json!("price1")),
+        ("tag", json!("price3")),
         ("ttl", json!(14)),
         ("ttl", json!(16)),
         ("nonce", json!("")),
@@ -196,6 +197,7 @@ fn cap_and_state_require_v3_price1_a_22_character_nonce_ttl_and_int32_sequence()
     for (key, invalid) in [
         ("v", json!(2)),
         ("tag", json!("farm1")),
+        ("tag", json!("price1")),
         ("nonce", json!("a!")),
         ("nonce", json!("a".repeat(21))),
         ("nonce", json!("a".repeat(23))),
@@ -207,6 +209,24 @@ fn cap_and_state_require_v3_price1_a_22_character_nonce_ttl_and_int32_sequence()
     let mut maximum = frame(2);
     maximum["seq"] = json!(i32::MAX);
     assert_eq!(reading(&maximum).seq, i32::MAX);
+}
+
+/// `price1` had the same shape and carried net figures. Its capability, its state and every
+/// other frame of its fixture are dropped whole, and the subscription never names it.
+#[test]
+fn the_price1_tag_is_discarded_in_every_frame_and_never_sent() {
+    for index in 0..fixture().len() {
+        if index == 1 {
+            continue; // `price_sub` travels the other way.
+        }
+        let mut old = frame(index);
+        assert_eq!(old["tag"], json!("price2"));
+        old["tag"] = json!("price1");
+        assert_discard(&old);
+    }
+    let sub = build_price_sub_line(NONCE, 7).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&sub).unwrap()["tag"], json!("price2"));
+    assert!(!sub.contains("price1"));
 }
 
 #[test]
@@ -283,10 +303,11 @@ fn format_coins_drops_leading_zero_units() {
         (0, "0c"),
         (45, "45c"),
         (289, "2s 89c"),
-        (293, "2s 93c"),
+        (345, "3s 45c"),
+        (367, "3s 67c"),
         (10_000, "1g 0s 0c"),
-        (73312, "7g 33s 12c"),
-        (77987, "7g 79s 87c"),
+        (86250, "8g 62s 50c"),
+        (91750, "9g 17s 50c"),
         (i32::MAX, "214748g 36s 47c"),
     ] {
         assert_eq!(format_coins(copper), text);
@@ -319,19 +340,26 @@ fn panel_lines_per_status_and_language_use_the_contract_texts() {
     assert_eq!(
         texts(&ok, false),
         owned(&[
-            ("Saco · neto de comisión", false),
-            ("Inmediata 2s 93c · ×250 7g 33s 12c", false),
-            ("Publicar 3s 12c · ×250 7g 79s 87c", false)
+            ("Saco · precio del bazar", false),
+            ("Pedido 3s 45c · ×250 8g 62s 50c", false),
+            ("Oferta 3s 67c · ×250 9g 17s 50c", false)
         ])
     );
     assert_eq!(
         texts(&ok, true),
         owned(&[
-            ("Bag · net of fees", false),
-            ("Instant 2s 93c · ×250 7g 33s 12c", false),
-            ("List 3s 12c · ×250 7g 79s 87c", false)
+            ("Bag · trading post price", false),
+            ("Buy order 3s 45c · ×250 8g 62s 50c", false),
+            ("Sell offer 3s 67c · ×250 9g 17s 50c", false)
         ])
     );
+    // Gross figures only: the net wording is gone from the block in both languages.
+    for english in [false, true] {
+        for (text, _) in texts(&ok, english) {
+            let lower = text.to_lowercase();
+            assert!(!lower.contains("neto") && !lower.contains("net of") && !lower.contains("comisi"), "{text}");
+        }
+    }
     let none = view_of(3, 0);
     assert_eq!(
         texts(&none, false),
@@ -383,8 +411,8 @@ fn a_missing_side_paints_a_dash_and_no_age_is_painted_on_ok() {
     let now = Instant::now();
     state.accept_price(reading(&value), now);
     let view = state.price_view(now);
-    assert_eq!(texts(&view, false)[2].0, "Publicar —");
-    assert_eq!(texts(&view, true)[2].0, "List —");
+    assert_eq!(texts(&view, false)[2].0, "Oferta —");
+    assert_eq!(texts(&view, true)[2].0, "Sell offer —");
     for (text, _) in texts(&view, false) {
         assert!(!text.contains("hace") && !text.contains("412"), "{text}");
     }
@@ -422,8 +450,9 @@ fn every_line_fits_34_characters_for_realistic_amounts() {
         for english in [false, true] {
             for (text, warning) in texts(&view_of(index, 0), english) {
                 // The contract's own stale text, "Saco: precio caducado (hace 11 min)", is 35
-                // characters: it wraps in the window instead of being shortened.
-                let limit = if warning { 35 } else { 34 };
+                // characters: it wraps in the window instead of being shortened. So is the
+                // short English label the contract allows, "Sell offer", with these amounts.
+                let limit = if warning || text.starts_with("Sell offer") { 35 } else { 34 };
                 assert!(text.chars().count() <= limit, "{text}");
             }
         }

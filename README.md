@@ -443,21 +443,27 @@ cross-build checks the ImGui code and DLL dependencies. These checks cannot cert
 placement, text contrast, keyboard navigation or Nexus load in a running Guild Wars 2
 session; Fedora/Wine/game runtime QA remains pending until measured on that client.
 
-### Bag price (`price1`)
+### Bag price (`price2`)
 
-Between the rate (bags/hour) and the character's slots, the panel can show what one Labyrinth
-bag (item 36038) would fetch: **Instant** (sell to the best buy order) and **List** (post at the
-lowest sell offer), each for one bag and for a stack of 250. The figures are **net of the
-trading-post fee** (5 % listing plus 10 % sales, charged on the total, so a stack is not
-250 times the single net) and are written as `7g 33s 12c`. The block also says when there is no
-quote on a side (`—`), when the price has not been read yet, and, in the warning colour, when
-it expired (`Bag: price expired (11 min ago)`). When the quote is fine its age is not shown.
+Between the rate (bags/hour) and the character's slots, the panel can show the trading-post
+price of one Labyrinth bag (item 36038): **Buy order** (the highest buy order, what selling at
+once is offered) and **Sell offer** (the lowest sell offer), each for one bag and for a stack of
+250. The figures are **gross, as the trading post shows them**: no fee is taken off, and a
+stack is exactly 250 times the unit price. They are written as `8g 62s 50c`. The contract's
+full labels ("Highest buy order", "Lowest sell offer") do not fit the panel's width next to the
+amounts, so the block uses its short forms. The block also says when there is no quote on a
+side (`—`), when the price has not been read yet, and, in the warning colour, when it expired
+(`Bag: price expired (11 min ago)`). When the quote is fine its age is not shown.
 
 The price comes from the public trading-post data and can be up to about **2 minutes** old,
 and older if the plugin's network fails (it expires after 10 minutes). It is not "live" and the
-panel never says so. Nothing is shown outside an active session, and nothing at all with a plugin
-older than `price1`: that plugin never announces the capability, the addon never subscribes, and
-the block simply does not appear.
+panel never says so. Nothing is shown outside an active session.
+
+`price2` replaces `price1`, which had the same frames with figures net of the trading-post
+fees. The tag is what tells them apart, and this addon reads `price2` only. With a plugin that
+announces `price1`, or none, the capability is discarded without closing the connection, the
+addon never subscribes, and the block simply does not appear: a net figure is never painted
+under a gross label. Addon 0.7.1 and older do the same with a plugin that announces `price2`.
 
 Wire: `price_cap` (`v,type,nonce,tag`) after authentication; the addon sends one `price_sub`
 only after receiving it on that connection, on the same outgoing sequence as `farming_sub`; then

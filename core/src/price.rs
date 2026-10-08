@@ -1,12 +1,19 @@
-//! The optional `price1` feed: the public trading-post price of one bag (item 36038), net of
-//! the trading-post fees, computed by the plugin. No account identity, API key, item id or game
-//! input belongs to this feed. Same shape as `farming`: a per-connection capability, an
+//! The optional `price2` feed: the public trading-post price of one bag (item 36038), gross, as
+//! the trading post shows it, with no fee taken off. No account identity, API key, item id or
+//! game input belongs to this feed. Same shape as `farming`: a per-connection capability, an
 //! increasing sequence, 15 s of monotonic transport freshness, and an `age` that keeps growing
 //! locally from the moment a frame is received.
+//!
+//! `price2` replaces `price1`, whose frames had the same shape and carried the figures net of
+//! fees. The tag is the only thing telling them apart, so a `price1` capability or state is
+//! discarded: this addon never paints a net figure under a gross label, nor the reverse.
 
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+
+/// The only tag this addon subscribes to and reads.
+pub const PRICE_TAG: &str = "price2";
 
 /// A transport snapshot expires after this, whatever the quote's own age.
 pub const PRICE_TTL: Duration = Duration::from_secs(15);
@@ -33,11 +40,11 @@ pub struct PriceState {
     pub seq: i32,
     pub ttl: u64,
     pub st: PriceStatus,
-    /// Net of selling one bag at the best bid.
+    /// Unit price of the highest buy order: what selling one bag at once is offered.
     pub sell: Option<i32>,
     #[serde(rename = "sellStack")]
     pub sell_stack: Option<i32>,
-    /// Net of listing one bag at the lowest ask.
+    /// Unit price of the lowest sell offer.
     pub list: Option<i32>,
     #[serde(rename = "listStack")]
     pub list_stack: Option<i32>,
@@ -51,7 +58,7 @@ impl PriceState {
         let amounts = [self.sell, self.sell_stack, self.list, self.list_stack];
         self.v == 3
             && self.kind == "price_state"
-            && self.tag == "price1"
+            && self.tag == PRICE_TAG
             && self.ttl == 15
             && self.seq > 0
             && amounts
@@ -206,18 +213,17 @@ pub fn panel_lines(view: &PriceView, english: bool) -> Vec<PriceLine> {
         PriceStatus::Ok if reading.sell.is_none() && reading.list.is_none() => {
             vec![line(tr("Saco: sin cotización", "Bag: no quote"), false)]
         }
+        // The contract's full labels are "Pedido más alto" / "Oferta más baja" ("Highest buy
+        // order" / "Lowest sell offer"). With the amounts after them they run to 40 characters,
+        // past what the panel holds on one line, so its own short forms are used.
         PriceStatus::Ok => vec![
-            line(tr("Saco · neto de comisión", "Bag · net of fees"), false),
+            line(tr("Saco · precio del bazar", "Bag · trading post price"), false),
             line(
-                side(
-                    &tr("Inmediata", "Instant"),
-                    reading.sell,
-                    reading.sell_stack,
-                ),
+                side(&tr("Pedido", "Buy order"), reading.sell, reading.sell_stack),
                 false,
             ),
             line(
-                side(&tr("Publicar", "List"), reading.list, reading.list_stack),
+                side(&tr("Oferta", "Sell offer"), reading.list, reading.list_stack),
                 false,
             ),
         ],

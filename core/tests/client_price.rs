@@ -1,4 +1,4 @@
-//! Real loopback transport for the `price1` handshake: one subscription, only after `price_cap`.
+//! Real loopback transport for the `price2` handshake: one subscription, only after `price_cap`.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -99,8 +99,8 @@ fn of_type<'a>(lines: &'a [Value], kind: &str) -> Vec<&'a Value> {
 }
 
 fn price_state(seq: u64) -> Value {
-    json!({"v":3,"type":"price_state","tag":"price1","nonce":NONCE,"seq":seq,"ttl":15,"st":"ok",
-        "sell":293,"sellStack":73312,"list":312,"listStack":77987,"age":412})
+    json!({"v":3,"type":"price_state","tag":"price2","nonce":NONCE,"seq":seq,"ttl":15,"st":"ok",
+        "sell":345,"sellStack":86250,"list":367,"listStack":91750,"age":412})
 }
 
 #[test]
@@ -109,15 +109,15 @@ fn subscribes_once_after_price_cap_on_the_shared_sequence_and_paints_state() {
     let (_host, state, handle) = start(&listener);
     let mut peer = Peer::new(listener.accept().unwrap().0);
     peer.welcome(3);
-    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price1"}));
-    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price1"}));
+    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price2"}));
+    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price2"}));
     peer.send(price_state(1));
     let lines = peer.drain(Duration::from_millis(900));
     let subs = of_type(&lines, "price_sub");
     assert_eq!(subs.len(), 1, "{lines:?}");
     assert_eq!(
         subs[0],
-        &json!({"v":3,"type":"price_sub","nonce":NONCE,"seq":subs[0]["seq"],"tag":"price1"})
+        &json!({"v":3,"type":"price_sub","nonce":NONCE,"seq":subs[0]["seq"],"tag":"price2"})
     );
     // It took its place in the one outgoing sequence, with no gap and no repeat.
     let seqs: Vec<u64> = lines
@@ -149,6 +149,31 @@ fn a_v3_server_that_never_sends_price_cap_never_receives_price_sub() {
     handle.stop();
 }
 
+/// An older plugin announces `price1`, whose figures are net of fees. Its capability is dropped
+/// like any line this addon cannot read: no subscription, no price, and the connection stays up.
+#[test]
+fn a_price1_capability_is_discarded_without_subscribing_or_closing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_host, state, handle) = start(&listener);
+    let mut peer = Peer::new(listener.accept().unwrap().0);
+    peer.welcome(3);
+    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price1"}));
+    let mut old_state = price_state(1);
+    old_state["tag"] = json!("price1");
+    peer.send(old_state);
+    let lines = peer.drain(Duration::from_millis(900));
+    assert!(of_type(&lines, "price_sub").is_empty(), "{lines:?}");
+    assert!(of_type(&lines, "bye").is_empty(), "{lines:?}");
+    assert!(!of_type(&lines, "heartbeat").is_empty(), "the connection is still alive: {lines:?}");
+    let view = state.price_view(Instant::now());
+    assert!(!view.capable && view.reading.is_none());
+    // Same socket, no reconnection: the capability it does understand is still taken.
+    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price2"}));
+    let lines = peer.drain(Duration::from_millis(900));
+    assert_eq!(of_type(&lines, "price_sub").len(), 1, "{lines:?}");
+    handle.stop();
+}
+
 #[test]
 fn farming_and_alert_deduplication_are_unchanged_next_to_price() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -156,7 +181,7 @@ fn farming_and_alert_deduplication_are_unchanged_next_to_price() {
     let mut peer = Peer::new(listener.accept().unwrap().0);
     peer.welcome(3);
     peer.send(json!({"v":3,"type":"farming_cap","nonce":NONCE,"tag":"farm1"}));
-    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price1"}));
+    peer.send(json!({"v":3,"type":"price_cap","nonce":NONCE,"tag":"price2"}));
     let alert = json!({"v":3,"type":"alert","seq":1,"kind":"valuable_loot","name":"Fixture","quantity":2,"totalCopper":20,"content":"Aviso"});
     peer.send(alert.clone());
     peer.send(alert);

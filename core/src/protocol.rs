@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::farming::FarmingState;
-use crate::price::PriceState;
+use crate::price::{PriceState, PRICE_TAG};
 
 /// Default port the plugin listens on. Matches the spec and the plugin's own default.
 pub const DEFAULT_PORT: u16 = 47823;
@@ -351,11 +351,12 @@ pub fn build_farming_sub_line(nonce: &str, seq: u64) -> Option<String> {
     })).ok()?)
 }
 
-/// Subscribes to `price1` only after an authenticated `price_cap` on this connection: an older
-/// host closes the connection with `unexpected_message` if it gets one it never announced.
+/// Subscribes to `price2` only after an authenticated `price_cap` with that tag on this
+/// connection: an older host closes the connection with `unexpected_message` if it gets one it
+/// never announced, and one that announces `price1` rejects any other tag as `frame_schema`.
 pub fn build_price_sub_line(nonce: &str, seq: u64) -> Option<String> {
     finish_line(serde_json::to_string(&serde_json::json!({
-        "v": PROTOCOL_VERSION, "type": "price_sub", "nonce": nonce, "seq": seq, "tag": "price1"
+        "v": PROTOCOL_VERSION, "type": "price_sub", "nonce": nonce, "seq": seq, "tag": PRICE_TAG
     })).ok()?)
 }
 
@@ -599,7 +600,8 @@ fn parse_farming_state(line: &str, record: &Map<String, Value>) -> Option<Farmin
 fn parse_price_cap(line: &str, record: &Map<String, Value>) -> Option<String> {
     if !has_exact_keys(record, &["v", "type", "nonce", "tag"]) { return None; }
     let cap: FarmingCapability = serde_json::from_str(line).ok()?;
-    if cap.v != 3 || cap.kind != "price_cap" || cap.tag != "price1" { return None; }
+    // Any other tag, `price1` included, is discarded: no subscription follows and nothing closes.
+    if cap.v != 3 || cap.kind != "price_cap" || cap.tag != PRICE_TAG { return None; }
     as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS && *nonce == cap.nonce)
 }
 
