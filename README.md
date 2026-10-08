@@ -65,10 +65,13 @@ panel has its own title bar, with a button that removes the window's background.
 0.8.0 also reads, passively and from the game's own stored inputs, the bags' capacity with
 their used and free slots and the Magic Find with its three addends. The panel paints those
 readings in its Slots and MF lines, and MF warns when it falls from the session's highest.
+A cycle that fails does not make them blink: the last verified reading is held for 5 seconds.
 Without a reading the lines fall back to what the plugin sends, and the plugin's Magic Find is
 written `MF: 333% partial` because it is not a live reading. Neither reading is sent to the
-plugin yet, and no frame of the protocol changes. See "Labyrinth farming panel" and "Bag slots
-and Magic Find (read by the addon, not on the wire)".
+plugin yet, and no frame of the protocol changes. The two readers have only run against
+fixtures: the count of used positions and the 250 ms they share have not been seen in the
+game. See "Labyrinth farming panel" and "Bag slots and Magic Find (read by the addon, not on
+the wire)".
 
 ## What it does, and does not do
 
@@ -648,24 +651,36 @@ Slots and MF take their figure from the first of these that has one:
 When the addon's reader tried and got nothing, the line falls back to 2 or 3 and its tooltip
 says "Addon reading: no coverage" with the reason: this game build is not the audited one,
 structure not recognised, character unavailable, outside the read limits, misaligned pointer,
-inconsistent data, an effect needs live state, changed while reading, or read failed. No
-coverage is not something the player did, so nothing turns red for it. Outside sampling (no
-session, a source conflict, an unsupported build) the reader's last figures are not painted:
-they are of then, not of now, and the tooltip says the reader is not sampling. The MF tooltip
-ends with the host's preparation state and, unless the figure is the addon's own, with
-"temporary buffs unverified".
+inconsistent data, an effect needs live state, changed while reading, read failed, or the read
+ran out of time. No coverage is not something the player did, so nothing turns red for it.
+Outside sampling (no session, a source conflict, an unsupported build) the reader's last
+figures are not painted: they are of then, not of now, and the tooltip says the reader is not
+sampling. The MF tooltip ends with the host's preparation state and, unless the figure is the
+addon's own, with "temporary buffs unverified".
+
+A cycle of the reader that comes back without a figure does not make the line blink. The panel
+**holds the last verified reading for 5 seconds** (`panel::READING_HOLD`): while the reader
+keeps returning none, the cell stays exactly as it was, the same figure in the same colour,
+and only its tooltip changes, adding "Last reading N s ago" and the reason there is no new
+one. After 5 seconds without a reading the line falls back as above. The hold only applies
+while the reader is sampling: outside sampling it is dropped at once and does not come back,
+and a session that starts holds nothing of what was read before it. The session's highest
+Magic Find is fed only by readings the reader returned, never by one that is being held.
 
 In Options, under "Reader diagnostics", two lines give each reader's last pass, for a
 screenshot when a figure is missing:
 
 ```
-Bags: read, 97 used of 160, 63 free (5 bags in 8 bag slots); bytes: 1480 / 8192; reads: 37
-Magic Find: no coverage, ReadFailed (read failed); bytes: 41200 / 65536; reads: 603
+Bags: read, 97 used of 160, 63 free (5 bags in 8 bag slots); bytes: 1480 / 16384; reads: 37
+Magic Find: no coverage, Deadline (the read ran out of time); bytes: 41200 / 65536; reads: 603
 ```
 
 They show the outcome with its exact reason and the bytes and reads of that pass against its
-budget. The readers do not time themselves, so there is no duration: a Magic Find pass cut by
-the cycle's 750 ms deadline shows as `ReadFailed` with fewer bytes than its budget.
+budget, taken from the reader's own constants. These lines are the reader's raw last pass:
+they do not hold anything, so they show a failed cycle the panel is painting over. The readers
+do not time themselves, so there is no duration, but a pass cut by the clock has its own
+reason: `Deadline` means the 250 ms the two readers share, or the cycle's 750 ms, ran out,
+and `Bounds` that a pass asked for more than its byte budget.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -800,9 +815,11 @@ Still to be looked at in the game; none of the panel's painting has been seen th
   against the hero panel, and removing an effect to see MF fall, turn orange and name the
   addend. If either line says `—` or `partial`, the two "Reader diagnostics" lines of Options
   say why.
-- Whether a reading that fails now and then (`Changed`, or `ReadFailed` when the Magic Find
-  pass does not fit the cycle's 750 ms) makes Slots or MF alternate between the addon's figure
-  and the plugin's. Nothing holds the last good reading across a failed cycle.
+- Whether the two readers fit the 250 ms they share. That figure is an estimate: if it is
+  short, the diagnostics line of Magic Find says `Deadline`, and if it stays short for more
+  than the 5 seconds the panel holds a reading, MF falls back to the plugin's figure or `—`.
+- The count of used positions: it was not part of the external probes at all, so "used of
+  total" against the inventory window is the first time it is checked.
 - That the panel paints at all as described: the two columns side by side without touching,
   the large figure, the dot, and the three drawn buttons of the bar.
 - That the bar's buttons take the click, that the panel moves when dragged by its bar or an
@@ -890,9 +907,11 @@ covers what does not need a running game:
   every cell, the same cells in every state, the rate's two thresholds and that it does not
   alternate between them, slots and Magic Find from the addon's reader, from the plugin and
   from neither, every no-coverage reason of both readers with and without the plugin's
-  figure, the fall of a verified Magic Find from the session's highest, the two diagnostics
-  lines of Options, and that every text the panel produces is covered by a width reserved for
-  its own cell. None of the painting itself is tested;
+  figure, the fall of a verified Magic Find from the session's highest, the hold of the last
+  verified reading (one failed cycle changes neither cell, six seconds let go, outside
+  sampling at once, a new session, and that a held reading does not move the highest), the two
+  diagnostics lines of Options, and that every text the panel produces is covered by a width
+  reserved for its own cell. None of the painting itself is tested;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the
