@@ -7,3 +7,11 @@ members = ["core", "addon"]
 # only for the `WndProc` callback's types, at the version `nexus` already pulls in); the one
 # shared crate, `log`, is pinned to the same `0.4` in both, so a workspace-level table would
 # only add indirection.
+
+# The release DLL is linked without its COFF symbol and string tables. They are not loaded and
+# nothing reads them at run time, but they carried the name of every symbol of the link, the
+# ones `addon/src/absent_imports.rs` defines included, so `strings` on the DLL still showed
+# `__imp_SuspendThread` after the import itself was gone. The cost: a Rust backtrace from this
+# DLL has addresses and no function names. Panic messages keep their file and line.
+[profile.release]
+strip = "symbols"

@@ -50,10 +50,11 @@ and `not_gameplay` still block until the game context changes.
 Version 0.7.2 shows the bag price gross, as the trading post shows it, over `price2`; it needs
 a plugin that announces `price2`, and with an older one the price block does not appear. The
 rate and price blocks keep a fixed number of lines, so the panel no longer jumps: what used to
-be lines under the rate is now its colour and tooltip. The DLL no longer imports
-`SuspendThread` or `SetThreadContext`, which no code of the addon ever called. See "Bag price
-(`price2`)", "A panel that does not jump" and "Why the DLL does not import `SuspendThread` or
-`SetThreadContext`".
+be lines under the rate is now its colour and tooltip, and the bags ETA no longer blinks. The
+DLL no longer imports `SuspendThread`, `GetThreadContext`, `SetThreadContext`, `ResumeThread`
+or `SetThreadPriority`, which no code of the addon ever called; it ships without its symbol
+table and is reproducible. See "Bag price (`price2`)", "A panel that does not jump", "Why the
+DLL does not import the thread-control functions" and "Reproducible DLL".
 
 ## What it does, and does not do
 
@@ -287,32 +288,59 @@ print(sorted({d.dll.decode().lower() for d in pe.DIRECTORY_ENTRY_IMPORT}))
 "
 ```
 
-#### Why the DLL does not import `SuspendThread` or `SetThreadContext`
+#### Why the DLL does not import the thread-control functions
 
-Linking winpthread statically used to leave those two `kernel32.dll` imports in the DLL, with
-no code in the addon calling either. libstdc++ and libgcc need a handful of pthread calls
-(`pthread_once`, the thread-specific keys, mutexes, condition variables), which pulls
-`libpthread.a(libwinpthread_la-thread.o)` into the link. That member also holds
-`pthread_cancel`, the only function in the link that references the two, and Fedora builds
-winpthreads without `-ffunction-sections`: the member is a single `.text` section, so
-`--gc-sections` cannot drop the unused part. Nothing reaches `pthread_cancel`: its only caller
-is `pthread_kill`, in the same member, which nothing references.
+Linking winpthread statically used to leave five `kernel32.dll` imports in the DLL with no
+code in the addon calling any of them: `SuspendThread`, `GetThreadContext`,
+`SetThreadContext`, `ResumeThread` and `SetThreadPriority`. libstdc++ and libgcc need a
+handful of pthread calls (`pthread_once`, the thread-specific keys, mutexes, condition
+variables), which pulls `libpthread.a(libwinpthread_la-thread.o)` and
+`(libwinpthread_la-sched.o)` into the link. Fedora builds winpthreads without
+`-ffunction-sections`: each member is a single `.text` section, so `--gc-sections` cannot drop
+the unused part. Three functions kept that way are the only code in the link that references
+the five, and nothing reaches them: `pthread_cancel` (its only caller is `pthread_kill`, which
+nothing references), `pthread_create` and `pthread_setschedparam`.
 
-`addon/src/absent_imports.rs` defines `__imp_SuspendThread` and `__imp_SetThreadContext`
-inside the DLL, so the linker never pulls them from `libkernel32.a` and they stay out of the
-import table. The unreachable `pthread_cancel` body is still in the DLL, bound to two local
-functions that only return failure. The same file notes what that means for any future code
-that would call either function.
+`addon/src/absent_imports.rs` defines the five `__imp_` symbols inside the DLL, so the linker
+never pulls them from `libkernel32.a` and they stay out of the import table. The unreachable
+function bodies are still in the DLL, bound to local functions that only return failure. The
+same file notes what that means for any future code that would call one of the five.
 
-To check, this must print nothing:
+The release profile also strips the DLL's symbol table (`strip = "symbols"` in `Cargo.toml`),
+which is where those names would otherwise still be readable. To check, neither of these may
+print anything:
 
 ```sh
 x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll \
-  | grep -E 'SuspendThread|SetThreadContext'
+  | grep -E 'SuspendThread|GetThreadContext|SetThreadContext|ResumeThread|SetThreadPriority'
+strings target/x86_64-pc-windows-gnu/release/tyrian_companion_nexus.dll \
+  | grep -i -E 'SuspendThread|GetThreadContext|SetThreadContext'
 ```
 
-`GetThreadContext` and `ResumeThread` are still imported: the first only from that same
-`pthread_cancel`, the second also from `pthread_create`.
+What the DLL still imports of that kind, and why:
+
+- `OpenThread`, `Thread32First`, `Thread32Next`, `CreateToolhelp32Snapshot`,
+  `ReadProcessMemory`, `GetCurrentProcess`, `GetCurrentProcessId`: the passive inventory reader
+  (`addon/src/inventory.rs`). It opens threads of its own process with
+  `THREAD_QUERY_INFORMATION` to find their TEBs and copies memory of its own process.
+- `CreateThread`, `GetCurrentThread`, `GetCurrentThreadId`, `SwitchToThread`,
+  `SetThreadStackGuarantee`: Rust's standard library; the addon's connection thread is a Rust
+  thread.
+- `GetThreadPriority`: winpthreads' bookkeeping of the calling thread, which is live.
+- `OpenProcess`, `GetProcessAffinityMask`, `SetProcessAffinityMask`, `IsDebuggerPresent`,
+  `GetHandleInformation` and msvcrt's `_beginthreadex`: only referenced by other unreachable
+  winpthreads functions (`sched_getscheduler` and `sched_setscheduler`;
+  `pthread_num_processors_np` and `pthread_set_num_processors_np`; `pthread_setname_np`;
+  `pthread_join`, `pthread_detach`, `pthread_cancel` and their helpers; `pthread_create`).
+  Not removed.
+
+#### Reproducible DLL
+
+The link passes `--no-insert-timestamp` (`.cargo/config.toml`), so the PE header and the export
+table carry no link date. With the symbol table stripped as well, two clean builds of the same
+tree in the same directory, with the same toolchain, give the same file byte for byte, and a
+DLL can be compared by its sha256. Paths of the registry crates are part of the file, so a
+build in another home directory is not expected to match.
 
 `nexus` itself is not published on crates.io under that name — a different, unrelated,
 abandoned 2016 crate holds it — so `addon/Cargo.toml` pins it as a git dependency at tag
