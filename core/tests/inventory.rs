@@ -8,15 +8,28 @@ const CHARCTX: u64 = 0x109000;
 const CHARACTER: u64 = 0x10a000;
 const INV: u64 = 0x10b000;
 const SLOTS: u64 = 0x10c000;
+const RESOLVER: u64 = 0x106000;
 const ITEM: u64 = 0x107000;
 const DEF: u64 = 0x108000;
+const PAYLOAD: u64 = 0x120000;
 const VT: u64 = BASE + 0x225c148;
+const STACK_VT: u64 = BASE + 0x225c460;
+/// A write by the game between two copies: `value` lands at `target` just before the
+/// `visit`th copy that covers `on` is served, whatever the size of that copy.
+#[derive(Clone, Copy)]
+struct Race {
+    on: u64,
+    visit: usize,
+    target: u64,
+    value: u64,
+    size: usize,
+}
 #[derive(Default, Clone)]
 struct Fixture {
     bytes: BTreeMap<u64, u8>,
-    calls: Vec<u64>,
+    calls: Vec<(u64, usize)>,
     forbidden: Vec<u64>,
-    race: Option<(u64, usize, u64)>,
+    race: Option<Race>,
     visits: usize,
 }
 impl Fixture {
@@ -25,30 +38,56 @@ impl Fixture {
             self.bytes.insert(address + i as u64, *byte);
         }
     }
+    /// The field at `target` changes just before it is copied for the `visit`th time.
+    fn racing(mut self, target: u64, visit: usize, value: u64, size: usize) -> Self {
+        self.race = Some(Race {
+            on: target,
+            visit,
+            target,
+            value,
+            size,
+        });
+        self
+    }
+    /// How many copies covered `address`.
+    fn looks(&self, address: u64) -> usize {
+        self.calls
+            .iter()
+            .filter(|(start, size)| (*start..*start + *size as u64).contains(&address))
+            .count()
+    }
 }
 impl Memory for Fixture {
     fn read_exact(&mut self, address: u64, out: &mut [u8]) -> Result<(), ReadError> {
+        // A copy is judged by every byte it covers, not by where it starts.
+        let covered = address..address + out.len() as u64;
         assert!(
-            !self.forbidden.contains(&address),
-            "forbidden read {address:x}"
+            !self.forbidden.iter().any(|byte| covered.contains(byte)),
+            "forbidden read {address:x}+{}",
+            out.len()
         );
         if !(0x100000..0x800000).contains(&address) && !(BASE..BASE + 0x2c48000).contains(&address)
         {
             return Err(ReadError::ReadFailed);
         }
-        if let Some((target, visit, value)) = self.race {
-            if address == target {
+        if let Some(race) = self.race {
+            if covered.contains(&race.on) {
                 self.visits += 1;
-                if self.visits == visit {
-                    self.put(address, value, out.len());
+                if self.visits == race.visit {
+                    self.put(race.target, race.value, race.size);
                 }
             }
         }
-        self.calls.push(address);
+        self.calls.push((address, out.len()));
         for (i, byte) in out.iter_mut().enumerate() {
             *byte = *self.bytes.get(&(address + i as u64)).unwrap_or(&0);
         }
         Ok(())
+    }
+}
+impl Memory for &mut Fixture {
+    fn read_exact(&mut self, address: u64, out: &mut [u8]) -> Result<(), ReadError> {
+        (**self).read_exact(address, out)
     }
 }
 fn profile() -> BuildProfile {
@@ -85,15 +124,15 @@ fn fixture(count: u64) -> Fixture {
         (DEF + 0x28, 12147, 4),
         (ITEM + 0x48, 3, 2),
         (ITEM + 0x58, INV, 8),
-        (ITEM + 0x98, BASE + 0x225c460, 8),
-        (BASE + 0x225c460, BASE + 0x168d10, 8),
+        (ITEM + 0x98, STACK_VT, 8),
+        (STACK_VT, BASE + 0x168d10, 8),
         (ITEM + 0xa0, 3, 4),
         (ITEMCTX, BASE + 0x225bd00, 8),
         (BASE + 0x225bd10, BASE + 0x13c6400, 8),
-        (ITEMCTX + 0x30, 0x106000, 8),
+        (ITEMCTX + 0x30, RESOLVER, 8),
         (ITEMCTX + 0x38, 64, 4),
         (ITEMCTX + 0x3c, 32, 4),
-        (0x106000 + 17 * 8, ITEM, 8),
+        (RESOLVER + 17 * 8, ITEM, 8),
     ] {
         m.put(address, value, size);
     }
@@ -101,6 +140,93 @@ fn fixture(count: u64) -> Fixture {
 }
 fn snapshot(m: Fixture) -> Result<InventorySnapshot, ReadError> {
     inventory_snapshot(&mut Reader::new(m), profile(), CTX)
+}
+/// The first conditional profile on the one item of [`fixture`]: 7 while its definition's
+/// payload says so, 1 otherwise.
+fn conditional(count: u64) -> Fixture {
+    let mut m = fixture(count);
+    let vt = BASE + 0x225d580;
+    for (address, value, size) in [
+        (vt + 8, BASE + 0x13c3e10, 8),
+        (vt + 0x68, BASE + 0x31b980, 8),
+        (vt + 0x70, BASE + 0x13c45d0, 8),
+        (vt + 0xa0, BASE + 0x13c46d0, 8),
+        (vt + 0x260, BASE + 0x13c9d20, 8),
+        (ITEM, vt, 8),
+        (ITEM + 0xa8, BASE + 0x225d898, 8),
+        (BASE + 0x225d898, BASE + 0x13c9d60, 8),
+        (DEF + 0x2c, 5, 4),
+        (DEF + 0x30, PAYLOAD, 8),
+        (PAYLOAD, 1, 4),
+        (ITEM + 0xa0, 7, 4),
+    ] {
+        m.put(address, value, size);
+    }
+    m
+}
+#[derive(Clone, Copy, Debug)]
+enum Branch {
+    /// The quantity getter that reads the stack at a fixed offset.
+    Common,
+    /// The first conditional profile, with its condition met: the stack is read too.
+    Conditional,
+}
+/// A matrix of `positions` whose first `occupied` hold one stack of 7 each, every stack with
+/// an ID, an instance and a definition of its own and all of them of one class.
+fn dense(positions: u64, occupied: u64, branch: Branch) -> Fixture {
+    let mut m = fixture(positions);
+    let vt = match branch {
+        Branch::Common => VT,
+        Branch::Conditional => BASE + 0x225d580,
+    };
+    let evt = BASE + 0x225d898;
+    if let Branch::Conditional = branch {
+        for (off, fun) in [
+            (8, 0x13c3e10),
+            (0x68, 0x31b980),
+            (0x70, 0x13c45d0),
+            (0xa0, 0x13c46d0),
+            (0x260, 0x13c9d20),
+        ] {
+            m.put(vt + off, BASE + fun, 8);
+        }
+        m.put(evt, BASE + 0x13c9d60, 8);
+        m.put(PAYLOAD, 1, 4);
+    }
+    m.put(SLOTS, 0, 8);
+    m.put(ITEMCTX + 0x30, 0x600000, 8);
+    m.put(ITEMCTX + 0x38, 1000, 4);
+    m.put(ITEMCTX + 0x3c, 1000, 4);
+    for n in 0..occupied {
+        let item = 0x200000 + 0x200 * n;
+        let def = 0x400000 + 0x40 * n;
+        for (a, v, z) in [
+            (SLOTS + n * 8, item, 8),
+            (0x600000 + (n + 1) * 8, item, 8),
+            (item, vt, 8),
+            (item + 0x38, n + 1, 4),
+            (item + 0x40, def, 8),
+            (def + 0x28, 12147 + n, 4),
+            (item + 0x48, 3, 2),
+            (item + 0x58, INV, 8),
+            (item + 0x98, STACK_VT, 8),
+            (item + 0xa0, 7, 4),
+        ] {
+            m.put(a, v, z);
+        }
+        if let Branch::Conditional = branch {
+            m.put(def + 0x2c, 5, 4);
+            m.put(def + 0x30, PAYLOAD, 8);
+            m.put(item + 0xa8, evt, 8);
+        }
+    }
+    m
+}
+/// One pass over `m`: its outcome and what it asked for.
+fn pass(m: Fixture) -> (Result<InventorySnapshot, ReadError>, usize, usize) {
+    let mut r = Reader::new(m);
+    let result = inventory_snapshot(&mut r, profile(), CTX);
+    (result, r.reads, r.bytes)
 }
 #[test]
 fn positive_sparse_570_and_unknown_free_slots() {
@@ -130,7 +256,7 @@ fn boundaries_owner_duplicates_and_invalid_pointer_fail_closed() {
         (VT + 0xa0, BASE + 0x13c46d8, 8),
         (ITEMCTX + 0x3c, 65, 4),
         (SLOTS + 8, ITEM, 8),
-        (0x106000 + 17 * 8, ITEM + 8, 8),
+        (RESOLVER + 17 * 8, ITEM + 8, 8),
     ] {
         let mut m = fixture(570);
         m.put(field, value, size);
@@ -195,13 +321,17 @@ fn excluded_item_classification_and_identity_races_reject_the_capture() {
 fn stable_excluded_item_does_not_read_its_owner_definition_or_quantity() {
     let mut fixture = fixture(570);
     fixture.put(ITEM + 0x48, 4, 2);
-    fixture.forbidden = vec![
-        ITEM + 0x38,
-        ITEM + 0x40,
-        ITEM + 0x58,
-        ITEM + 0x98,
-        VT + 0x260,
-    ];
+    // Every byte of each field: a wider copy that only overlaps one of them is refused too.
+    fixture.forbidden = [
+        (ITEM + 0x38, 4),
+        (ITEM + 0x40, 8),
+        (ITEM + 0x58, 8),
+        (ITEM + 0x98, 12),
+        (VT + 0x260, 8),
+    ]
+    .into_iter()
+    .flat_map(|(field, size)| field..field + size)
+    .collect();
     let snapshot = snapshot(fixture).unwrap();
     assert!(snapshot.quantities.is_empty());
     assert_eq!(snapshot.unknown, 0);
@@ -222,16 +352,136 @@ fn wrong_build_and_invalid_ranges_cannot_read() {
 }
 #[test]
 fn identity_quantity_root_and_slot_races_rejected() {
-    for (address, visit, value) in [
-        (ITEM + 0xa0, 2, 4),
-        (INV + 0x70, 2, CHARACTER + 8),
-        (SLOTS, 2, 0),
-        (DEF + 0x28, 2, 36038),
-        (ITEMCTX + 0x30, 2, 0),
+    for (address, visit, value, size) in [
+        (ITEM + 0xa0, 2, 4, 4),
+        (INV + 0x70, 2, CHARACTER + 8, 8),
+        (SLOTS, 2, 0, 8),
+        (DEF + 0x28, 2, 36038, 4),
+        (ITEMCTX + 0x30, 2, 0, 8),
     ] {
+        let m = fixture(570).racing(address, visit, value, size);
+        assert_eq!(snapshot(m), Err(ReadError::Changed), "{address:x}");
+    }
+}
+/// The outcome of a write to `target` before each of its looks after the first, then the
+/// capture a write after the last look leaves standing. Nothing watches a field once its
+/// last look is over, so a look that went missing shows here as a capture that stands.
+fn later_looks(
+    stable: &Fixture,
+    target: u64,
+    size: usize,
+    value: u64,
+    looks: usize,
+) -> Vec<Result<BTreeMap<u32, u32>, ReadError>> {
+    let mut seen = stable.clone();
+    let mut reader = Reader::new(&mut seen);
+    inventory_snapshot(&mut reader, profile(), CTX).unwrap();
+    assert_eq!(seen.looks(target), looks, "looks at {target:x}");
+    (2..=looks + 1)
+        .map(|visit| {
+            snapshot(stable.clone().racing(target, visit, value, size)).map(|s| s.quantities)
+        })
+        .collect()
+}
+#[test]
+fn every_later_look_at_a_volatile_field_of_a_stack_rejects_its_change() {
+    let stable = fixture(570);
+    let stands = Ok(BTreeMap::from([(12147, 3)]));
+    let changed = Err(ReadError::Changed);
+    for (target, size, value, expected) in [
+        // The position empties, or another item takes it.
+        (SLOTS, 8, 0, vec![changed.clone()]),
+        (SLOTS, 8, 0x117000, vec![changed.clone()]),
+        // The item's class, instance reference, resolver entry, definition, ID, location
+        // and owner: read, read again after the quantity and once more in the final pass.
+        (ITEM, 8, VT + 0x800, vec![changed.clone(); 2]),
+        (ITEM + 0x38, 4, 18, vec![changed.clone(); 2]),
+        (RESOLVER + 17 * 8, 8, 0x117000, vec![changed.clone(); 2]),
+        (ITEM + 0x40, 8, 0x118000, vec![changed.clone(); 2]),
+        (DEF + 0x28, 4, 36038, vec![changed.clone(); 2]),
+        (ITEM + 0x48, 2, 4, vec![changed.clone(); 2]),
+        (ITEM + 0x58, 8, INV + 0x1000, vec![changed.clone(); 2]),
+        // The quantity: twice in the item's turn and twice in the final pass.
+        (ITEM + 0xa0, 4, 4, vec![changed.clone(); 3]),
+        // The stack's own class: the final pass takes the pointer it finds and judges it, so
+        // one that is no stack class at all is a profile mismatch there.
+        (
+            ITEM + 0x98,
+            8,
+            STACK_VT + 8,
+            vec![
+                changed.clone(),
+                Err(ReadError::ProfileMismatch),
+                changed.clone(),
+            ],
+        ),
+    ] {
+        let mut expected = expected;
+        expected.push(stands.clone());
+        assert_eq!(
+            later_looks(&stable, target, size, value, expected.len()),
+            expected,
+            "{target:x}"
+        );
+    }
+}
+#[test]
+fn every_later_look_at_a_conditional_quantity_rejects_its_change() {
+    let stable = conditional(570);
+    let stands = Ok(BTreeMap::from([(12147, 7)]));
+    let changed = Err(ReadError::Changed);
+    let mismatch = Err(ReadError::ProfileMismatch);
+    for (target, size, value, expected) in [
+        // The embedded predicate class is judged once per quantity.
+        (ITEM + 0xa8, 8, BASE + 0x225d8a0, vec![mismatch.clone()]),
+        // Subtype, payload and condition: read and read again in each of the two quantities.
+        // The final pass judges the subtype it finds, and takes the payload it finds: one
+        // whose condition is not met gives 1, which is not the 7 of the item's turn.
+        (
+            DEF + 0x2c,
+            4,
+            6,
+            vec![changed.clone(), mismatch.clone(), changed.clone()],
+        ),
+        (DEF + 0x30, 8, PAYLOAD + 0x100, vec![changed.clone(); 3]),
+        (PAYLOAD, 4, 0, vec![changed.clone(); 3]),
+        (ITEM + 0xa0, 4, 4, vec![changed.clone(); 3]),
+        (DEF + 0x28, 4, 36038, vec![changed.clone(); 2]),
+    ] {
+        let mut expected = expected;
+        expected.push(stands.clone());
+        assert_eq!(
+            later_looks(&stable, target, size, value, expected.len()),
+            expected,
+            "{target:x}"
+        );
+    }
+}
+#[test]
+fn a_position_that_changes_after_its_copy_rejects_the_capture() {
+    // Any position of the matrix, occupied or empty, in the first 512 or after them.
+    for position in [0, 1, 300, 511, 512, 569] {
+        for value in [0, 0x117000] {
+            if position == 0 || value != 0 {
+                let m = fixture(570).racing(SLOTS + position * 8, 2, value, 8);
+                assert_eq!(snapshot(m), Err(ReadError::Changed), "{position}");
+            }
+        }
+    }
+    // What is found there the second time is still judged as a pointer.
+    let m = fixture(570).racing(SLOTS + 8, 2, 0x1234, 8);
+    assert_eq!(snapshot(m), Err(ReadError::Bounds));
+    // The change may come at any moment of the pass: here while the item's quantity is read.
+    for (target, value) in [(SLOTS, 0), (SLOTS, 0x117000)] {
         let mut m = fixture(570);
-        m.race = Some((address, visit, value));
-        assert!(snapshot(m).is_err());
+        m.race = Some(Race {
+            on: ITEM + 0xa0,
+            visit: 1,
+            target,
+            value,
+            size: 8,
+        });
+        assert_eq!(snapshot(m), Err(ReadError::Changed), "{target:x}");
     }
 }
 #[test]
@@ -264,9 +514,9 @@ fn conditional_profiles_true_and_certified_false() {
                 (ITEM + embedded, BASE + evt, 8),
                 (BASE + evt + slot, BASE + predicate, 8),
                 (DEF + 0x2c, subtype, 4),
-                (DEF + 0x30, 0x120000, 8),
-                (0x120000 + field, if active { value } else { 0 }, 4),
-                (ITEM + stack, BASE + 0x225c460, 8),
+                (DEF + 0x30, PAYLOAD, 8),
+                (PAYLOAD + field, if active { value } else { 0 }, 4),
+                (ITEM + stack, STACK_VT, 8),
                 (ITEM + stack + 8, 7, 4),
             ] {
                 m.put(addr, val, size);
@@ -313,7 +563,7 @@ fn aggregates_multiple_stacks_over_250_and_suppresses_same_id_if_unknown() {
     }
     m.put(item2, vt2, 8);
     m.put(item2 + 0x38, 18, 4);
-    m.put(0x106000 + 18 * 8, item2, 8);
+    m.put(RESOLVER + 18 * 8, item2, 8);
     m.put(SLOTS + 8, item2, 8);
     m.put(ITEM + 0xa0, 200, 4);
     m.put(item2 + 0xa0, 200, 4);
@@ -327,48 +577,7 @@ fn aggregates_multiple_stacks_over_250_and_suppresses_same_id_if_unknown() {
 
 #[test]
 fn observed_size_dense_conditional_inventory_fits_cycle_budget_and_excess_fails_closed() {
-    fn dense(count: u64) -> Fixture {
-        let mut m = fixture(640);
-        let vt = BASE + 0x225d580;
-        let evt = BASE + 0x225d898;
-        for (off, fun) in [
-            (8, 0x13c3e10),
-            (0x68, 0x31b980),
-            (0x70, 0x13c45d0),
-            (0xa0, 0x13c46d0),
-            (0x260, 0x13c9d20),
-        ] {
-            m.put(vt + off, BASE + fun, 8);
-        }
-        m.put(evt, BASE + 0x13c9d60, 8);
-        m.put(ITEMCTX + 0x30, 0x600000, 8);
-        m.put(ITEMCTX + 0x38, 1000, 4);
-        m.put(ITEMCTX + 0x3c, 1000, 4);
-        for n in 0..count {
-            let item = 0x200000 + 0x200 * n;
-            let def = 0x400000 + 0x40 * n;
-            for (a, v, z) in [
-                (SLOTS + n * 8, item, 8),
-                (0x600000 + (n + 1) * 8, item, 8),
-                (item, vt, 8),
-                (item + 0x38, n + 1, 4),
-                (item + 0x40, def, 8),
-                (def + 0x28, 12147 + n, 4),
-                (def + 0x2c, 5, 4),
-                (def + 0x30, 0x120000, 8),
-                (0x120000, 1, 4),
-                (item + 0x48, 3, 2),
-                (item + 0x58, INV, 8),
-                (item + 0xa8, evt, 8),
-                (item + 0x98, BASE + 0x225c460, 8),
-                (item + 0xa0, 7, 4),
-            ] {
-                m.put(a, v, z);
-            }
-        }
-        m
-    }
-    let mut r = Reader::new(dense(308));
+    let mut r = Reader::new(dense(640, 308, Branch::Conditional));
     let result = inventory_snapshot(&mut r, profile(), CTX);
     assert!(
         result.is_ok(),
@@ -380,12 +589,37 @@ fn observed_size_dense_conditional_inventory_fits_cycle_budget_and_excess_fails_
     let s = result.unwrap();
     assert_eq!(s.quantities.len(), 308);
     assert!(r.bytes <= MAX_BYTES - 4096, "{}", r.bytes);
-    let mut r = Reader::new(dense(640));
+    let mut r = Reader::new(dense(640, 640, Branch::Conditional));
     assert_eq!(
         inventory_snapshot(&mut r, profile(), CTX),
         Err(ReadError::Bounds)
     );
     assert!(r.bytes <= MAX_BYTES);
+}
+/// What one pass asks for over a matrix of 512 positions, to the read and to the byte. A pass
+/// that asks for more than [`MAX_BYTES`] reads nothing at all, so these are the figures that
+/// decide how full the bags may be before the reader goes without coverage.
+#[test]
+fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
+    for (occupied, branch, reads, bytes) in [
+        (0, Branch::Common, 1_057, 8_416),
+        (313, Branch::Common, 12_638, 82_910),
+        (512, Branch::Common, 20_001, 130_272),
+        (313, Branch::Conditional, 17_646, 112_958),
+    ] {
+        let (result, asked_reads, asked_bytes) = pass(dense(512, occupied, branch));
+        let snapshot = result.unwrap();
+        assert_eq!(snapshot.quantities.len() as u64, occupied);
+        assert_eq!(
+            snapshot.quantities.values().map(|n| *n as u64).sum::<u64>(),
+            occupied * 7
+        );
+        assert_eq!(
+            (asked_reads, asked_bytes),
+            (reads, bytes),
+            "{occupied} {branch:?}"
+        );
+    }
 }
 #[test]
 fn invalid_teb_tls_index_and_read_count_reject_before_memory_request() {
