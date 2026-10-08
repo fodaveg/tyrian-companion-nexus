@@ -20,7 +20,12 @@
 //! `support/magic_find_field_by_field.rs` is the reader of 0.8.1 (`37e48df`), which copied
 //! every field on its own. It is the oracle here: what the reader gives, a value or a reason,
 //! is compared with what that one gives over the same bytes.
+//!
+//! The last tests are those of `magic_find_cached`, which keeps the buffs' content between
+//! passes: what makes a pass read everything, what a pass that only verifies costs, and the
+//! two changes it does not see for up to `MAX_CONTENT_AGE`.
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::inventory::{
     BuildProfile, Memory, ReadError, Reader, BUILD_SHA256,
 };
@@ -189,6 +194,17 @@ impl Fixture {
     fn buff(&mut self, key: u32, effect: u32, definition: u64) -> (u64, u64, u64) {
         let node = self.alloc(0x78, false);
         let instance = self.alloc(0x70, true);
+        self.buff_at(key, effect, definition, node, instance)
+    }
+    /// The same in a node and an instance that exist already: memory the game uses again.
+    fn buff_at(
+        &mut self,
+        key: u32,
+        effect: u32,
+        definition: u64,
+        node: u64,
+        instance: u64,
+    ) -> (u64, u64, u64) {
         self.put(node, BASE + BUFF_NODE_VTABLE, 8);
         self.put(node + 0x10, instance, 8);
         self.put(node + 0x18, key as u64, 4);
@@ -209,8 +225,30 @@ impl Fixture {
         self.headers();
         (bucket, node, instance)
     }
+    /// Take one applied buff out of the table. Its node and its content stay where they were.
+    fn remove(&mut self, bucket: u64) {
+        assert!(self.used.remove(&(((bucket - BUCKETS) / 24) as u32)));
+        self.count -= 1;
+        for offset in [0, 8, 0x10] {
+            self.put(bucket + offset, 0, 8);
+        }
+        self.headers();
+    }
+    /// A second character under the same context, with a buff manager of its own that holds
+    /// no buff and nothing pushed. `CHAR_CONTEXT + 0x98` chooses which one is controlled.
+    fn other_character(&mut self) -> u64 {
+        let (character, manager) = (CHARACTER + 0x2000, MANAGER + 0x2000);
+        self.character(character);
+        self.put(character + 0xd0, manager, 8);
+        self.put(manager, BASE + BUFF_MANAGER_VTABLE, 8);
+        self.put(manager + 0xf0, 4, 4);
+        character
+    }
     fn push(&mut self, kind: u32, value: f32) {
         self.pushed.push((kind, value));
+        self.write_pushed();
+    }
+    fn write_pushed(&mut self) {
         self.pushed.sort_by_key(|entry| entry.0);
         for (index, (kind, value)) in self.pushed.clone().into_iter().enumerate() {
             self.put(PUSHED + 12 * index as u64, kind as u64, 4);
@@ -407,6 +445,24 @@ fn fields(m: &Fixture) -> Vec<u64> {
     };
     m.bytes.keys().copied().filter(|address| !guarded(*address)).collect()
 }
+/// One or two of `fields` damaged: zeroed, replaced, off by one bit, moved by 4 or 8 bytes, or
+/// holding what another field holds.
+fn damage(m: &mut Fixture, fields: &[u64], dice: &mut Dice) {
+    for _ in 0..1 + dice.roll(2) {
+        let at = fields[dice.roll(fields.len() as u64) as usize] & !3;
+        match dice.roll(6) {
+            0 => m.put(at, 0, 4),
+            1 => m.put(at, dice.roll(1 << 31), 4),
+            2 => m.put(at, m.get(at) ^ 1 << dice.roll(32), 4),
+            3 => m.put(at & !7, m.get(at & !7).wrapping_add(4), 8),
+            4 => m.put(at & !7, m.get(at & !7).wrapping_add(8), 8),
+            _ => {
+                let other = fields[dice.roll(fields.len() as u64) as usize] & !7;
+                m.put(at & !7, m.get(other), 8);
+            }
+        }
+    }
+}
 /// Fixtures that between them use every branch of the sum.
 fn shapes() -> Vec<Fixture> {
     let mut boon = standard().0;
@@ -488,22 +544,7 @@ fn blocks_reject_what_field_by_field_copies_rejected_and_for_the_same_reason() {
     for round in 0..3000 {
         let (shape, fields) = &shapes[dice.roll(shapes.len() as u64) as usize];
         let mut m = shape.clone();
-        // One or two fields damaged: zeroed, replaced, off by one bit, moved by 4 or 8 bytes,
-        // or holding what another field holds.
-        for _ in 0..1 + dice.roll(2) {
-            let at = fields[dice.roll(fields.len() as u64) as usize] & !3;
-            match dice.roll(6) {
-                0 => m.put(at, 0, 4),
-                1 => m.put(at, dice.roll(1 << 31), 4),
-                2 => m.put(at, m.get(at) ^ 1 << dice.roll(32), 4),
-                3 => m.put(at & !7, m.get(at & !7).wrapping_add(4), 8),
-                4 => m.put(at & !7, m.get(at & !7).wrapping_add(8), 8),
-                _ => {
-                    let other = fields[dice.roll(fields.len() as u64) as usize] & !7;
-                    m.put(at & !7, m.get(other), 8);
-                }
-            }
-        }
+        damage(&mut m, fields, &mut dice);
         let expected = pass_field_by_field(&mut m, &verified).0;
         assert_eq!(pass(&mut m, &verified).0, expected, "round {round}");
         let reason = match expected {
@@ -1037,4 +1078,502 @@ fn misaligned_or_low_context_rejects_before_reading() {
     assert_eq!(magic_find(&mut reader, &verified, CTX + 4).map(|_| ()), Err(Uncovered::Bounds));
     assert_eq!(magic_find(&mut reader, &verified, 0x100).map(|_| ()), Err(Uncovered::Bounds));
     assert_eq!(reader.bytes, before);
+}
+
+/// A reader that keeps its cache and its clock from one pass to the next, as the addon would.
+struct Session {
+    verified: MagicFindProfile,
+    cache: MagicFindCache,
+    now: Instant,
+}
+/// What one pass of a [`Session`] gave and cost, next to the reader that keeps nothing.
+struct Seen {
+    outcome: Outcome,
+    /// What `magic_find` gives over the same bytes.
+    whole: Outcome,
+    reads: usize,
+    bytes: usize,
+    /// The pass cost at least what `magic_find` costs: it read all the content.
+    read_whole: bool,
+}
+impl Seen {
+    fn total(&self) -> Result<f32, Uncovered> {
+        self.outcome.map(|(value, _)| value.total)
+    }
+}
+impl Session {
+    fn new() -> Self {
+        Self { verified: verified(), cache: MagicFindCache::new(), now: Instant::now() }
+    }
+    /// The next pass, `after` seconds after the previous one, and nothing else.
+    fn alone(&mut self, m: &mut Fixture, after: u64) -> (Outcome, usize, usize) {
+        self.now += Duration::from_secs(after);
+        let mut reader = Reader::bounded(m, MAX_BYTES);
+        let outcome = magic_find_cached(&mut reader, &self.verified, CTX, &mut self.cache, self.now);
+        (outcome, reader.reads, reader.bytes)
+    }
+    /// The next pass, after one of the reader that keeps nothing over the same bytes.
+    fn pass(&mut self, m: &mut Fixture, after: u64) -> Seen {
+        let (whole, whole_reads, _) = pass(m, &self.verified);
+        let (outcome, reads, bytes) = self.alone(m, after);
+        Seen { outcome, whole, reads, bytes, read_whole: reads >= whole_reads }
+    }
+}
+/// The bucket an applied buff's key is in.
+fn bucket_of(m: &Fixture, key: u32) -> u64 {
+    (0..m.capacity as u64)
+        .map(|index| BUCKETS + 24 * index)
+        .find(|bucket| m.get(bucket + 0x10) as u32 != 0 && m.get(*bucket) as u32 == key)
+        .unwrap()
+}
+
+#[test]
+fn a_pass_that_verifies_asks_for_164_copies_and_content_is_read_whole_every_30_seconds() {
+    let mut m = live_shape(20.0);
+    let mut session = Session::new();
+    // An empty cache: the pass of `magic_find`, copy for copy.
+    let first = session.pass(&mut m, 0);
+    assert_eq!((first.total(), first.reads, first.bytes), (Ok(333.0), 349, 29_328));
+    assert!(!session.cache.is_empty());
+    for second in 1..=65 {
+        let seen = session.pass(&mut m, 1);
+        assert_eq!(seen.outcome, seen.whole, "{second}");
+        let cost = if second % 30 == 0 { (349, 29_328) } else { (164, 19_556) };
+        assert_eq!((seen.reads, seen.bytes), cost, "{second}");
+    }
+    // The age is counted from the pass that read the content, at 60 s here: one millisecond
+    // short of 30 s still verifies, and a clock that went back is no age at all.
+    session.now += Duration::from_millis(24_999);
+    assert!(!session.pass(&mut m, 0).read_whole);
+    session.now -= Duration::from_secs(40);
+    assert!(session.pass(&mut m, 0).read_whole);
+    // Emptied by its owner, it reads everything once more.
+    assert!(!session.pass(&mut m, 1).read_whole);
+    session.cache.clear();
+    assert!(session.cache.is_empty());
+    assert!(session.pass(&mut m, 1).read_whole);
+
+    // The dearest pass is the one that was verifying when it found a definition that starts
+    // otherwise, and read everything after all. Whichever definition it is, the pass costs at
+    // most the nodes and the definition starts it had copied on top of a whole one.
+    let mut dearest = (0, 0);
+    for bucket in (0..m.capacity as u64).map(|index| BUCKETS + 24 * index) {
+        if m.get(bucket + 0x10) as u32 == 0 {
+            continue;
+        }
+        let definition = m.get(m.get(m.get(bucket + 8) + 0x10) + 0x60);
+        let mut changed = m.clone();
+        let mut session = Session::new();
+        session.alone(&mut changed, 0).0.unwrap();
+        changed.put(definition + 0x10, 1, 1);
+        let (outcome, reads, bytes) = session.alone(&mut changed, 1);
+        assert_eq!(outcome.map(|(value, _)| value.total), Ok(333.0));
+        dearest = dearest.max((reads, bytes));
+    }
+    // Here that is 89 nodes and 47 definition starts: the last definition to be seen for the
+    // first time hangs from the 89th of the 91 buffs.
+    assert_eq!(dearest, (349 + 89 + 47, 29_328 + 89 * 28 + 47 * 48));
+    assert_eq!(dearest, (485, 34_076));
+}
+
+#[test]
+fn an_empty_cache_makes_the_pass_the_one_that_keeps_nothing() {
+    let verified = verified();
+    let shapes: Vec<(Fixture, Vec<u64>)> = shapes()
+        .into_iter()
+        .map(|shape| {
+            let fields = fields(&shape);
+            (shape, fields)
+        })
+        .collect();
+    let mut dice = Dice(0x2026_1008_0000_0001);
+    let mut values = 0;
+    for round in 0..1000 {
+        let (shape, fields) = &shapes[dice.roll(shapes.len() as u64) as usize];
+        let mut m = shape.clone();
+        if round % 4 != 0 {
+            damage(&mut m, fields, &mut dice);
+        }
+        let expected = pass(&mut m, &verified);
+        let mut reader = Reader::bounded(&mut m, MAX_BYTES);
+        let mut cache = MagicFindCache::new();
+        let outcome = magic_find_cached(&mut reader, &verified, CTX, &mut cache, Instant::now());
+        // The same value or reason, for the same copies.
+        assert_eq!((outcome, reader.reads, reader.bytes), expected, "round {round}");
+        assert_eq!(cache.is_empty(), outcome.is_err(), "round {round}");
+        values += usize::from(outcome.is_ok());
+    }
+    assert!((300..900).contains(&values), "{values}");
+}
+
+#[test]
+fn a_buff_removed_or_applied_changes_the_value_in_the_pass_that_sees_it() {
+    let mut m = live_shape(20.0);
+    let mut session = Session::new();
+    assert_eq!(session.pass(&mut m, 0).total(), Ok(333.0));
+    assert!(!session.pass(&mut m, 1).read_whole);
+    // The booster ends: 20 less in the next pass, which reads everything.
+    m.remove(bucket_of(&m, 1001));
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(313.0), true));
+    assert_eq!(seen.outcome, seen.whole);
+    assert!(!session.pass(&mut m, 1).read_whole);
+    // Another one is applied: 50 more in the next pass.
+    let better = m.definition(&[record(MAGIC_FIND, 50.0)], 4, 7, 0);
+    m.buff(1002, 501, better);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(363.0), true));
+    assert_eq!(seen.outcome, seen.whole);
+    assert!(!session.pass(&mut m, 1).read_whole);
+    // A second stack of a definition that is already kept is a buff applied all the same.
+    m.buff(1003, 501, better);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(413.0), true));
+    // And a buff that carries no Magic Find at all.
+    m.remove(bucket_of(&m, 2000));
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(413.0), true));
+}
+
+#[test]
+fn memory_used_again_by_another_buff_is_read_whole() {
+    // The food ends and another is applied in its node and its instance, under a new key.
+    let (mut m, food) = standard();
+    let mut session = Session::new();
+    assert_eq!(session.pass(&mut m, 0).total(), Ok(337.0));
+    let lesser = m.plain(&[record(MAGIC_FIND, 10.0)]);
+    m.remove(food.0);
+    m.buff_at(1002, 502, lesser, food.1, food.2);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(317.0), true));
+    assert_eq!(seen.outcome, seen.whole);
+
+    // The definition's own memory holds another definition: the same key, node, instance and
+    // address, other first bytes. The pass finds it while verifying and reads everything.
+    let (mut m, food) = standard();
+    let mut session = Session::new();
+    let first = session.pass(&mut m, 0);
+    let definition = m.get(food.2 + 0x60);
+    let other = m.plain(&[record(MAGIC_FIND, 10.0)]);
+    for offset in [0, 8, 0x10, 0x18, 0x20, 0x28] {
+        m.put(definition + offset, m.get(other + offset), 8);
+    }
+    let seen = session.pass(&mut m, 1);
+    assert_eq!(seen.total(), Ok(317.0));
+    // One node and the start of one definition were copied before everything was.
+    assert_eq!((seen.reads, seen.bytes), (first.reads + 2, first.bytes + 28 + 48));
+    assert!(!session.pass(&mut m, 1).read_whole);
+    // Any of those 48 bytes, one this reader gives no meaning to included.
+    m.put(definition + 0x10, 1, 1);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(317.0), true));
+
+    // A node that leads to an instance the kept pass did not read.
+    let (mut m, food) = standard();
+    let mut session = Session::new();
+    session.pass(&mut m, 0);
+    let lesser = m.plain(&[record(MAGIC_FIND, 10.0)]);
+    let moved = m.alloc(0x70, true);
+    m.put(moved + 0x28, 501, 4);
+    m.put(moved + 0x58, 1, 4);
+    m.put(moved + 0x60, lesser, 8);
+    m.put(food.1 + 0x10, moved, 8);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(317.0), true));
+}
+
+#[test]
+fn what_is_not_content_is_read_in_every_pass() {
+    let (mut m, _) = standard();
+    let flagged = m.definition(&[record(MAGIC_FIND, 50.0)], 0, 1, 0x40);
+    m.buff(1002, 502, flagged);
+    let mut session = Session::new();
+    assert_eq!(session.pass(&mut m, 0).total(), Ok(387.0));
+    let mut verifying = |m: &mut Fixture, expected: f32| {
+        let seen = session.pass(m, 1);
+        assert_eq!((seen.total(), seen.read_whole), (Ok(expected), false));
+        assert_eq!(seen.outcome, seen.whole);
+    };
+    // The server pushes another value, then one more record.
+    m.pushed[0].1 = 9.0;
+    m.write_pushed();
+    verifying(&mut m, 389.0);
+    m.push(MAGIC_FIND, 1.0);
+    verifying(&mut m, 390.0);
+    // The account's luck level.
+    m.luck(310);
+    verifying(&mut m, 400.0);
+    // The manager mode that hides flagged definitions.
+    m.put(MANAGER + 0xf0, 1, 4);
+    verifying(&mut m, 350.0);
+}
+
+#[test]
+fn another_character_is_read_whole() {
+    let (mut m, _) = standard();
+    let other = m.other_character();
+    // A character object that shares the manager, and so the whole table, with the first.
+    let twin = CHARACTER + 0x4000;
+    m.character(twin);
+    let mut session = Session::new();
+    assert_eq!(session.pass(&mut m, 0).total(), Ok(337.0));
+    assert!(!session.pass(&mut m, 1).read_whole);
+    m.put(CHAR_CONTEXT + 0x98, other, 8);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!(seen.outcome.map(|(value, owner)| (value.total, owner.0)), Ok((300.0, other)));
+    assert_eq!(seen.outcome, seen.whole);
+    m.put(CHAR_CONTEXT + 0x98, CHARACTER, 8);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(337.0), true));
+    assert!(!session.pass(&mut m, 1).read_whole);
+    // Nothing but the owner differs, and that is enough.
+    m.put(CHAR_CONTEXT + 0x98, twin, 8);
+    let seen = session.pass(&mut m, 1);
+    assert_eq!((seen.total(), seen.read_whole), (Ok(337.0), true));
+    assert_eq!(seen.outcome.map(|(_, owner)| owner.0), Ok(twin));
+    assert!(!session.pass(&mut m, 1).read_whole);
+}
+
+#[test]
+fn a_pass_without_a_value_empties_what_was_kept() {
+    let (mut m, food) = standard();
+    let mut session = Session::new();
+    let recovers = |session: &mut Session, m: &mut Fixture| {
+        assert!(session.cache.is_empty());
+        let seen = session.pass(m, 1);
+        assert_eq!((seen.total(), seen.read_whole), (Ok(337.0), true));
+        assert!(!session.pass(m, 1).read_whole);
+    };
+    recovers(&mut session, &mut m);
+    // A copy that fails.
+    m.fail = Some(food.1);
+    assert_eq!(session.pass(&mut m, 1).total(), Err(Uncovered::ReadFailed));
+    m.fail = None;
+    recovers(&mut session, &mut m);
+    // A sample that changed between the two looks.
+    m.race = Some((CTX + 0x98, 2, vec![(STATS + 0x24, 301, 4)]));
+    assert_eq!(session.alone(&mut m, 1).0.map(|_| ()), Err(Uncovered::Changed));
+    m.race = None;
+    m.luck(300);
+    recovers(&mut session, &mut m);
+    // A route that is not the certified one.
+    m.put(MANAGER, BASE + 0x123400, 8);
+    assert_eq!(session.pass(&mut m, 1).total(), Err(Uncovered::Profile));
+    m.put(MANAGER, BASE + BUFF_MANAGER_VTABLE, 8);
+    recovers(&mut session, &mut m);
+    // A budget the pass does not fit in.
+    let mut reader = Reader::bounded(&mut m, 200);
+    let short = magic_find_cached(&mut reader, &session.verified, CTX, &mut session.cache, session.now);
+    assert_eq!(short.map(|_| ()), Err(Uncovered::Bounds));
+    recovers(&mut session, &mut m);
+    // A context that is refused before anything is read.
+    let mut reader = Reader::bounded(&mut m, MAX_BYTES);
+    let refused = magic_find_cached(&mut reader, &session.verified, 0x100, &mut session.cache, session.now);
+    assert_eq!((refused.map(|_| ()), reader.reads), (Err(Uncovered::Bounds), 0));
+    recovers(&mut session, &mut m);
+}
+
+#[test]
+fn content_changed_in_place_is_not_seen_until_it_is_read_whole_again() {
+    // What a pass that verifies does not copy: the instance, the modifier group and the
+    // records. Each of these changes keeps the key, the node, the instance's address and the
+    // first 48 bytes of the definition the kept pass read.
+    type Change = fn(&mut Fixture, (u64, u64, u64));
+    let cases: [(&str, Change, Result<f32, Uncovered>); 5] = [
+        (
+            "the instance names another definition",
+            |m, food| {
+                let lesser = m.plain(&[record(MAGIC_FIND, 10.0)]);
+                m.put(food.2 + 0x60, lesser, 8);
+            },
+            Ok(317.0),
+        ),
+        (
+            "the instance is no longer in state 1",
+            |m, food| m.put(food.2 + 0x58, 0, 4),
+            Err(Uncovered::Integrity),
+        ),
+        (
+            "the instance cannot be copied",
+            |m, food| m.fail = Some(food.2 + 0x58),
+            Err(Uncovered::ReadFailed),
+        ),
+        (
+            "a record holds another value",
+            |m, food| {
+                let records = m.get(m.get(m.get(food.2 + 0x60) + 0x20) + 0x10);
+                m.put(records + 8, 50.0f32.to_bits() as u64, 4);
+            },
+            Ok(357.0),
+        ),
+        (
+            "the modifier group holds no record",
+            |m, food| {
+                let group = m.get(m.get(food.2 + 0x60) + 0x20);
+                m.put(group + 0x18, 0, 4);
+            },
+            Ok(307.0),
+        ),
+    ];
+    for (name, change, after) in cases {
+        let (mut m, food) = standard();
+        let mut session = Session::new();
+        assert_eq!(session.pass(&mut m, 0).total(), Ok(337.0));
+        change(&mut m, food);
+        // For 29 passes, one a second, the kept content answers with what it read.
+        for second in 1..30 {
+            let seen = session.pass(&mut m, 1);
+            assert_eq!(seen.total(), Ok(337.0), "{name}, {second}");
+            assert_eq!(seen.whole.map(|(value, _)| value.total), after, "{name}");
+        }
+        // The pass 30 s after the one that read the content reads it again.
+        assert_eq!(session.pass(&mut m, 1).total(), after, "{name}");
+    }
+    // The effect id decides which buffs of one effect count once. It is kept too.
+    let mut m = empty();
+    let duration = m.definition(&[record(MAGIC_FIND, 10.0)], 1, 1, 0);
+    let (_, _, first) = m.buff(1, 700, duration);
+    m.buff(2, 700, duration);
+    let mut session = Session::new();
+    assert_eq!(session.pass(&mut m, 0).total(), Ok(310.0));
+    m.put(first + 0x28, 701, 4);
+    let seen = session.pass(&mut m, 29);
+    assert_eq!((seen.total(), seen.whole.map(|(value, _)| value.total)), (Ok(310.0), Ok(320.0)));
+    assert_eq!(session.pass(&mut m, 1).total(), Ok(320.0));
+}
+
+/// The buffs applied during the long run, and the nodes and instances ended ones left behind.
+struct Applied {
+    buffs: Vec<(u64, u64, u64)>,
+    spare: Vec<(u64, u64)>,
+    key: u32,
+}
+impl Applied {
+    /// One more buff under a key never used before, with one of four effect ids. Half of the
+    /// time in a node and an instance that an ended buff left behind.
+    fn apply(&mut self, m: &mut Fixture, dice: &mut Dice, definition: u64) {
+        self.key += 1;
+        let effect = 500 + dice.roll(4) as u32;
+        let buff = match self.spare.pop() {
+            Some((node, instance)) if dice.roll(2) == 0 => {
+                m.buff_at(self.key, effect, definition, node, instance)
+            }
+            _ => m.buff(self.key, effect, definition),
+        };
+        self.buffs.push(buff);
+    }
+}
+
+#[test]
+fn over_a_long_run_of_changes_the_kept_content_gives_what_reading_everything_gives() {
+    let mut m = empty_at(4, 64, 300);
+    for (kind, value) in [(14, 5.0), (MAGIC_FIND, 7.0), (MAGIC_FIND_BOON, 2.0)] {
+        m.push(kind, value);
+    }
+    let mut definitions = vec![
+        m.plain(&[record(MAGIC_FIND, 30.0)]),
+        m.plain(&[record(MAGIC_FIND, 10.0), record(14, 3.0)]),
+        m.plain(&[record(MAGIC_FIND, -5.0)]),
+        m.plain(&[record(14, 3.0)]),
+        m.plain(&[record(MAGIC_FIND_BOON, 40.0)]),
+        m.definition(&[], 0, 0, 0),
+        m.definition(&[record(MAGIC_FIND, 1.0)], 4, 1, 0),
+        m.definition(&[record(MAGIC_FIND, 10.0)], 1, 1, 0),
+        m.definition(&[record(MAGIC_FIND, 50.0)], 0, 1, 0x40),
+        // Applied, this one leaves no value at all until it is removed.
+        m.plain(&[Record { mode: 1, ..record(MAGIC_FIND, 20.0) }]),
+    ];
+    // The first, one that shares its manager, and one with an empty manager of its own.
+    let characters = [CHARACTER, CHARACTER + 0x4000, m.other_character()];
+    m.character(characters[1]);
+    let mut table = Applied { buffs: Vec::new(), spare: Vec::new(), key: 1000 };
+    let mut dice = Dice(0x2026_1008_0030_0001);
+    let mut session = Session::new();
+    let mut counts = BTreeMap::new();
+    for round in 0..3000 {
+        // Whether this round's change is one a pass has to read everything for.
+        let (mut content, mut owner) = (false, false);
+        let (mut after, mut failing) = (1, None);
+        let change = dice.roll(26);
+        match change {
+            // A buff is applied, of a definition in use or of a new one.
+            10..=12 if table.buffs.len() < 40 => {
+                let mut index = dice.roll(definitions.len() as u64) as usize;
+                if index == 9 {
+                    index = dice.roll(definitions.len() as u64) as usize;
+                }
+                table.apply(&mut m, &mut dice, definitions[index]);
+                content = true;
+            }
+            13 if table.buffs.len() < 40 => {
+                let definition = m.plain(&[record(MAGIC_FIND, dice.roll(40) as f32)]);
+                definitions.push(definition);
+                table.apply(&mut m, &mut dice, definition);
+                content = true;
+            }
+            // A buff ends; or ends while another takes its place in the same pass.
+            14..=17 if !table.buffs.is_empty() => {
+                let (bucket, node, instance) =
+                    table.buffs.swap_remove(dice.roll(table.buffs.len() as u64) as usize);
+                m.remove(bucket);
+                table.spare.push((node, instance));
+                if change == 17 {
+                    let definition = definitions[dice.roll(9) as usize];
+                    table.apply(&mut m, &mut dice, definition);
+                }
+                content = true;
+            }
+            // The server pushes another value.
+            18 => {
+                let index = dice.roll(m.pushed.len() as u64) as usize;
+                m.pushed[index].1 = dice.roll(20) as f32 - 5.0;
+                m.write_pushed();
+            }
+            19 => m.luck(250 + dice.roll(100) as u32),
+            20 => m.put(MANAGER + 0xf0, if m.get(MANAGER + 0xf0) as u32 == 1 { 4 } else { 1 }, 4),
+            // A definition's memory starts as another definition does: another modifier group.
+            21 => {
+                let definition = definitions[dice.roll(definitions.len() as u64) as usize];
+                let other = m.plain(&[record(MAGIC_FIND, dice.roll(40) as f32)]);
+                m.put(definition + 0x20, m.get(other + 0x20), 8);
+                content = table.buffs.iter().any(|buff| m.get(buff.2 + 0x60) == definition);
+            }
+            22 => {
+                let to = characters[dice.roll(3) as usize];
+                owner = m.get(CHAR_CONTEXT + 0x98) != to;
+                m.put(CHAR_CONTEXT + 0x98, to, 8);
+            }
+            // One copy of this pass fails, somewhere both readers look.
+            23 => {
+                let mut places = vec![CTX + 0x98, CHAR_CONTEXT + 0xa0, STATS + 0x24];
+                places.push(m.get(CHAR_CONTEXT + 0x98) + 0xd0);
+                if let Some(buff) = table.buffs.first() {
+                    places.extend([buff.1 + 0x10, m.get(buff.2 + 0x60) + 0x20]);
+                }
+                failing = Some(places[dice.roll(places.len() as u64) as usize]);
+            }
+            // Longer than content may stand without being read.
+            24 | 25 => after = 28 + dice.roll(40),
+            _ => {}
+        }
+        m.fail = failing;
+        let seen = session.pass(&mut m, after);
+        m.fail = None;
+        assert_eq!(seen.outcome, seen.whole, "round {round}");
+        let on_the_table = m.get(CHAR_CONTEXT + 0x98) != characters[2];
+        if owner || (content && on_the_table) {
+            assert!(seen.read_whole, "round {round}");
+        }
+        let kind = match (seen.outcome, seen.read_whole) {
+            (Ok(_), true) => "value, read whole",
+            (Ok(_), false) => "value, verified",
+            (Err(_), _) => "no value",
+        };
+        *counts.entry(kind).or_insert(0) += 1;
+    }
+    // The run verified, read whole and refused, each many times, and stayed inside its heap.
+    for (kind, least) in [("value, verified", 800), ("value, read whole", 400), ("no value", 50)] {
+        assert!(counts.get(kind).is_some_and(|count| *count >= least), "{counts:?}");
+    }
+    assert!(m.heap < PLAYER);
 }
