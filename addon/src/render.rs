@@ -239,12 +239,14 @@ pub fn options_render(ui: &Ui) {
     }
 
     ui.separator();
+    // The language the quick access tooltips have to change to, when its checkbox was clicked.
+    let mut tooltips_language = None;
     {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut changed = ui.checkbox("Show Labyrinth farming panel / Mostrar panel de Laberinto", &mut panel.windows.show_panel);
         if ui.checkbox("Farming panel in English / Panel en inglés", &mut panel.farming_english) {
             changed = true;
-            crate::quick_access::refresh_tooltips(panel.farming_english);
+            tooltips_language = Some(panel.farming_english);
         }
         // The same switch as the button on the panel's own title bar, for when the panel is
         // hard to hit against the game.
@@ -254,6 +256,13 @@ pub fn options_render(ui: &Ui) {
         }
         if changed { save_panel_settings(&panel, SaveRequest::Automatic); }
         ui.text_wrapped("Read-only: session, goal and preparation are managed in Hebra or Obsidian.");
+    }
+    // Only now, with `PENDING` released. Removing and adding an icon goes into Nexus's quick
+    // access bar, and Nexus's input thread comes the other way: a keybind of this addon ends in
+    // `activate_shortcut`, which takes `PENDING`. Calling Nexus while holding it is one lock
+    // taken in each order by two threads.
+    if let Some(english) = tooltips_language {
+        crate::quick_access::refresh_tooltips(english);
     }
 
     ui.separator();
