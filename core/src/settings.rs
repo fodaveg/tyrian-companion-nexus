@@ -199,20 +199,52 @@ pub const UNREADABLE_NOTICE: [&str; 2] = [
      No se guarda nada hasta que pegues el token y pulses Save, que reemplaza ese fichero.",
 ];
 
-/// Keeps what saves by itself from replacing a settings file that could not be loaded.
+/// A save's place in line: which settings are newer than which ([`SaveGuard::ticket`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveTicket(u64);
+
+/// How a save that did not fail ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    /// The file is these settings now.
+    Written,
+    /// An automatic save while the guard holds: the file is as it was.
+    Held,
+    /// Newer settings were already written: these would have put older ones back.
+    Superseded,
+}
+
+/// The one way to the settings file: who may replace it, and in which order.
 ///
-/// After such a load the addon runs on the defaults, with no token. A checkbox or a button of
-/// the panel's bar would then save those defaults over a file that may still hold the token and
-/// everything else. While the guard holds, only [`SaveRequest::Explicit`] writes, and a write
-/// that succeeds lifts the hold: from then on the file is what the user saved.
+/// **Who.** After a load that failed ([`Loaded::unreadable`]) the addon runs on the defaults,
+/// with no token. A checkbox or a button of the panel's bar would then save those defaults over
+/// a file that may still hold the token and everything else. While the guard holds, only
+/// [`SaveRequest::Explicit`] writes, and a write that succeeds lifts the hold: from then on the
+/// file is what the user saved.
+///
+/// **In which order.** A save is asked for on one of two threads, Nexus's input thread or the
+/// render one, and the file is written after the lock the settings are read under has been
+/// let go, so that nobody waits on the disk for that lock. Two saves can then reach the file in
+/// the other order. Each takes a [`SaveTicket`] while it still holds that lock, and a save
+/// whose ticket is older than what is on disk writes nothing. The writes themselves go one at
+/// a time, so two of them never share `settings.json.tmp`.
 #[derive(Debug, Default)]
 pub struct SaveGuard {
     held: std::sync::atomic::AtomicBool,
+    /// The last ticket handed out.
+    issued: std::sync::atomic::AtomicU64,
+    /// The ticket of the settings on disk, and the lock every write is made under. Taken only
+    /// to write: never by a frame that saves nothing.
+    written: std::sync::Mutex<u64>,
 }
 
 impl SaveGuard {
     pub const fn new() -> Self {
-        Self { held: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            held: std::sync::atomic::AtomicBool::new(false),
+            issued: std::sync::atomic::AtomicU64::new(0),
+            written: std::sync::Mutex::new(0),
+        }
     }
 
     /// The load failed ([`Loaded::unreadable`]): hold every automatic save.
@@ -226,15 +258,30 @@ impl SaveGuard {
         self.held.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// [`save`], unless the guard holds and `request` is automatic. `Ok(true)` when the file was
-    /// written, `Ok(false)` when the save was held and the file is as it was.
-    pub fn save(&self, dir: &Path, settings: &Settings, request: SaveRequest) -> std::io::Result<bool> {
+    /// The place in line of a save whose settings are being read now. Take it while still
+    /// holding the lock those settings are read under: that is what makes a later ticket mean
+    /// later settings.
+    pub fn ticket(&self) -> SaveTicket {
+        SaveTicket(self.issued.fetch_add(1, std::sync::atomic::Ordering::Relaxed).saturating_add(1))
+    }
+
+    /// [`save`], unless the guard holds and `request` is automatic, or settings with a later
+    /// `ticket` are already on disk. Call it with no other lock held: it waits for the disk,
+    /// and for a write that is under way.
+    pub fn save(&self, dir: &Path, settings: &Settings, request: SaveRequest, ticket: SaveTicket) -> std::io::Result<Saved> {
+        let mut written = self.written.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Asked under the lock: an automatic save that waited for the explicit one that lifts
+        // the hold goes through after it.
         if request == SaveRequest::Automatic && self.held() {
-            return Ok(false);
+            return Ok(Saved::Held);
+        }
+        if ticket.0 < *written {
+            return Ok(Saved::Superseded);
         }
         save(dir, settings)?;
+        *written = ticket.0;
         self.held.store(false, std::sync::atomic::Ordering::Relaxed);
-        Ok(true)
+        Ok(Saved::Written)
     }
 }
 
@@ -441,18 +488,18 @@ mod tests {
         // What a click on "Show Labyrinth farming panel" would save: the defaults it loaded.
         let toggled = Settings { show_farming_panel: true, ..loaded.settings };
         for _ in 0..2 {
-            assert!(!guard.save(&dir, &toggled, SaveRequest::Automatic).expect("held is not an error"));
+            assert_eq!(guard.save(&dir, &toggled, SaveRequest::Automatic, guard.ticket()).expect("held is not an error"), Saved::Held);
             assert_eq!(fs::read_to_string(dir.join(FILE_NAME)).unwrap(), cut_short(), "the file is as it was");
             assert!(guard.held());
         }
         // The user pastes the token and presses Save: that replaces the file and lifts the hold.
         let pasted = Settings { token: "p".repeat(43), ..toggled };
-        assert!(guard.save(&dir, &pasted, SaveRequest::Explicit).expect("save succeeds"));
+        assert_eq!(guard.save(&dir, &pasted, SaveRequest::Explicit, guard.ticket()).expect("save succeeds"), Saved::Written);
         assert!(!guard.held());
         assert_eq!(load(&dir), Loaded { settings: pasted.clone(), discarded_api_key: false, unreadable: false });
         // From then on the automatic saves write again.
         let folded = Settings { farming_panel_collapsed: true, ..pasted };
-        assert!(guard.save(&dir, &folded, SaveRequest::Automatic).expect("save succeeds"));
+        assert_eq!(guard.save(&dir, &folded, SaveRequest::Automatic, guard.ticket()).expect("save succeeds"), Saved::Written);
         assert_eq!(load(&dir).settings, folded);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -465,7 +512,7 @@ mod tests {
         let guard = SaveGuard::new();
         guard.hold();
         fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
-        assert!(guard.save(&dir, &Settings::default(), SaveRequest::Explicit).is_err());
+        assert!(guard.save(&dir, &Settings::default(), SaveRequest::Explicit, guard.ticket()).is_err());
         assert!(guard.held(), "nothing replaced the file, so nothing may yet");
         assert_eq!(fs::read_to_string(dir.join(FILE_NAME)).unwrap(), cut_short());
         let _ = fs::remove_dir_all(&dir);
@@ -476,9 +523,89 @@ mod tests {
         let dir = temp_dir("not-held");
         let guard = SaveGuard::new();
         for (port, request) in [(50030, SaveRequest::Automatic), (50031, SaveRequest::Explicit)] {
-            assert!(guard.save(&dir, &Settings { port, ..Settings::default() }, request).expect("save succeeds"));
+            assert_eq!(guard.save(&dir, &Settings { port, ..Settings::default() }, request, guard.ticket()).expect("save succeeds"), Saved::Written);
             assert_eq!(load(&dir).settings.port, port);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The file is written after the lock the settings were read under is let go, so two saves
+    /// can reach it in the other order. The one with the older settings must not win.
+    #[test]
+    fn a_save_overtaken_by_a_newer_one_does_not_put_the_older_settings_back() {
+        let dir = temp_dir("overtaken");
+        let guard = SaveGuard::new();
+        // The input thread shows the panel, then the frame folds it: two settings, in this order.
+        let shown = (Settings { show_farming_panel: true, ..Settings::default() }, guard.ticket());
+        let folded = (Settings { farming_panel_collapsed: true, ..shown.0.clone() }, guard.ticket());
+        // The frame gets to the disk first.
+        assert_eq!(guard.save(&dir, &folded.0, SaveRequest::Automatic, folded.1).expect("save succeeds"), Saved::Written);
+        assert_eq!(guard.save(&dir, &shown.0, SaveRequest::Automatic, shown.1).expect("not an error"), Saved::Superseded);
+        assert_eq!(load(&dir).settings, folded.0, "the newer settings are on disk");
+        // An explicit save is in line like any other: older settings do not come back by it.
+        assert_eq!(guard.save(&dir, &shown.0, SaveRequest::Explicit, shown.1).expect("not an error"), Saved::Superseded);
+        assert_eq!(load(&dir).settings, folded.0);
+        // In order, each one is written.
+        let next = (Settings { farming_english: true, ..folded.0.clone() }, guard.ticket());
+        assert_eq!(guard.save(&dir, &next.0, SaveRequest::Automatic, next.1).expect("save succeeds"), Saved::Written);
+        assert_eq!(load(&dir).settings, next.0);
+        // A newer save that failed is not on disk: the older one after it is the best there is.
+        let older = (Settings { port: 50040, ..next.0.clone() }, guard.ticket());
+        let newest = guard.ticket();
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        assert!(guard.save(&dir, &Settings::default(), SaveRequest::Automatic, newest).is_err());
+        fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        assert_eq!(guard.save(&dir, &older.0, SaveRequest::Automatic, older.1).expect("save succeeds"), Saved::Written);
+        assert_eq!(load(&dir).settings.port, 50040);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Eight threads that change the settings under a lock, let it go and save: what ends on
+    /// disk is the last change, and no save trips over another's temporary file.
+    #[test]
+    fn saves_from_several_threads_end_with_the_newest_settings_and_never_share_the_temporary_file() {
+        let dir = temp_dir("crossing");
+        let guard = SaveGuard::new();
+        // What the addon's `PENDING` is: the settings, and the lock they are read under.
+        let applied = std::sync::Mutex::new(20_000u16);
+        save(&dir, &Settings { port: 20_000, ..Settings::default() }).expect("save succeeds");
+        let outcomes = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let (mut written, mut superseded, mut failed) = (0u32, 0u32, Vec::new());
+                        for _ in 0..200 {
+                            let (settings, ticket) = {
+                                let mut port = applied.lock().unwrap();
+                                *port += 1;
+                                (Settings { port: *port, ..Settings::default() }, guard.ticket())
+                            };
+                            // One save in three is slow to reach the disk, and is overtaken
+                            // by the ones asked for after it.
+                            if ticket.0 % 3 == 0 {
+                                std::thread::sleep(std::time::Duration::from_micros(300));
+                            }
+                            match guard.save(&dir, &settings, SaveRequest::Automatic, ticket) {
+                                Ok(Saved::Written) => written += 1,
+                                Ok(Saved::Superseded) => superseded += 1,
+                                Ok(Saved::Held) => failed.push("held".to_string()),
+                                Err(error) => failed.push(error.to_string()),
+                            }
+                        }
+                        (written, superseded, failed)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>()
+        });
+        let failed: Vec<_> = outcomes.iter().flat_map(|(_, _, failed)| failed.iter()).collect();
+        assert!(failed.is_empty(), "{} saves failed: {:?}", failed.len(), &failed[..failed.len().min(3)]);
+        let (written, superseded) = outcomes.iter().fold((0, 0), |(written, superseded), outcome| (written + outcome.0, superseded + outcome.1));
+        assert_eq!(written + superseded, 1_600);
+        assert_eq!(load(&dir).settings.port, 21_600, "the last change is the one on disk ({written} written, {superseded} superseded)");
+        assert!(superseded > 0, "no save was overtaken, so the order was never put to the test");
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names, [std::ffi::OsString::from(FILE_NAME)], "no temporary file is left");
         let _ = fs::remove_dir_all(&dir);
     }
 

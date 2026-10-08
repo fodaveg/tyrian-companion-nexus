@@ -633,6 +633,14 @@ rejected the previous token; they do not tear down a connection that is already 
 leaves the file of before instead of half of a new one. It is not flushed to the disk before
 the rename, so this does not cover a power cut.
 
+A save is asked for on one of two threads: the frame's, for everything clicked in a window,
+and Nexus's input thread, for a quick access icon or its key. The settings are read under
+their lock and the file is written after that lock is let go, so neither thread waits for
+the other's disk on it. Each save takes a number while it still holds the lock; one that
+reaches the file after a newer one writes nothing, and only one writes at a time, so two of
+them never share `settings.json.tmp`. A click in a window still writes the file on the frame
+of that click.
+
 If the file is there and cannot be loaded, because it cannot be read or does not parse, the
 addon runs on the default settings, leaves the file as it is and **saves nothing by itself**:
 the checkboxes, the buttons of the panel's bar and the quick access icon still work for that

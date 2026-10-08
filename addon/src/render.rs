@@ -26,7 +26,7 @@ use tyrian_companion_nexus_core::perf::FrameTime;
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
-use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, Settings};
+use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, SaveTicket, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
 use tyrian_companion_nexus_core::token::{self, TokenRejection};
 
@@ -217,6 +217,8 @@ pub fn options_render(ui: &Ui) {
         }
     }
 
+    // What the Save button asks to be written, once the settings are no longer locked.
+    let mut explicit_save = None;
     {
         let mut pending = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // `settings.json` could not be loaded: nothing below is what the user had, and the
@@ -255,7 +257,7 @@ pub fn options_render(ui: &Ui) {
                     shared.apply_settings(port, &token, open_obsidian_on_start, launch_app);
                     // The one save the user asks for by name: it also replaces a file that
                     // could not be loaded.
-                    save_panel_settings(&pending, SaveRequest::Explicit);
+                    explicit_save = Some(prepare_save(&pending, SaveRequest::Explicit));
                 }
                 Err(rejection) => {
                     if rejection == TokenRejection::Gw2ApiKey {
@@ -270,6 +272,9 @@ pub fn options_render(ui: &Ui) {
         if let Some(hint) = hint {
             text_colored_wrapped(ui, ORANGE, hint);
         }
+    }
+    if let Some(save) = explicit_save {
+        write_settings(save);
     }
     ui.text_wrapped(
         "In Obsidian, open Tyrian Companion's settings and press \"Copy token\", then paste it here \
@@ -298,8 +303,11 @@ pub fn options_render(ui: &Ui) {
             }
         }
         if changed {
-            let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            save_panel_settings(&panel, SaveRequest::Automatic);
+            let save = {
+                let panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                prepare_save(&panel, SaveRequest::Automatic)
+            };
+            write_settings(save);
         }
         if let Some(outcome) = shared.obsidian_launch_outcome() {
             let (color, text) = launch_line(launch_app, outcome);
@@ -310,6 +318,7 @@ pub fn options_render(ui: &Ui) {
     ui.separator();
     // The language the quick access tooltips have to change to, when its checkbox was clicked.
     let mut tooltips_language = None;
+    let mut panel_save = None;
     {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut changed = ui.checkbox("Show Labyrinth farming panel / Mostrar panel de Laberinto", &mut panel.windows.show_panel);
@@ -323,13 +332,17 @@ pub fn options_render(ui: &Ui) {
         if ui.button("Reset farming panel position / Restablecer posición") {
             panel.reset_farming_position = true;
         }
-        if changed { save_panel_settings(&panel, SaveRequest::Automatic); }
+        if changed { panel_save = Some(prepare_save(&panel, SaveRequest::Automatic)); }
         ui.text_wrapped("Read-only: session, goal and preparation are managed in Hebra or Obsidian.");
     }
     // Only now, with `PENDING` released. Removing and adding an icon goes into Nexus's quick
     // access bar, and Nexus's input thread comes the other way: a keybind of this addon ends in
     // `activate_shortcut`, which takes `PENDING`. Calling Nexus while holding it is one lock
-    // taken in each order by two threads.
+    // taken in each order by two threads. The same for the disk: nobody waits for it on
+    // `PENDING`.
+    if let Some(save) = panel_save {
+        write_settings(save);
+    }
     if let Some(english) = tooltips_language {
         crate::quick_access::refresh_tooltips(english);
     }
@@ -346,21 +359,41 @@ pub fn options_render(ui: &Ui) {
     }
 }
 
-/// Saves only applied settings, so toggling the panel cannot save an unfinished token paste:
-/// port, token and the launch choice come from the shared state, never from the input boxes.
-///
-/// After a `settings.json` that could not be loaded, an automatic `request` writes nothing: the
-/// applied settings are then the defaults, with no token, and the file may still hold the
-/// user's. The change stays in memory for this load and Options says why (`SAVE_GUARD`).
-fn save_panel_settings(panel: &Pending, request: SaveRequest) {
+/// A save that was asked for and is not written yet: the settings as they were applied when it
+/// was asked, and its place in line. Both are taken while `PENDING` is held; the file is
+/// written after it is let go.
+struct PendingSave {
+    settings: Settings,
+    ticket: SaveTicket,
+    request: SaveRequest,
+}
+
+/// What a save needs, taken under `PENDING`, which the caller holds. Only applied settings, so
+/// toggling the panel cannot save an unfinished token paste: port, token and the launch choice
+/// come from the shared state, never from the input boxes. No file and no call to Nexus here.
+fn prepare_save(panel: &Pending, request: SaveRequest) -> PendingSave {
     let shared = state::shared();
-    if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-        let settings = panel.windows.apply_to(Settings {
+    PendingSave {
+        settings: panel.windows.apply_to(Settings {
             port: shared.port(), token: shared.token(),
             open_obsidian_on_start: shared.open_obsidian_on_start(), launch_app: shared.launch_app(),
             farming_english: panel.farming_english, ..Settings::default()
-        });
-        if let Err(error) = SAVE_GUARD.save(&dir, &settings, request) { log::error!("failed to save settings: {error}"); }
+        }),
+        ticket: SAVE_GUARD.ticket(),
+        request,
+    }
+}
+
+/// Writes a save, with `PENDING` released: the write and the rename wait for the disk, and the
+/// other thread, the frame or Nexus's input one, must not wait for them on that lock. Two saves
+/// that cross are put in order by their tickets and never write at once (`SAVE_GUARD`).
+///
+/// After a `settings.json` that could not be loaded, an automatic request writes nothing: the
+/// applied settings are then the defaults, with no token, and the file may still hold the
+/// user's. The change stays in memory for this load and Options says why.
+fn write_settings(save: PendingSave) {
+    if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
+        if let Err(error) = SAVE_GUARD.save(&dir, &save.settings, save.request, save.ticket) { log::error!("failed to save settings: {error}"); }
     }
 }
 
@@ -369,11 +402,18 @@ fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
 }
 
 /// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
-/// input thread; only flips a window flag and, for the panel, saves the shared setting.
+/// input thread; only flips a window flag and, for the panel, saves the shared setting. The
+/// flag is flipped under `PENDING`, which every frame takes, and the file is written after it
+/// is let go: a frame never waits for this thread's disk.
 pub fn activate_shortcut(shortcut: Shortcut) {
-    let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    shortcut.activate(&mut panel.windows);
-    if shortcut == Shortcut::Panel { save_panel_settings(&panel, SaveRequest::Automatic); }
+    let save = {
+        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        shortcut.activate(&mut panel.windows);
+        (shortcut == Shortcut::Panel).then(|| prepare_save(&panel, SaveRequest::Automatic))
+    };
+    if let Some(save) = save {
+        write_settings(save);
+    }
 }
 
 /// Per-frame housekeeping and the addon's own Options window, opened from the quick access bar.
@@ -613,10 +653,15 @@ fn farming_frame(ui: &Ui, now: std::time::Instant) {
     // Released before the settings are taken: the two locks are never held together.
     drop(carried);
     if clicks.fold || clicks.background || clicks.close {
-        let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
-        if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
-        if clicks.close { panel.windows.show_panel = false; }
-        save_panel_settings(&panel, SaveRequest::Automatic);
+        let save = {
+            let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if clicks.fold { panel.windows.collapsed = !panel.windows.collapsed; }
+            if clicks.background { panel.windows.transparent = !panel.windows.transparent; }
+            if clicks.close { panel.windows.show_panel = false; }
+            prepare_save(&panel, SaveRequest::Automatic)
+        };
+        // Still this frame's own disk I/O, on the frame of the click; `PENDING` is not held
+        // through it any more, so the input thread does not wait for it.
+        write_settings(save);
     }
 }
