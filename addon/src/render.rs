@@ -228,6 +228,13 @@ pub fn options_render(ui: &Ui) {
                 text_colored_wrapped(ui, ORANGE, notice);
             }
         }
+        // The last save did not reach the file: said here until one does, as nothing else in
+        // this window looks different after a save that failed.
+        if SAVE_GUARD.failed() {
+            for notice in settings::SAVE_FAILED_NOTICE {
+                text_colored_wrapped(ui, RED, notice);
+            }
+        }
         ui.input_int("Port", &mut pending.port).build();
         ui.input_text("Token", &mut pending.token).password(true).build();
         ui.same_line();
@@ -391,9 +398,18 @@ fn prepare_save(panel: &Pending, request: SaveRequest) -> PendingSave {
 /// After a `settings.json` that could not be loaded, an automatic request writes nothing: the
 /// applied settings are then the defaults, with no token, and the file may still hold the
 /// user's. The change stays in memory for this load and Options says why.
+///
+/// A save that fails goes to the log and is told in Options until one is written
+/// (`SaveGuard::failed`): the window that asked for it looks the same either way.
 fn write_settings(save: PendingSave) {
-    if let Ok(dir) = nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-        if let Err(error) = SAVE_GUARD.save(&dir, &save.settings, save.request, save.ticket) { log::error!("failed to save settings: {error}"); }
+    match nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
+        Ok(dir) => {
+            if let Err(error) = SAVE_GUARD.save(&dir, &save.settings, save.request, save.ticket) { log::error!("failed to save settings: {error}"); }
+        }
+        Err(error) => {
+            log::error!("failed to save settings: no addon directory ({error})");
+            SAVE_GUARD.could_not_try();
+        }
     }
 }
 

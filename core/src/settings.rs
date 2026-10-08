@@ -118,8 +118,16 @@ pub struct Loaded {
 /// A token with the shape of a Guild Wars 2 API key is dropped: it comes back empty, and the file
 /// is rewritten at once so the key does not stay on disk. If that rewrite fails the key is still
 /// not used; the failure is logged without the value.
+///
+/// Call it once, when the addon loads and before anything can save: it clears the temporary
+/// file a save writes, which at that moment can only be one left by a save that never finished.
 pub fn load(dir: &Path) -> Loaded {
     let unreadable = || Loaded { settings: Settings::default(), discarded_api_key: false, unreadable: true };
+    // A save that never finished, the game killed between its write and its rename, left its
+    // temporary file behind: settings that never took effect, with the token in them. This
+    // runs before anything of the addon can save, so whatever is there is that. It is removed
+    // and never read; if it cannot be removed the load goes on all the same.
+    let _ = fs::remove_file(dir.join(TEMPORARY_NAME));
     let path = dir.join(FILE_NAME);
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -199,6 +207,15 @@ pub const UNREADABLE_NOTICE: [&str; 2] = [
      No se guarda nada hasta que pegues el token y pulses Save, que reemplaza ese fichero.",
 ];
 
+/// What Options says while the last save that was tried failed ([`SaveGuard::failed`]), in the
+/// two languages the addon has.
+pub const SAVE_FAILED_NOTICE: [&str; 2] = [
+    "The settings could not be saved: settings.json is as it was before. What you changed is in \
+     use until the game closes. Press Save to try again.",
+    "No se pudieron guardar los ajustes: settings.json sigue como estaba. Lo que cambiaste vale \
+     hasta que cierres el juego. Pulsa Save para intentarlo otra vez.",
+];
+
 /// A save's place in line: which settings are newer than which ([`SaveGuard::ticket`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveTicket(u64);
@@ -231,6 +248,8 @@ pub enum Saved {
 #[derive(Debug, Default)]
 pub struct SaveGuard {
     held: std::sync::atomic::AtomicBool,
+    /// The last save that reached the disk failed there: the file is not what is in use.
+    failed: std::sync::atomic::AtomicBool,
     /// The last ticket handed out.
     issued: std::sync::atomic::AtomicU64,
     /// The ticket of the settings on disk, and the lock every write is made under. Taken only
@@ -242,6 +261,7 @@ impl SaveGuard {
     pub const fn new() -> Self {
         Self {
             held: std::sync::atomic::AtomicBool::new(false),
+            failed: std::sync::atomic::AtomicBool::new(false),
             issued: std::sync::atomic::AtomicU64::new(0),
             written: std::sync::Mutex::new(0),
         }
@@ -278,10 +298,27 @@ impl SaveGuard {
         if ticket.0 < *written {
             return Ok(Saved::Superseded);
         }
-        save(dir, settings)?;
+        let saved = save(dir, settings);
+        // Told to the user until a save works: the error itself only goes to the log, and the
+        // window that asked for the save looks the same whether it was written or not.
+        self.failed.store(saved.is_err(), std::sync::atomic::Ordering::Relaxed);
+        saved?;
         *written = ticket.0;
         self.held.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(Saved::Written)
+    }
+
+    /// Whether the last save that reached the disk failed there, which is when Options shows
+    /// [`SAVE_FAILED_NOTICE`]. A save that was held or overtaken wrote nothing and changes
+    /// nothing here; the next one that is written clears it.
+    pub fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A save that could not even be tried: the caller has no directory to write in. Told like
+    /// one that failed on the disk.
+    pub fn could_not_try(&self) {
+        self.failed.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -525,6 +562,72 @@ mod tests {
         for (port, request) in [(50030, SaveRequest::Automatic), (50031, SaveRequest::Explicit)] {
             assert_eq!(guard.save(&dir, &Settings { port, ..Settings::default() }, request, guard.ticket()).expect("save succeeds"), Saved::Written);
             assert_eq!(load(&dir).settings.port, port);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The game can die between the write of the temporary file and the rename. The file of
+    /// before is whole, and next to it stays a copy of the settings that never took its place,
+    /// token included, which nothing would ever read or remove.
+    #[test]
+    fn a_temporary_file_left_by_a_save_that_never_finished_is_removed_on_load() {
+        let dir = temp_dir("stale-temporary");
+        let saved = Settings { port: 50050, token: "s".repeat(43), ..Settings::default() };
+        save(&dir, &saved).expect("save succeeds");
+        let never_renamed = serde_json::to_string_pretty(&Settings { port: 50051, token: "n".repeat(43), ..Settings::default() }).unwrap();
+        fs::write(dir.join(TEMPORARY_NAME), &never_renamed).unwrap();
+        assert_eq!(load(&dir), Loaded { settings: saved, discarded_api_key: false, unreadable: false }, "the file of before, not the temporary one");
+        assert!(!dir.join(TEMPORARY_NAME).exists(), "the temporary file is still there, with its token");
+        // With no settings.json at all it is still a first run: nothing is taken from it.
+        fs::remove_file(dir.join(FILE_NAME)).unwrap();
+        fs::write(dir.join(TEMPORARY_NAME), &never_renamed).unwrap();
+        assert_eq!(load(&dir), Loaded { settings: Settings::default(), discarded_api_key: false, unreadable: false });
+        assert!(!dir.join(TEMPORARY_NAME).exists());
+        // One that cannot be removed is no reason for the load to fail, or to say the file is
+        // unreadable: here it is a directory.
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        assert_eq!(load(&dir), Loaded { settings: Settings::default(), discarded_api_key: false, unreadable: false });
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A save that fails only went to the log, and the window that asked for it looks the same
+    /// as after one that worked: the user was left thinking the settings were saved.
+    #[test]
+    fn a_save_that_fails_is_told_until_one_is_written() {
+        let dir = temp_dir("save-failed");
+        let guard = SaveGuard::new();
+        let settings = Settings { port: 50060, ..Settings::default() };
+        assert!(!guard.failed());
+        assert_eq!(guard.save(&dir, &settings, SaveRequest::Explicit, guard.ticket()).expect("save succeeds"), Saved::Written);
+        assert!(!guard.failed());
+        // The disk refuses: here, the temporary file cannot be written.
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        for request in [SaveRequest::Explicit, SaveRequest::Automatic] {
+            assert!(guard.save(&dir, &Settings { port: 50061, ..settings.clone() }, request, guard.ticket()).is_err());
+            assert!(guard.failed(), "{request:?}");
+        }
+        assert_eq!(load(&dir).settings.port, 50060, "the file is the one of before");
+        // A save that writes nothing says nothing about the disk: it is still to be told.
+        let overtaken = guard.ticket();
+        fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        guard.hold();
+        assert_eq!(guard.save(&dir, &settings, SaveRequest::Automatic, guard.ticket()).expect("not an error"), Saved::Held);
+        assert!(guard.failed());
+        // The next one that is written clears it.
+        assert_eq!(guard.save(&dir, &Settings { port: 50062, ..settings.clone() }, SaveRequest::Explicit, guard.ticket()).expect("save succeeds"), Saved::Written);
+        assert!(!guard.failed());
+        assert_eq!(guard.save(&dir, &settings, SaveRequest::Automatic, overtaken).expect("not an error"), Saved::Superseded);
+        assert!(!guard.failed());
+        assert_eq!(load(&dir).settings.port, 50062);
+        // No directory to save in is told the same way, and cleared the same way.
+        guard.could_not_try();
+        assert!(guard.failed());
+        assert_eq!(guard.save(&dir, &settings, SaveRequest::Automatic, guard.ticket()).expect("save succeeds"), Saved::Written);
+        assert!(!guard.failed());
+        let [english, spanish] = SAVE_FAILED_NOTICE;
+        assert_ne!(english, spanish);
+        for notice in SAVE_FAILED_NOTICE {
+            assert!(notice.contains("settings.json") && notice.contains("Save"), "{notice}");
         }
         let _ = fs::remove_dir_all(&dir);
     }

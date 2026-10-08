@@ -641,6 +641,14 @@ reaches the file after a newer one writes nothing, and only one writes at a time
 them never share `settings.json.tmp`. A click in a window still writes the file on the frame
 of that click.
 
+A save that fails used to go to the log and nowhere else, and the window looked as it does
+after one that worked. Options now says so in red above the port, in English and Spanish,
+until a save is written: the file is as it was before, what was changed is in use until the
+game closes, and **Save** tries again. And if the game dies between the write of
+`settings.json.tmp` and its rename, that file stays behind with the token in it: it is
+removed, without being read, the next time the addon loads its settings, before anything can
+save.
+
 If the file is there and cannot be loaded, because it cannot be read or does not parse, the
 addon runs on the default settings, leaves the file as it is and **saves nothing by itself**:
 the checkboxes, the buttons of the panel's bar and the quick access icon still work for that
