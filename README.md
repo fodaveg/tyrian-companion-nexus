@@ -133,6 +133,26 @@ a location change during copying invalidates the capture. Unsupported quantity p
 an unknown instance suppresses that entire ID, never becoming quantity one or zero. One
 is allowed only for the explicitly certified NULL Stackable fallback branches.
 
+How a pass spends that budget. The position matrix is copied whole, in reads of up to 512
+positions, before the first item is followed and again when the final pass starts; a
+position that differs between the two copies rejects the capture, whichever it is. The words
+of the executable a pass relies on (the vtable slots of each item class, of the stack class
+and of a conditional profile's predicate class, and the bytes of the NULL fallback) are
+copied once per pass, not once per item, and all of them a second time before the pass is
+accepted. Every field the game can change is read as often as it always was: a position
+twice; an item's class, instance reference, resolver entry, definition, ID, location and
+owner three times (its turn, right after its quantity, the final pass); a stack's class and
+count four times, two in each quantity; a conditional definition's subtype, payload pointer
+and condition four times. Fields that lie together come in one read of the same bytes.
+
+A position costs 16 requested bytes, a stack 174 more on the common quantity branch and 254
+on a conditional one, the route 224 and each item class about a hundred. Over 512 positions,
+all of them with a stack,
+a pass asks for 97600 bytes and 11823 reads on the common branch. On a conditional branch
+482 stacks fit and the 483rd makes the pass ask for more than its budget, so it gives no
+sample; beside the largest discovery (128 threads, 5632 bytes) the figure is 460.
+`core/tests/inventory.rs` pins these figures to the byte.
+
 Free slots are `null`: sparse empty entries do not prove usable bag capacity. Magic Find has
 no verified source. These are missing coverage, not zero values or completed MF support.
 
