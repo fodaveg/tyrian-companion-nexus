@@ -164,20 +164,77 @@ pub struct InventorySnapshot {
     pub wallet: Option<WalletSnapshot>,
 }
 
+/// Where the item vtables of the certified build live, and so where a class is a fixed word of
+/// the executable rather than something the game writes.
+fn vtables(base: u64) -> std::ops::Range<u64> {
+    base + 0x1913000..base + 0x2552390
+}
+/// Up to 8 bytes at `address`, little-endian.
+fn word<M: Memory>(r: &mut Reader<M>, address: u64, size: usize) -> Result<u64, ReadError> {
+    let mut bytes = [0u8; 8];
+    r.read_into(address, bytes.get_mut(..size).ok_or(ReadError::Bounds)?)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Words of the executable itself that one pass has already copied: vtable slots and the
+/// bytes of a getter. Items share a handful of classes, so each word is asked for once per
+/// pass and not once per item, and [`Self::unchanged`] copies every one of them again before
+/// the pass is accepted. Never kept from one pass to the next.
+#[derive(Default)]
+struct Statics(BTreeMap<(u64, usize), u64>);
+impl Statics {
+    fn word<M: Memory>(
+        &mut self,
+        r: &mut Reader<M>,
+        address: u64,
+        size: usize,
+    ) -> Result<u64, ReadError> {
+        if let Some(value) = self.0.get(&(address, size)) {
+            return Ok(*value);
+        }
+        let value = word(r, address, size)?;
+        self.0.insert((address, size), value);
+        Ok(value)
+    }
+    /// A vtable slot must select exactly the certified code.
+    fn equal<M: Memory>(
+        &mut self,
+        r: &mut Reader<M>,
+        address: u64,
+        expected: u64,
+    ) -> Result<(), ReadError> {
+        if self.word(r, address, 8)? != expected {
+            return Err(ReadError::ProfileMismatch);
+        }
+        Ok(())
+    }
+    /// Every word this pass relied on, copied a second time.
+    fn unchanged<M: Memory>(&self, r: &mut Reader<M>) -> Result<(), ReadError> {
+        for ((address, size), value) in &self.0 {
+            if word(r, *address, *size)? != *value {
+                return Err(ReadError::Changed);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// GetStackQuantity's certified branches. Never invoke the getter or guess an unknown quantity.
 fn quantity<M: Memory>(
     r: &mut Reader<M>,
+    statics: &mut Statics,
     base: u64,
     item: u64,
     vt: u64,
     definition: u64,
 ) -> Result<Option<u32>, ReadError> {
-    let getter = r.pointer(vt + 0x260)?;
+    let getter = pointer_value(statics.word(r, vt + 0x260, 8)?)?;
     let offset = match getter.checked_sub(base) {
         Some(0x84c310) => Some(0x98),
         Some(0x13c81c0) => Some(0xd0),
         Some(0x168aa0) => {
-            if r.read::<3>(getter)? != [0x33, 0xc0, 0xc3] {
+            // `xor eax, eax; ret`, the bytes 33 C0 C3.
+            if statics.word(r, getter, 3)? != 0xc3c033 {
                 return Err(ReadError::ProfileMismatch);
             }
             return Ok(Some(1)); // Explicitly certified NULL Stackable fallback in final getter.
@@ -185,7 +242,7 @@ fn quantity<M: Memory>(
         _ => None,
     };
     if let Some(offset) = offset {
-        return stack_quantity(r, base, item + offset).map(Some);
+        return stack_quantity(r, statics, base, item + offset).map(Some);
     }
     let p = match vt.checked_sub(base) {
         Some(0x225d580) => (0xa8, 0x225d898, 0, 0x13c9d60, 5, 0, 1, 1, 0x98, 0x13c9d20),
@@ -199,7 +256,7 @@ fn quantity<M: Memory>(
         return Err(ReadError::ProfileMismatch);
     }
     r.equal(item + p.0, 8, base + p.1)?;
-    r.equal(base + p.1 + p.2, 8, base + p.3)?;
+    statics.equal(r, base + p.1 + p.2, base + p.3)?;
     r.equal(definition + 0x2c, 4, p.4)?;
     let payload = r.pointer(definition + 0x30)?;
     if payload == 0 {
@@ -207,7 +264,7 @@ fn quantity<M: Memory>(
     }
     let condition = r.scalar(payload + p.5, 4)?;
     let result = if condition & p.6 == p.7 {
-        stack_quantity(r, base, item + p.8)?
+        stack_quantity(r, statics, base, item + p.8)?
     } else {
         1
     };
@@ -219,9 +276,23 @@ fn quantity<M: Memory>(
     }
     Ok(Some(result))
 }
-fn stack_quantity<M: Memory>(r: &mut Reader<M>, base: u64, stack: u64) -> Result<u32, ReadError> {
+fn stack_quantity<M: Memory>(
+    r: &mut Reader<M>,
+    statics: &mut Statics,
+    base: u64,
+    stack: u64,
+) -> Result<u32, ReadError> {
     let vt = r.pointer(stack)?;
-    r.equal(vt, 8, base + 0x168d10)?;
+    // The stack's class is a pointer the game writes. Among the executable's vtables its
+    // first slot is a fixed word like any other; anywhere else it is judged at every use.
+    let first = if vtables(base).contains(&vt) {
+        statics.word(r, vt, 8)?
+    } else {
+        r.scalar(vt, 8)?
+    };
+    if first != base + 0x168d10 {
+        return Err(ReadError::ProfileMismatch);
+    }
     let value = r.scalar(stack + 8, 4)?;
     if value > 250 {
         return Err(ReadError::Bounds);
@@ -304,6 +375,7 @@ pub fn inventory_snapshot<M: Memory>(
     // all been read: every position, occupied or not, must hold at the end what it held
     // before the first item was read.
     let matrix = positions(r, array, count)?;
+    let mut statics = Statics::default();
     let mut checked = Vec::with_capacity(count as usize);
     let mut excluded = Vec::with_capacity(count as usize);
     let mut seen = BTreeSet::new();
@@ -316,10 +388,10 @@ pub fn inventory_snapshot<M: Memory>(
             continue;
         }
         let vt = r.pointer(item)?;
-        if !(b + 0x1913000..b + 0x2552390).contains(&vt) {
+        if !vtables(b).contains(&vt) {
             return Err(ReadError::ProfileMismatch);
         }
-        r.equal(vt + 0x70, 8, b + 0x13c45d0)?;
+        statics.equal(r, vt + 0x70, b + 0x13c45d0)?;
         let location = r.scalar(item + 0x48, 2)?;
         if location & 15 != 3 {
             // Classification is part of coverage: an excluded entry must not enter our
@@ -328,9 +400,9 @@ pub fn inventory_snapshot<M: Memory>(
             continue;
         }
         r.equal(item + 0x58, 8, inventory)?;
-        r.equal(vt + 0xa0, 8, b + 0x13c46d0)?;
-        r.equal(vt + 8, 8, b + 0x13c3e10)?;
-        r.equal(vt + 0x68, 8, b + 0x31b980)?;
+        statics.equal(r, vt + 0xa0, b + 0x13c46d0)?;
+        statics.equal(r, vt + 8, b + 0x13c3e10)?;
+        statics.equal(r, vt + 0x68, b + 0x31b980)?;
         let reference = r.scalar(item + 0x38, 4)?;
         if reference == 0 || reference >= length || !seen.insert(reference) {
             return Err(ReadError::Bounds);
@@ -343,7 +415,7 @@ pub fn inventory_snapshot<M: Memory>(
         if !(1..1_000_000).contains(&id) {
             return Err(ReadError::Bounds);
         }
-        let value = quantity(r, b, item, vt, definition)?;
+        let value = quantity(r, &mut statics, b, item, vt, definition)?;
         if let Some(value) = value {
             let total = quantities.entry(id as u32).or_default();
             *total = total
@@ -386,11 +458,14 @@ pub fn inventory_snapshot<M: Memory>(
             || r.pointer(item_array + reference * 8)? != item
             || r.scalar(item + 0x48, 2)? != location
             || r.pointer(item + 0x58)? != inventory
-            || quantity(r, b, item, vt, definition)? != value
+            || quantity(r, &mut statics, b, item, vt, definition)? != value
         {
             return Err(ReadError::Changed);
         }
     }
+    // The final pass used to ask each item's class for its getter again. The classes are
+    // now read once per pass, so all their words are read again here, after the last item.
+    statics.unchanged(r)?;
     if r.pointer(context + 0x98)? != charctx
         || r.pointer(charctx + 0x98)? != character
         || r.pointer(character + 0x3f0)? != inventory

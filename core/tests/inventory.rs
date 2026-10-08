@@ -328,6 +328,10 @@ fn stable_excluded_item_does_not_read_its_owner_definition_or_quantity() {
         (ITEM + 0x58, 8),
         (ITEM + 0x98, 12),
         (VT + 0x260, 8),
+        // Nor is its class asked for what only an owned item must answer.
+        (VT + 8, 8),
+        (VT + 0x68, 8),
+        (VT + 0xa0, 8),
     ]
     .into_iter()
     .flat_map(|(field, size)| field..field + size)
@@ -631,23 +635,98 @@ fn observed_size_dense_conditional_inventory_fits_cycle_budget_and_excess_fails_
 /// decide how full the bags may be before the reader goes without coverage.
 #[test]
 fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
-    for (occupied, branch, reads, bytes) in [
-        (0, Branch::Common, 35, 8_416),
-        (313, Branch::Common, 11_616, 82_910),
-        (512, Branch::Common, 18_979, 130_272),
-        (313, Branch::Conditional, 16_624, 112_958),
-    ] {
-        let (result, asked_reads, asked_bytes) = pass(dense(512, occupied, branch));
+    let asked: Vec<_> = [
+        (0, Branch::Common),
+        (313, Branch::Common),
+        (512, Branch::Common),
+        (313, Branch::Conditional),
+        (414, Branch::Conditional),
+    ]
+    .into_iter()
+    .map(|(occupied, branch)| {
+        let (result, reads, bytes) = pass(dense(512, occupied, branch));
         let snapshot = result.unwrap();
         assert_eq!(snapshot.quantities.len() as u64, occupied);
         assert_eq!(
             snapshot.quantities.values().map(|n| *n as u64).sum::<u64>(),
             occupied * 7
         );
+        (reads, bytes)
+    })
+    .collect();
+    assert_eq!(
+        asked,
+        [
+            (35, 8_416),
+            (9_124, 62_974),
+            (14_895, 97_600),
+            (13_508, 88_030),
+            (17_851, 113_684)
+        ]
+    );
+}
+#[test]
+fn a_class_is_judged_once_per_pass_and_read_again_before_the_pass_is_accepted() {
+    let words = [
+        VT + 8,
+        VT + 0x68,
+        VT + 0x70,
+        VT + 0xa0,
+        VT + 0x260,
+        STACK_VT,
+    ];
+    // 313 stacks of one class: each word of it and of the stack's class is copied twice in
+    // the pass, not once or more per stack.
+    let mut m = dense(512, 313, Branch::Common);
+    let mut r = Reader::new(&mut m);
+    inventory_snapshot(&mut r, profile(), CTX).unwrap();
+    for word in words {
+        assert_eq!(m.looks(word), 2, "{word:x}");
+    }
+    // The second copy is what finds a word that changed while the pass ran.
+    let changed = Err(ReadError::Changed);
+    let stable = fixture(570);
+    for word in words {
         assert_eq!(
-            (asked_reads, asked_bytes),
-            (reads, bytes),
-            "{occupied} {branch:?}"
+            later_looks(&stable, word, 8, BASE + 0x13c46d8, 2),
+            [changed.clone(), Ok(BTreeMap::from([(12147, 3)]))],
+            "{word:x}"
+        );
+    }
+    // The slot of the embedded predicate class of a conditional profile.
+    assert_eq!(
+        later_looks(&conditional(570), BASE + 0x225d898, 8, BASE + 0x13c9d68, 2),
+        [changed.clone(), Ok(BTreeMap::from([(12147, 7)]))]
+    );
+    // The machine bytes of the certified NULL fallback.
+    let mut fallback = fixture(570);
+    fallback.put(VT + 0x260, BASE + 0x168aa0, 8);
+    fallback.put(BASE + 0x168aa0, 0xc3c033, 3);
+    assert_eq!(
+        later_looks(&fallback, BASE + 0x168aa0, 3, 0xc3c031, 2),
+        [changed, Ok(BTreeMap::from([(12147, 1)]))]
+    );
+}
+#[test]
+fn a_stack_class_outside_the_executable_vtables_is_judged_at_every_use() {
+    // Memory the game writes is not a fixed word of the executable: nothing is remembered.
+    let heap = 0x130000;
+    let mut stable = dense(8, 3, Branch::Common);
+    stable.put(heap, BASE + 0x168d10, 8);
+    for n in 0..3 {
+        stable.put(0x200000 + 0x200 * n + 0x98, heap, 8);
+    }
+    let mut m = stable.clone();
+    let mut r = Reader::new(&mut m);
+    let s = inventory_snapshot(&mut r, profile(), CTX).unwrap();
+    assert_eq!(s.quantities.len(), 3);
+    // Each stack's turn and each stack's final pass.
+    assert_eq!(m.looks(heap), 6);
+    for visit in 2..=6 {
+        assert_eq!(
+            snapshot(stable.clone().racing(heap, visit, 0, 8)),
+            Err(ReadError::ProfileMismatch),
+            "{visit}"
         );
     }
 }
