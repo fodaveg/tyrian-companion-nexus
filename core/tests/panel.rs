@@ -564,6 +564,120 @@ fn another_character_does_not_inherit_the_highest() {
     assert!(has(&fell, "Bajó 30 puntos respecto al máximo de la sesión (333%)"), "{fell:?}");
 }
 
+/// What the two helpers below do to a followed panel: go to character select, and come into a
+/// map with a character.
+fn to_character_select(panel: &mut Follow, seconds: u64) {
+    panel.case.character = None;
+    panel.case.character_in_map = false;
+    panel.case.live = LiveStatus::Unavailable;
+    panel.at(seconds, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+}
+
+fn enter_with(panel: &mut Follow, name: &str) {
+    panel.case.character = Some(name.to_string());
+    panel.case.character_in_map = true;
+    panel.case.live = LiveStatus::Measuring;
+}
+
+/// The highest is kept per character for the length of the session: switching to another one
+/// and back does not start the first one over, and neither one's highest is the other's.
+#[test]
+fn coming_back_to_a_character_finds_its_own_highest() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // B reaches higher than A ever did.
+    to_character_select(&mut panel, 10);
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(20, bags(12, 80), verified(300, 30.0, 70.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(400.0));
+    // Back to A with its food gone: a fall from A's own 383, not from B's 400, and not a
+    // first reading either.
+    to_character_select(&mut panel, 30);
+    enter_with(&mut panel, "Astra Uno");
+    let back = panel.at(40, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((back.text.as_str(), back.tone), ("MF: 333%", Tone::Warning), "{back:?}");
+    assert!(has(&back, "Bajó 50 puntos respecto al máximo de la sesión (383%)") && !has(&back, "400"), "{back:?}");
+    assert_eq!(panel.memory.magic_find_peak(), Some(383.0));
+    // A goes higher than before: that is its highest from here on.
+    panel.at(41, bags(41, 160), verified(300, 30.0, 60.0));
+    assert_eq!(panel.memory.magic_find_peak(), Some(390.0));
+    // And B's is still B's.
+    to_character_select(&mut panel, 50);
+    enter_with(&mut panel, "Bruma Dos");
+    let other = panel.at(60, bags(12, 80), verified(300, 30.0, 53.0)).magic_find;
+    assert_eq!(other.tone, Tone::Warning, "{other:?}");
+    assert!(has(&other, "Bajó 17 puntos respecto al máximo de la sesión (400%)"), "{other:?}");
+    // Straight from one to the other, with no frame at character select in between.
+    enter_with(&mut panel, "Astra Uno");
+    let direct = panel.at(70, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert!(has(&direct, "Bajó 57 puntos respecto al máximo de la sesión (390%)"), "{direct:?}");
+}
+
+/// What is kept per character is the session's. Another session starts every character over.
+#[test]
+fn another_session_forgets_the_highest_of_every_character() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.case.farming = session("active", 100);
+    panel.at(0, bags(41, 160), verified(300, 30.0, 53.0));
+    to_character_select(&mut panel, 10);
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(20, bags(12, 80), verified(300, 30.0, 70.0));
+    // The session ends and another one starts, on B.
+    panel.case.farming = session("complete", 125);
+    panel.at(25, bags(12, 80), verified(300, 30.0, 70.0));
+    panel.case.farming = session("active", 2);
+    let fresh = panel.at(30, bags(12, 80), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((fresh.text.as_str(), fresh.tone), ("MF: 333%", Tone::Normal), "{fresh:?}");
+    // And back on A, in the new session: nothing of the one before.
+    to_character_select(&mut panel, 40);
+    enter_with(&mut panel, "Astra Uno");
+    let back = panel.at(50, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!((back.text.as_str(), back.tone), ("MF: 333%", Tone::Normal), "{back:?}");
+    assert!(!has(&back, "Bajó"), "{back:?}");
+    // A lost connection ends what is known of the session too.
+    panel.at(51, bags(41, 160), verified(300, 30.0, 53.0));
+    to_character_select(&mut panel, 60);
+    panel.case.connection = Status::WaitingForPlugin;
+    panel.at(61, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    panel.case.connection = Status::Connected;
+    enter_with(&mut panel, "Bruma Dos");
+    panel.at(70, bags(12, 80), verified(300, 30.0, 3.0));
+    to_character_select(&mut panel, 80);
+    enter_with(&mut panel, "Astra Uno");
+    let after = panel.at(90, bags(41, 160), verified(300, 30.0, 3.0)).magic_find;
+    assert_eq!(after.tone, Tone::Normal, "{after:?}");
+}
+
+/// The highest of at most `panel::CHARACTER_PEAKS` characters is kept, which is more than an
+/// account has. Past that the one not played for longest goes, and starts over if it comes back.
+#[test]
+fn the_highest_is_kept_for_a_bounded_number_of_characters() {
+    assert_eq!(panel::CHARACTER_PEAKS, 80);
+    let mut panel = Follow::new(Case::sketch());
+    // Eighty-two characters in a row, each reaching 383.
+    for (index, second) in (0..=81u64).zip((0..).step_by(10)) {
+        enter_with(&mut panel, &format!("Personaje {index}"));
+        panel.at(second, bags(41, 160), verified(300, 30.0, 53.0));
+        assert_eq!(panel.memory.magic_find_peak(), Some(383.0), "{index}");
+    }
+    let low = |panel: &mut Follow, index: u64, second: u64| {
+        enter_with(panel, &format!("Personaje {index}"));
+        panel.at(second, bags(41, 160), verified(300, 30.0, 3.0)).magic_find
+    };
+    // The first one played went when the eighty-first before the last was put away: it
+    // starts over.
+    let first = low(&mut panel, 0, 1_000);
+    assert_eq!((first.text.as_str(), first.tone), ("MF: 333%", Tone::Normal), "{first:?}");
+    // One played after it is still there.
+    let kept = low(&mut panel, 2, 1_010);
+    assert_eq!(kept.tone, Tone::Warning, "{kept:?}");
+    assert!(has(&kept, "Bajó 50 puntos respecto al máximo de la sesión (383%)"), "{kept:?}");
+    // And the most recent ones, of course.
+    assert_eq!(low(&mut panel, 81, 1_020).tone, Tone::Warning);
+    assert_eq!(low(&mut panel, 80, 1_030).tone, Tone::Warning);
+}
+
 /// The frame in which the new character is first named can come before the reader's first
 /// cycle on it: the reader's output is then still the last reading of the character before.
 /// It is neither painted as this one's nor taken as its highest.

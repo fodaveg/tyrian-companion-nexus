@@ -749,9 +749,14 @@ The session's highest Magic Find, the one a fall is measured against:
   session starts can be up to 5 seconds older than the session: it is painted, as the last
   thing the reader verified, and it is not taken as the highest;
 - only goes up;
-- is one character's. A different character named by the game context starts it over, and
-  nothing read of the character before is painted or kept. Going to character select and
-  coming back with the same character changes nothing;
+- is each character's own, for the length of the session. When the game context names a
+  different character, the highest of the one that was being played is put away under its
+  name and the one that comes in gets back its own, or starts one if it has none: A's
+  highest is still there after playing B, and B's is never A's. Nothing read of the
+  character before is painted as the new one's. Going to character select and coming back
+  with the same character changes nothing. It is kept for 80 characters
+  (`panel::CHARACTER_PEAKS`), the one not played for longest going first, and all of it ends
+  with the session;
 - is the session's. `farm1` carries no session id, so another session is one that starts
   running after one that was not, or one whose declared duration goes back by more than a
   minute or to under a minute; the host sends a frame every 5 seconds, so a short `starting`

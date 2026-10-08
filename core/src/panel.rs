@@ -70,6 +70,10 @@ pub const READING_HOLD: Duration = Duration::from_secs(5);
 /// one means a cycle is missing, and the tooltip then says how old the reading is.
 const READING_CURRENT: Duration = Duration::from_secs(2);
 
+/// For how many characters the highest Magic Find of the session is kept while another one is
+/// played. More than an account has; past it the one not played for longest goes.
+pub const CHARACTER_PEAKS: usize = 80;
+
 /// The declared duration of a session falling by more than this many seconds, or back under
 /// them, is another session and not a correction of the same one.
 const SESSION_RESTART: i32 = 60;
@@ -93,6 +97,11 @@ pub struct PanelMemory {
     /// frame in which a different one was first seen. Another character is another baseline.
     character: Option<String>,
     character_since: Option<Instant>,
+    /// The session's highest of the characters played before the current one, by name, the
+    /// least recently played first and at most [`CHARACTER_PEAKS`] of them: coming back to one
+    /// finds its own highest. The current character's is `magic_find_peak` and is not in here.
+    /// Emptied with the session.
+    peaks: Vec<(String, MagicFind)>,
     /// The last verified reading of each line and the instant of the reader's cycle that
     /// returned it, kept for [`READING_HOLD`].
     bags: Option<(BagSlots, Instant)>,
@@ -117,6 +126,7 @@ impl PanelMemory {
             peak_from: None,
             character: None,
             character_since: None,
+            peaks: Vec::new(),
             bags: None,
             magic_find: None,
             session_running: false,
@@ -299,24 +309,37 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
     let another = (running && !memory.session_running) || restarted;
     memory.session_running = running;
     memory.elapsed = elapsed;
-    // Another character, as another session: nothing read of the one before is this one's. A
-    // context that names nobody (character select, or no link yet) is not a change, so the same
-    // character coming back keeps what it had.
-    let another_character = matches!((memory.character.as_deref(), input.character), (Some(before), Some(now)) if before != now);
-    if let Some(name) = input.character.filter(|name| memory.character.as_deref() != Some(*name)) {
-        memory.character = Some(name.to_string());
-    }
-    if another_character {
-        memory.character_since = Some(input.now);
-    }
-    if another || another_character {
+    // Another character: nothing read of the one before is this one's. A context that names
+    // nobody (character select, or no link yet) is not a change, so the same character coming
+    // back keeps what it had. `previous` is the one that was being played, when it is another.
+    let named = input.character.filter(|now| memory.character.as_deref() != Some(*now));
+    let previous = named.and_then(|now| memory.character.replace(now.to_string()));
+    if another || previous.is_some() {
         memory.bags = None;
         memory.magic_find = None;
     }
     // No highest without a session that has started measuring, nor across a lost connection:
-    // what happened while the addon was not being told is not this session's as far as it knows.
-    if another || another_character || input.connection != Status::Connected || matches!(phase, None | Some(Phase::Idle | Phase::Starting)) {
+    // what happened while the addon was not being told is not this session's as far as it
+    // knows. That goes for every character played in it.
+    if another || input.connection != Status::Connected || matches!(phase, None | Some(Phase::Idle | Phase::Starting)) {
         memory.magic_find_peak = None;
+        memory.peak_from = None;
+        memory.peaks.clear();
+    }
+    // The highest is each character's own, for the length of the session: the one that was
+    // being played is put away with its own, and the one that comes in gets back what it had.
+    // Taken out before the other is put away, so that a full store cannot drop it just then.
+    if let Some(before) = previous {
+        memory.character_since = Some(input.now);
+        let kept = named.and_then(|now| memory.peaks.iter().position(|(name, _)| name == now));
+        let incoming = kept.map(|at| memory.peaks.remove(at).1);
+        if let Some(peak) = std::mem::replace(&mut memory.magic_find_peak, incoming) {
+            memory.peaks.push((before, peak));
+            if memory.peaks.len() > CHARACTER_PEAKS {
+                memory.peaks.remove(0);
+            }
+        }
+        // Its readings count again from the first frame it is seen measuring.
         memory.peak_from = None;
     }
     // The highest counts from the first frame in which this session is seen measuring.
