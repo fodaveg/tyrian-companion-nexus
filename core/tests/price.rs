@@ -48,7 +48,7 @@ fn subscribed() -> SharedState {
 }
 
 #[test]
-fn every_fixture_frame_parses_and_the_sub_line_matches_byte_for_byte() {
+fn every_fixture_frame_parses_and_the_sub_line_equals_the_fixture_as_json() {
     let frames = fixture();
     assert_eq!(
         parse_server_line(&frames[0].to_string()),
