@@ -88,7 +88,7 @@ fn bags(free: u32, capacity: u32) -> BagCoverage {
     BagCoverage::Read(BagSlots { capacity, occupied: capacity - free, free, bag_slots: 8, bags: 8 })
 }
 
-const REASONS: [Uncovered; 9] = [
+const REASONS: [Uncovered; 10] = [
     Uncovered::Guard,
     Uncovered::Profile,
     Uncovered::Root,
@@ -98,6 +98,7 @@ const REASONS: [Uncovered; 9] = [
     Uncovered::Unsupported,
     Uncovered::Changed,
     Uncovered::ReadFailed,
+    Uncovered::Deadline,
 ];
 
 struct Case {
@@ -488,23 +489,29 @@ fn points_are_whole_when_they_are_and_have_one_decimal_when_not() {
 /// What the Options window shows of each reader's last pass, for a screenshot.
 #[test]
 fn the_reader_diagnostics_name_the_outcome_the_exact_reason_and_the_cost() {
-    assert_eq!(panel::bags_diagnostic(BagCoverage::NotRead, 0, 0), "Bags: not read; bytes: 0 / 8192; reads: 0");
+    // The budgets are the readers' own constants, whatever they are.
+    let (bag_budget, magic_find_budget) = (tyrian_companion_nexus_core::bags::MAX_BYTES, tyrian_companion_nexus_core::magic_find::MAX_BYTES);
+    assert_eq!(panel::bags_diagnostic(BagCoverage::NotRead, 0, 0), format!("Bags: not read; bytes: 0 / {bag_budget}; reads: 0"));
     assert_eq!(
         panel::bags_diagnostic(bags(63, 160), 1480, 37),
-        "Bags: read, 97 used of 160, 63 free (8 bags in 8 bag slots); bytes: 1480 / 8192; reads: 37"
+        format!("Bags: read, 97 used of 160, 63 free (8 bags in 8 bag slots); bytes: 1480 / {bag_budget}; reads: 37")
     );
     assert_eq!(
         panel::bags_diagnostic(BagCoverage::Unavailable(Uncovered::Alignment), 312, 9),
-        "Bags: no coverage, Alignment (misaligned pointer); bytes: 312 / 8192; reads: 9"
+        format!("Bags: no coverage, Alignment (misaligned pointer); bytes: 312 / {bag_budget}; reads: 9")
     );
-    assert_eq!(panel::magic_find_diagnostic(MagicFindCoverage::NotRead, 0, 0), "Magic Find: not read; bytes: 0 / 65536; reads: 0");
+    assert_eq!(
+        panel::magic_find_diagnostic(MagicFindCoverage::NotRead, 0, 0),
+        format!("Magic Find: not read; bytes: 0 / {magic_find_budget}; reads: 0")
+    );
     assert_eq!(
         panel::magic_find_diagnostic(verified(300, 30.0, 33.5), 28706, 410),
-        "Magic Find: read, 363.5% = luck 300 + server 30 + effects 33.5 (boon modifiers counted: no); bytes: 28706 / 65536; reads: 410"
+        format!("Magic Find: read, 363.5% = luck 300 + server 30 + effects 33.5 (boon modifiers counted: no); bytes: 28706 / {magic_find_budget}; reads: 410")
     );
+    // A pass cut by the readers' own deadline names it; it is no longer a plain read failure.
     assert_eq!(
-        panel::magic_find_diagnostic(MagicFindCoverage::Unavailable(Uncovered::ReadFailed), 41200, 603),
-        "Magic Find: no coverage, ReadFailed (read failed); bytes: 41200 / 65536; reads: 603"
+        panel::magic_find_diagnostic(MagicFindCoverage::Unavailable(Uncovered::Deadline), 41200, 603),
+        format!("Magic Find: no coverage, Deadline (the read ran out of time); bytes: 41200 / {magic_find_budget}; reads: 603")
     );
     for reason in REASONS {
         for line in [panel::bags_diagnostic(BagCoverage::Unavailable(reason), 1, 1), panel::magic_find_diagnostic(MagicFindCoverage::Unavailable(reason), 1, 1)] {

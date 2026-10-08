@@ -1,9 +1,17 @@
 //! Bag capacity fixtures over owned bytes; never open a real process.
 //!
 //! The fixtures carry no bytes of the game. They own synthetic contents for every guarded
-//! range and the digests of those contents, and pass them to `BagProfile::verified_against`.
-//! The real digests in `bags::GUARDS` were checked against the installed executable by
-//! `tyrian-companion/docs/audit/loot-bag-capacity-probe/check_profile_offline.py`.
+//! range and the digests of those contents, and pass them to `BagProfile::verified_against`,
+//! which accepts other digests only for exactly the audited ranges and which the addon never
+//! calls.
+//!
+//! What ties production to the audit is `fixtures/bag_capacity_profile.json`: a verbatim copy
+//! (sha256 `5c2303e3…599d81`) of `tyrian-companion/docs/audit/loot-bag-capacity-probe/
+//! profile.json` at the commit "add the free-slots getter to the audited bag capacity profile".
+//! It holds digests only, and that repository's `check_profile_offline.py` compares each of its
+//! 12 digests and 10 slots with the installed executable.
+//! `production_constants_are_the_audited_profile` requires `GUARDS`, `SLOTS` and the vtables to
+//! equal it, so a mistyped digest or RVA here turns the suite red.
 //!
 //! Heap objects are placed on 8 bytes and game content 4 past, as the live runs of 2026-10-08
 //! found them. `live_shape_of_8_october` is the state of that morning: 16 bags adding up to
@@ -51,8 +59,8 @@ struct Fixture {
     heap: u64,
     remainder: u64,
     fail: Option<u64>,
-    /// On the given visit of a read starting at `.0`, write `.3` (`.4` bytes) at `.2` first.
-    race: Option<(u64, usize, u64, u64, usize)>,
+    /// On the given visit of a read starting at `.0`, first write each `(address, value, size)`.
+    race: Option<(u64, usize, Vec<(u64, u64, usize)>)>,
     visits: usize,
     /// item, definition and payload of each bag, by slot.
     bags: BTreeMap<usize, (u64, u64, u64)>,
@@ -97,11 +105,13 @@ impl Memory for Fixture {
         if self.fail == Some(address) {
             return Err(ReadError::ReadFailed);
         }
-        if let Some((trigger, visit, target, value, size)) = self.race {
+        if let Some((trigger, visit, writes)) = self.race.clone() {
             if address == trigger {
                 self.visits += 1;
                 if self.visits == visit {
-                    self.put(target, value, size);
+                    for (target, value, size) in writes {
+                        self.put(target, value, size);
+                    }
                 }
             }
         }
@@ -193,10 +203,69 @@ fn live_shape_of_8_october_gives_414_capacity_and_101_free() {
 }
 
 #[test]
-fn the_largest_certified_array_still_fits_the_budget() {
+fn the_largest_certified_pass_costs_what_the_budget_comment_says() {
     let (result, bytes) = run(fixture(&[32; 16], 640, 0));
     assert_eq!(result.map(|slots| (slots.capacity, slots.free)), Ok((512, 512)));
-    assert!(bytes <= MAX_BYTES, "{bytes}");
+    // Guards, route, 16 bags, the 640-position array and every reread, the array included.
+    assert_eq!(bytes, 883 + 272 + 576 + 16 + 5120 + 208 + 5120);
+    assert_eq!(bytes, 12195);
+    assert!(bytes <= MAX_BYTES);
+}
+
+#[test]
+fn production_constants_are_the_audited_profile() {
+    let audited: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/bag_capacity_profile.json")).unwrap();
+    for (name, value) in [
+        ("char_context_vtable", CHAR_CONTEXT_VTABLE),
+        ("character_agent_vtable", CHARACTER_AGENT_VTABLE),
+        ("inventory_vtable", INVENTORY_VTABLE),
+        ("bag_item_vtable", BAG_ITEM_VTABLE),
+        ("bags_max", BAGS as u64),
+        ("bag_size_max", BAG_SIZE_MAX as u64),
+        ("content_pointer_remainder", tyrian_companion_nexus_core::passive::CONTENT_REMAINDER),
+    ] {
+        assert_eq!(audited[name].as_u64(), Some(value), "{name}");
+    }
+    assert_eq!(audited["binary_sha256"].as_str(), Some(BUILD_SHA256));
+    let guards = audited["guards"].as_array().unwrap();
+    assert_eq!(guards.len(), GUARDS.len());
+    for (expected, guard) in guards.iter().zip(GUARDS) {
+        assert_eq!(expected["name"].as_str(), Some(guard.name));
+        assert_eq!(expected["rva"].as_u64(), Some(guard.rva), "{}", guard.name);
+        assert_eq!(expected["size"].as_u64(), Some(guard.size as u64), "{}", guard.name);
+        assert_eq!(expected["sha256"].as_str(), Some(guard.sha256), "{}", guard.name);
+    }
+    let slots = audited["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), SLOTS.len());
+    for (expected, (vtable, slot, target)) in slots.iter().zip(SLOTS) {
+        let name = expected["target"].as_str().unwrap();
+        let table = audited[expected["vtable"].as_str().unwrap()].as_u64();
+        assert_eq!(table, Some(vtable), "{name}");
+        assert_eq!(expected["slot"].as_u64(), Some(slot), "{name}");
+        assert_eq!(expected["target_rva"].as_u64(), Some(target), "{name}");
+        // Every slot selects code that is itself guarded by digest.
+        assert!(GUARDS.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
+    }
+}
+
+#[test]
+fn only_the_audited_ranges_can_stand_for_a_verified_profile() {
+    let verify = |guards: &[Guard]| {
+        let mut reader = Reader::bounded(small(), MAX_BYTES);
+        BagProfile::verified_against(&mut reader, profile(), guards).map(|_| reader.bytes)
+    };
+    let synthetic = synthetic_guards();
+    assert_eq!(verify(&synthetic), Ok(883));
+    // No guard, one guard short, or a range that is not the audited one: nothing is read.
+    assert_eq!(verify(&[]), Err(Uncovered::Guard));
+    assert_eq!(verify(&synthetic[..11]), Err(Uncovered::Guard));
+    let mut moved = synthetic.clone();
+    moved[7].rva += 16;
+    assert_eq!(verify(&moved), Err(Uncovered::Guard));
+    let mut resized = synthetic;
+    resized[7].size -= 1;
+    assert_eq!(verify(&resized), Err(Uncovered::Guard));
 }
 
 #[test]
@@ -246,6 +315,10 @@ fn bag_class_definition_type_and_size_reject() {
     assert_eq!(consumable, Err(Uncovered::Profile));
     assert_eq!(changed(|m| m.put(m.bags[&1].1 + 0x2c, 5, 4)), Err(Uncovered::Profile));
     assert_eq!(changed(|m| m.put(m.bags[&1].2 + 0x28, 33, 4)), Err(Uncovered::Bounds));
+    // A bag of size 0 is not something the counter can have added; 1 and 32 are the edges.
+    assert_eq!(changed(|m| m.put(m.bags[&1].2 + 0x28, 0, 4)), Err(Uncovered::Bounds));
+    assert_eq!(changed(|m| m.put(m.bags[&1].2 + 0x28, 1, 4)).map(|s| s.capacity), Ok(81));
+    assert_eq!(changed(|m| m.put(m.bags[&0].2 + 0x28, 32, 4)).map(|s| s.capacity), Ok(124));
     assert_eq!(changed(|m| m.put(INVENTORY + 0x440, 17, 4)), Err(Uncovered::Bounds));
 }
 
@@ -286,7 +359,10 @@ fn null_and_out_of_range_pointers_reject() {
     assert_eq!(changed(|m| m.put(m.bags[&1].0 + 0x40, 0, 8)), Err(Uncovered::Bounds));
     assert_eq!(changed(|m| m.put(m.bags[&1].1 + 0x30, 0, 8)), Err(Uncovered::Bounds));
     assert_eq!(changed(|m| m.put(INVENTORY + 0x388, 1 << 60, 8)), Err(Uncovered::Bounds));
-    assert_eq!(changed(|m| m.put(INVENTORY + 0xc8, 0, 8)), Err(Uncovered::Root));
+    // A count without an array is a header that disagrees with itself, as in `inventory`.
+    // It is not `Root`, which says there is no character to read.
+    assert_eq!(changed(|m| m.put(INVENTORY + 0xc8, 0, 8)), Err(Uncovered::Bounds));
+    assert_eq!(changed(|m| m.put(CTX + 0x98, 0, 8)), Err(Uncovered::Root));
 }
 
 #[test]
@@ -300,19 +376,53 @@ fn position_array_bounds_and_overfull_inventory_reject() {
 
 #[test]
 fn changes_between_the_two_passes_reject() {
+    // One case per reread of the consistency pass, in its order.
     for (target, value, size) in [
-        (INVENTORY + 0x440, 3u64, 4usize),
+        (CHAR_CONTEXT, BASE + 0x123400, 8usize),
+        (CHAR_CONTEXT + 0x98, CHARACTER + 0x1000, 8),
+        (CHARACTER + 8, BASE + 0x123400, 8),
+        (CHARACTER + 0x178, 0, 4),
+        (CHARACTER + 0x3f0, INVENTORY + 0x1000, 8),
+        (INVENTORY, BASE + 0x123400, 8),
+        (INVENTORY + 0x70, CHARACTER + 0x1000, 8),
+        (INVENTORY + 0x440, 3, 4),
         (INVENTORY + 0x388, 0, 8),
+        (INVENTORY + 0xd0, 512, 4),
         (INVENTORY + 0xd4, 127, 4),
         (INVENTORY + 0xc8, ARRAY + 0x1000, 8),
-        (CHAR_CONTEXT + 0x98, CHARACTER + 0x1000, 8),
-        (INVENTORY, BASE + 0x123400, 8),
     ] {
         let mut m = small();
         // The second read of the context pointer is the first reread of the consistency pass.
-        m.race = Some((CTX + 0x98, 2, target, value, size));
+        m.race = Some((CTX + 0x98, 2, vec![(target, value, size)]));
         assert_eq!(read(m), Err(Uncovered::Changed), "{target:x}");
     }
+    let mut m = small();
+    m.race = Some((CTX + 0x98, 2, vec![(CTX + 0x98, CHAR_CONTEXT + 0x1000, 8)]));
+    assert_eq!(read(m), Err(Uncovered::Changed));
+}
+
+#[test]
+fn an_item_that_moves_while_the_array_is_copied_is_a_change_not_a_count() {
+    // 640 positions take two copies, 512 and 128 entries. One item sits at index 512. After
+    // the first copy and before the second it moves to 511: each copy on its own shows no
+    // item at all, and without a second look that would read as 0 used and 512 free.
+    let mut m = fixture(&[32; 16], 640, 0);
+    m.put(ARRAY + 8 * 512, HEAP + 8, 8);
+    assert_eq!(read(m.clone()).map(|slots| (slots.occupied, slots.free)), Ok((1, 511)));
+    m.race = Some((
+        ARRAY + 4096,
+        1,
+        vec![(ARRAY + 8 * 511, HEAP + 8, 8), (ARRAY + 8 * 512, 0, 8)],
+    ));
+    assert_eq!(read(m), Err(Uncovered::Changed));
+
+    // An entry that changes after the copy and before the reread: the old count is not kept.
+    let mut m = small();
+    m.race = Some((CTX + 0x98, 2, vec![(ARRAY + 8 * 127, HEAP + 8, 8)]));
+    assert_eq!(read(m), Err(Uncovered::Changed));
+    let mut m = small();
+    m.race = Some((CTX + 0x98, 2, vec![(ARRAY, 0, 8)]));
+    assert_eq!(read(m), Err(Uncovered::Changed));
 }
 
 #[test]
@@ -324,21 +434,26 @@ fn failed_read_and_exhausted_budget_never_become_a_value() {
     let verified =
         BagProfile::verified_against(&mut reader, profile(), &synthetic_guards()).unwrap();
     assert_eq!(bag_slots(&mut reader, &verified, CTX).map(|_| ()), Err(Uncovered::Bounds));
-    assert_eq!(Reader::bounded(small(), usize::MAX).bytes, 0);
+    // The budget is charged before the request: the refused read is not counted.
+    assert!(reader.bytes <= 883 + 200);
 }
 
 #[test]
-fn guard_bytes_are_compared_before_any_game_field() {
+fn a_changed_guard_byte_stops_the_cycle_at_that_guard() {
     let mut m = small();
-    let rva = GUARDS[9].rva;
-    m.bytes.entry(BASE + rva).and_modify(|byte| *byte ^= 1);
-    assert_eq!(read(m), Err(Uncovered::Guard));
-    // The real digests do not accept the fixtures' synthetic contents.
+    m.bytes.entry(BASE + GUARDS[9].rva).and_modify(|byte| *byte ^= 1);
+    let (result, bytes) = run(m);
+    assert_eq!(result, Err(Uncovered::Guard));
+    // Ten guards were copied, the tenth differed, and nothing after it was requested: not the
+    // last two guards, and no field of the game.
+    assert_eq!(bytes, GUARDS[..10].iter().map(|guard| guard.size).sum::<usize>());
+    // The real digests do not accept the fixtures' synthetic contents, and stop at the first.
     let mut reader = Reader::bounded(small(), MAX_BYTES);
     assert_eq!(
         BagProfile::verified(&mut reader, profile()).map(|_| ()),
         Err(Uncovered::Guard)
     );
+    assert_eq!(reader.bytes, GUARDS[0].size);
     assert_eq!(GUARDS.iter().map(|guard| guard.size).sum::<usize>(), 883);
 }
 

@@ -2,9 +2,16 @@
 //!
 //! The fixtures carry no bytes of the game. They own synthetic contents for every guarded
 //! range, the hash table included, and pass their digests to
-//! `MagicFindProfile::verified_against`. The real digests in `magic_find::GUARDS` were checked
-//! against the installed executable by
-//! `tyrian-companion/docs/audit/loot-mf-probe/check_profile_offline.py`.
+//! `MagicFindProfile::verified_against`, which accepts other digests only for exactly the
+//! audited ranges and which the addon never calls.
+//!
+//! What ties production to the audit is `fixtures/magic_find_profile.json`: a verbatim copy
+//! (sha256 `8992928d…6cebbf`) of `tyrian-companion/docs/audit/loot-mf-probe/profile.json` at
+//! the commit "accept game content pointers at their observed alignment in the Magic Find
+//! probe". It holds digests only, and that repository's `check_profile_offline.py` compares
+//! each of its 19 digests and 12 slots with the installed executable.
+//! `production_constants_are_the_audited_profile` requires `GUARDS`, `SLOTS`, the vtables and
+//! the modifier types to equal it, so a mistyped digest or RVA here turns the suite red.
 //!
 //! Heap objects are placed on 8 bytes and game content 4 past, as the live runs of 2026-10-08
 //! found them. `live_shapes_of_8_october` are the two states the external probe matched with
@@ -68,7 +75,11 @@ struct Record {
     formula: u32,
     mode: u32,
     target: u64,
+    /// The four requirement and condition pointers, at 0x20, 0x30, 0x38 and 0x40.
     need: u64,
+    need_b: u64,
+    when_a: u64,
+    when_b: u64,
     flags: u32,
 }
 fn record(kind: u32, value: f32) -> Record {
@@ -79,6 +90,9 @@ fn record(kind: u32, value: f32) -> Record {
         mode: 0,
         target: 0,
         need: 0,
+        need_b: 0,
+        when_a: 0,
+        when_b: 0,
         flags: 0,
     }
 }
@@ -93,8 +107,8 @@ struct Fixture {
     used: BTreeSet<u32>,
     pushed: Vec<(u32, f32)>,
     fail: Option<u64>,
-    /// On the given visit of a read starting at `.0`, write `.3` (`.4` bytes) at `.2` first.
-    race: Option<(u64, usize, u64, u64, usize)>,
+    /// On the given visit of a read starting at `.0`, first write each `(address, value, size)`.
+    race: Option<(u64, usize, Vec<(u64, u64, usize)>)>,
     visits: usize,
 }
 impl Fixture {
@@ -145,6 +159,9 @@ impl Fixture {
             self.put(at + 0x18, record.target, 8);
             self.put(at + 0x20, record.need, 8);
             self.put(at + 0x28, record.flags as u64, 4);
+            self.put(at + 0x30, record.need_b, 8);
+            self.put(at + 0x38, record.when_a, 8);
+            self.put(at + 0x40, record.when_b, 8);
         }
         let group = self.alloc(0x20, true);
         self.put(group + 0x10, if records.is_empty() { 0 } else { list }, 8);
@@ -200,11 +217,13 @@ impl Memory for Fixture {
         if self.fail == Some(address) {
             return Err(ReadError::ReadFailed);
         }
-        if let Some((trigger, visit, target, value, size)) = self.race {
+        if let Some((trigger, visit, writes)) = self.race.clone() {
             if address == trigger {
                 self.visits += 1;
                 if self.visits == visit {
-                    self.put(target, value, size);
+                    for (target, value, size) in writes {
+                        self.put(target, value, size);
+                    }
                 }
             }
         }
@@ -600,18 +619,168 @@ fn changes_between_the_two_passes_reject() {
     ] {
         let (mut m, _) = standard();
         // The second read of the context pointer is the first reread of the consistency pass.
-        m.race = Some((CTX + 0x98, 2, target, value, size));
+        m.race = Some((CTX + 0x98, 2, vec![(target, value, size)]));
         assert_eq!(read(m), Err(Uncovered::Changed), "{target:x}");
     }
     // Another character under the same context: a different owner, never the same sample.
     let (mut m, _) = standard();
     m.character(CHARACTER + 0x1000);
-    m.race = Some((CTX + 0x98, 2, CHAR_CONTEXT + 0x98, CHARACTER + 0x1000, 8));
+    m.race = Some((CTX + 0x98, 2, vec![(CHAR_CONTEXT + 0x98, CHARACTER + 0x1000, 8)]));
     assert_eq!(read(m), Err(Uncovered::Changed));
     // A vtable replaced while reading is the route's identity failing at the recheck.
     let (mut m, _) = standard();
-    m.race = Some((CTX + 0x98, 2, MANAGER, BASE + 0x123400, 8));
+    m.race = Some((CTX + 0x98, 2, vec![(MANAGER, BASE + 0x123400, 8)]));
     assert_eq!(read(m), Err(Uncovered::Profile));
+}
+
+#[test]
+fn production_constants_are_the_audited_profile() {
+    let audited: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/magic_find_profile.json")).unwrap();
+    for (name, value) in [
+        ("char_context_vtable", CHAR_CONTEXT_VTABLE),
+        ("character_vtable", CHARACTER_VTABLE),
+        ("character_agent_vtable", CHARACTER_AGENT_VTABLE),
+        ("combatant_vtable", COMBATANT_VTABLE),
+        ("player_vtable", PLAYER_VTABLE),
+        ("player_stats_vtable", PLAYER_STATS_VTABLE),
+        ("buff_manager_vtable", BUFF_MANAGER_VTABLE),
+        ("buff_node_vtable", BUFF_NODE_VTABLE),
+        ("magic_find_modifier", MAGIC_FIND as u64),
+        ("magic_find_boon_modifier", MAGIC_FIND_BOON as u64),
+        ("content_pointer_remainder", tyrian_companion_nexus_core::passive::CONTENT_REMAINDER),
+    ] {
+        assert_eq!(audited[name].as_u64(), Some(value), "{name}");
+    }
+    assert_eq!(audited["binary_sha256"].as_str(), Some(BUILD_SHA256));
+    // The only formula the reader evaluates is the audited constant one.
+    assert_eq!(audited["constant_formula"].as_u64(), Some(6));
+    assert_eq!(with_record(record(MAGIC_FIND, 50.0)).map(|value| value.total), Ok(387.0));
+    let guards = audited["guards"].as_array().unwrap();
+    assert_eq!(guards.len(), GUARDS.len());
+    for (expected, guard) in guards.iter().zip(GUARDS) {
+        assert_eq!(expected["name"].as_str(), Some(guard.name));
+        assert_eq!(expected["rva"].as_u64(), Some(guard.rva), "{}", guard.name);
+        assert_eq!(expected["size"].as_u64(), Some(guard.size as u64), "{}", guard.name);
+        assert_eq!(expected["sha256"].as_str(), Some(guard.sha256), "{}", guard.name);
+    }
+    let slots = audited["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), SLOTS.len());
+    for (expected, (vtable, slot, target)) in slots.iter().zip(SLOTS) {
+        let name = expected["target"].as_str().unwrap();
+        let table = audited[expected["vtable"].as_str().unwrap()].as_u64();
+        assert_eq!(table, Some(vtable), "{name}");
+        assert_eq!(expected["slot"].as_u64(), Some(slot), "{name}");
+        assert_eq!(expected["target_rva"].as_u64(), Some(target), "{name}");
+        // Every slot selects code that is itself guarded by digest.
+        assert!(GUARDS.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
+    }
+}
+
+#[test]
+fn only_the_audited_ranges_can_stand_for_a_verified_profile() {
+    let verify = |guards: &[Guard]| {
+        let mut reader = Reader::bounded(standard().0, MAX_BYTES);
+        MagicFindProfile::verified_against(&mut reader, profile(), guards).map(|_| reader.bytes)
+    };
+    let synthetic = synthetic_guards();
+    assert_eq!(verify(&synthetic), Ok(GUARD_BYTES));
+    // No guard, a list without the hash table, or a range that is not the audited one.
+    assert_eq!(verify(&[]), Err(Uncovered::Guard));
+    assert_eq!(verify(&synthetic[..18]), Err(Uncovered::Guard));
+    let mut moved = synthetic.clone();
+    moved[14].rva += 16;
+    assert_eq!(verify(&moved), Err(Uncovered::Guard));
+    let mut resized = synthetic;
+    resized[18].size -= 4;
+    assert_eq!(verify(&resized), Err(Uncovered::Guard));
+}
+
+#[test]
+fn nothing_pushed_is_positive_zero_and_a_negative_total_is_no_value() {
+    // An empty f32 `sum()` would be -0.0, which a panel would print as "-0".
+    let value = read(empty()).unwrap();
+    assert_eq!(value.pushed.to_bits(), 0.0f32.to_bits());
+    assert_eq!(value.buffs.to_bits(), 0.0f32.to_bits());
+    assert!(!value.total.is_sign_negative());
+    let value = read(empty_at(4, 64, 0)).unwrap();
+    assert_eq!(value.total.to_bits(), 0.0f32.to_bits());
+    // One addend may be negative while the total is not.
+    let mut m = empty();
+    m.push(MAGIC_FIND, -50.0);
+    assert_eq!(read(m).map(|value| (value.total, value.pushed)), Ok((250.0, -50.0)));
+    let (mut m, _) = standard();
+    let penalty = m.plain(&[record(MAGIC_FIND, -37.0)]);
+    m.buff(1002, 502, penalty);
+    assert_eq!(read(m).map(|value| (value.total, value.buffs)), Ok((300.0, -7.0)));
+    // A negative total is not a Magic Find to show.
+    let mut m = empty_at(4, 64, 0);
+    m.push(MAGIC_FIND, -50.0);
+    assert_eq!(read(m), Err(Uncovered::Bounds));
+    let mut m = empty_at(4, 64, 10);
+    let penalty = m.plain(&[record(MAGIC_FIND, -10.5)]);
+    m.buff(1, 1, penalty);
+    assert_eq!(read(m), Err(Uncovered::Bounds));
+}
+
+#[test]
+fn a_finite_value_above_the_bound_rejects() {
+    // Finite, so only the bound of 10000 can be what rejects it; 10000 itself is accepted.
+    assert_eq!(with_record(record(MAGIC_FIND, 10_000.5)), Err(Uncovered::Bounds));
+    assert_eq!(with_record(record(MAGIC_FIND, -10_000.5)), Err(Uncovered::Bounds));
+    assert_eq!(with_record(record(MAGIC_FIND, 10_000.0)).map(|v| v.total), Ok(10_337.0));
+    for value in [10_000.5, -10_000.5] {
+        let mut m = empty();
+        m.push(MAGIC_FIND, value);
+        assert_eq!(read(m), Err(Uncovered::Bounds), "{value}");
+    }
+}
+
+#[test]
+fn every_requirement_pointer_and_every_state_bit_is_unsupported_on_its_own() {
+    let base = record(MAGIC_FIND, 50.0);
+    for extra in [
+        Record { need: 0x280004, ..base },
+        Record { need_b: 0x280004, ..base },
+        Record { when_a: 0x280004, ..base },
+        Record { when_b: 0x280004, ..base },
+    ] {
+        assert_eq!(with_record(extra), Err(Uncovered::Unsupported));
+    }
+    for flags in [0x2, 0x4, 0x8, 0x10, 0x6, 0x18, 0x1e, 0x1f] {
+        let extra = Record { flags, ..base };
+        assert_eq!(with_record(extra), Err(Uncovered::Unsupported), "{flags:#x}");
+    }
+    // Bits outside the mask are not conditions: 0x1 only ends the definition, 0x20 is ignored.
+    for flags in [0x1, 0x20, 0x21] {
+        let extra = Record { flags, ..base };
+        assert_eq!(with_record(extra).map(|value| value.total), Ok(387.0), "{flags:#x}");
+    }
+}
+
+#[test]
+fn player_id_above_the_bound_rejects_even_inside_the_player_array() {
+    // The array claims to be long enough, so only the bound on the id can reject it.
+    let result = changed(|m, _| {
+        m.put(CHARACTER + 0x220, 0x1_0000, 4);
+        m.put(CHAR_CONTEXT + 0x8c, 0x2_0000, 4);
+        m.put(PLAYERS + 8 * 0x1_0000, PLAYER, 8);
+    });
+    assert_eq!(result, Err(Uncovered::Bounds));
+    let edge = changed(|m, _| {
+        m.put(CHARACTER + 0x220, 0xffff, 4);
+        m.put(CHAR_CONTEXT + 0x8c, 0x2_0000, 4);
+        m.put(PLAYERS + 8 * 0xffff, PLAYER, 8);
+    });
+    assert_eq!(edge.map(|value| value.total), Ok(337.0));
+}
+
+#[test]
+fn a_count_without_its_table_is_bounds_not_an_absent_character() {
+    assert_eq!(changed(|m, _| m.put(MANAGER + 0xd8, 0, 8)), Err(Uncovered::Bounds));
+    assert_eq!(changed(|m, _| m.put(MANAGER + 0x28, 0, 8)), Err(Uncovered::Bounds));
+    assert_eq!(changed(|m, _| m.put(CTX + 0x98, 0, 8)), Err(Uncovered::Root));
+    assert_eq!(changed(|m, _| m.put(CHAR_CONTEXT + 0xa0, 0, 8)), Err(Uncovered::Root));
 }
 
 #[test]
@@ -626,23 +795,21 @@ fn failed_read_and_exhausted_budget_never_become_a_value() {
 }
 
 #[test]
-fn guard_bytes_are_compared_before_any_game_field() {
+fn a_changed_guard_byte_stops_the_cycle_at_that_guard() {
     let (mut m, _) = standard();
     m.bytes.entry(BASE + GUARDS[14].rva + 2535).and_modify(|byte| *byte ^= 1);
-    assert_eq!(read(m), Err(Uncovered::Guard));
-    // The real digests do not accept the fixtures' synthetic contents.
+    let (result, bytes) = run(m);
+    assert_eq!(result, Err(Uncovered::Guard));
+    // Fifteen guards were copied, the fifteenth differed in its last byte, and nothing after
+    // it was requested: not the last four guards, and no field of the game.
+    assert_eq!(bytes, GUARDS[..15].iter().map(|guard| guard.size).sum::<usize>());
+    // The real digests do not accept the fixtures' synthetic contents, and stop at the first.
     let mut reader = Reader::bounded(standard().0, MAX_BYTES);
     assert_eq!(
         MagicFindProfile::verified(&mut reader, profile()).map(|_| ()),
         Err(Uncovered::Guard)
     );
-    // A guard list without the hash table proves nothing about the buff table.
-    let mut reader = Reader::bounded(standard().0, MAX_BYTES);
-    let partial = &synthetic_guards()[..18];
-    assert_eq!(
-        MagicFindProfile::verified_against(&mut reader, profile(), partial).map(|_| ()),
-        Err(Uncovered::Guard)
-    );
+    assert_eq!(reader.bytes, GUARDS[0].size);
 }
 
 #[test]

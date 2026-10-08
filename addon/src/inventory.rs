@@ -6,9 +6,15 @@
 //!
 //! One cycle reads the owned inventory, then the wallet, then the bag slots and last the Magic
 //! Find, from the same verified build and context and before the same deadline. Each of the
-//! last three has its own smaller read budget and can only fail on its own: an inventory
-//! sample never depends on them, and they do not depend on each other. Magic Find goes last
-//! because it is the largest; if the deadline cuts it, only it loses coverage for that cycle.
+//! last three has its own smaller read budget and can only fail on its own: the content of an
+//! inventory sample never depends on them, and they do not depend on each other.
+//!
+//! Its timing does. The bag slots and the Magic Find are read before this cycle returns the
+//! sample, so before the client reads the game context again and seals it: the time they take
+//! widens the window in which a context change discards that inventory copy. They therefore
+//! share a shorter deadline of their own, [`EXTRAS_TIME`] from the moment they start and never
+//! past the cycle's. Magic Find goes last because it is the largest: a cut costs it, and only
+//! it, that cycle's coverage, reported as `Uncovered::Deadline` rather than `ReadFailed`.
 
 use std::collections::BTreeSet;
 use std::ffi::{c_void, OsString};
@@ -44,6 +50,11 @@ use windows::Win32::System::Threading::{
 const MAX_THREADS: usize = 128;
 const MAX_SYSTEM_ENTRIES: usize = 4096;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
+/// How long the bag slots and the Magic Find may take together, after the wallet. It bounds
+/// what they add to the wait before the client seals the inventory sample. Not measured in a
+/// running game: if `Uncovered::Deadline` shows up in the diagnostics, this is the number to
+/// revisit.
+const EXTRAS_TIME: Duration = Duration::from_millis(250);
 
 struct OwnedHandle(HANDLE);
 impl Drop for OwnedHandle {
@@ -56,6 +67,9 @@ impl Drop for OwnedHandle {
 struct ProcessMemory<'a> {
     deadline: Instant,
     stop: &'a AtomicBool,
+    /// Set when a copy is refused because the time ran out. The refusal itself is the same
+    /// `ReadFailed` as ever; this only lets the caller name it apart from an unreadable page.
+    expired: Option<&'a AtomicBool>,
 }
 impl<'a> ProcessMemory<'a> {
     fn new(stop: &'a AtomicBool) -> Self {
@@ -63,12 +77,30 @@ impl<'a> ProcessMemory<'a> {
     }
     /// A second reader of the same cycle shares the cycle's deadline instead of extending it.
     fn until(stop: &'a AtomicBool, deadline: Instant) -> Self {
-        Self { deadline, stop }
+        Self {
+            deadline,
+            stop,
+            expired: None,
+        }
+    }
+    /// The same, recording in `expired` whether the deadline is what stopped it.
+    fn timed(stop: &'a AtomicBool, deadline: Instant, expired: &'a AtomicBool) -> Self {
+        Self {
+            deadline,
+            stop,
+            expired: Some(expired),
+        }
     }
 }
 impl Memory for ProcessMemory<'_> {
     fn read_exact(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), ReadError> {
-        if self.stop.load(Ordering::Relaxed) || Instant::now() >= self.deadline {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(ReadError::ReadFailed);
+        }
+        if Instant::now() >= self.deadline {
+            if let Some(expired) = self.expired {
+                expired.store(true, Ordering::Relaxed);
+            }
             return Err(ReadError::ReadFailed);
         }
         let mut copied = 0;
@@ -261,9 +293,10 @@ impl NativeReader {
         let mut reader = Reader::new(ProcessMemory::until(stop, deadline));
         let mut wallet_reader =
             Reader::bounded(ProcessMemory::until(stop, deadline), wallet::MAX_BYTES);
-        let mut bag_reader = Reader::bounded(ProcessMemory::until(stop, deadline), bags::MAX_BYTES);
-        let mut magic_find_reader =
-            Reader::bounded(ProcessMemory::until(stop, deadline), magic_find::MAX_BYTES);
+        // Built when their turn comes, so their deadline counts from then.
+        let mut bag_reader = None;
+        let mut magic_find_reader = None;
+        let (bags_expired, magic_find_expired) = (AtomicBool::new(false), AtomicBool::new(false));
         let mut coverage = WalletCoverage::NotRead;
         let mut bag_coverage = BagCoverage::NotRead;
         let mut magic_find_coverage = MagicFindCoverage::NotRead;
@@ -355,13 +388,27 @@ impl NativeReader {
             }
             // These two stay in the local diagnostics, where the panel and Options read them.
             // Nothing here changes the sample that goes out, whose `free_slots` remains `None`.
-            bag_coverage = match self.bags(&mut bag_reader, context) {
-                Ok(slots) => BagCoverage::Read(slots),
-                Err(error) => BagCoverage::Unavailable(error),
+            let extras = deadline.min(Instant::now() + EXTRAS_TIME);
+            // A copy refused by the clock comes back as `ReadFailed`; name it for what it was.
+            let named = |error: Uncovered, expired: &AtomicBool| match error {
+                Uncovered::ReadFailed if expired.load(Ordering::Relaxed) => Uncovered::Deadline,
+                other => other,
             };
-            magic_find_coverage = match self.magic_find(&mut magic_find_reader, context) {
+            let reader = bag_reader.insert(Reader::bounded(
+                ProcessMemory::timed(stop, extras, &bags_expired),
+                bags::MAX_BYTES,
+            ));
+            bag_coverage = match self.bags(reader, context) {
+                Ok(slots) => BagCoverage::Read(slots),
+                Err(error) => BagCoverage::Unavailable(named(error, &bags_expired)),
+            };
+            let reader = magic_find_reader.insert(Reader::bounded(
+                ProcessMemory::timed(stop, extras, &magic_find_expired),
+                magic_find::MAX_BYTES,
+            ));
+            magic_find_coverage = match self.magic_find(reader, context) {
                 Ok(value) => MagicFindCoverage::Read(value),
-                Err(error) => MagicFindCoverage::Unavailable(error),
+                Err(error) => MagicFindCoverage::Unavailable(named(error, &magic_find_expired)),
             };
             Ok(snapshot)
         })();
@@ -375,11 +422,11 @@ impl NativeReader {
             wallet_bytes: wallet_reader.bytes as u32,
             wallet_reads: wallet_reader.reads as u32,
             bags: bag_coverage,
-            bag_bytes: bag_reader.bytes as u32,
-            bag_reads: bag_reader.reads as u32,
+            bag_bytes: bag_reader.as_ref().map_or(0, |r| r.bytes as u32),
+            bag_reads: bag_reader.as_ref().map_or(0, |r| r.reads as u32),
             magic_find: magic_find_coverage,
-            magic_find_bytes: magic_find_reader.bytes as u32,
-            magic_find_reads: magic_find_reader.reads as u32,
+            magic_find_bytes: magic_find_reader.as_ref().map_or(0, |r| r.bytes as u32),
+            magic_find_reads: magic_find_reader.as_ref().map_or(0, |r| r.reads as u32),
         });
         result
     }

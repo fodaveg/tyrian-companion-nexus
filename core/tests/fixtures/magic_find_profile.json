@@ -1,0 +1,218 @@
+{
+  "scope": "candidate_magic_find_probe_only; total recomposed from stored inputs; live value and semantics unproven",
+  "binary_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+  "image_size": 46432256,
+  "image_base": 5368709120,
+  "magic_find_modifier": 113,
+  "magic_find_boon_modifier": 114,
+  "constant_formula": 6,
+  "content_pointer_remainder": 4,
+  "content_pointer_note": "Address modulo 8 required of pointers into game content (buff reference, definition, modifier group, modifier records). Observed live on 2026-10-08: 278 of 278 ended in 4; the 91 heap nodes ended in 0. Not derived from code.",
+  "char_context_vtable": 34983752,
+  "character_vtable": 34995040,
+  "character_agent_vtable": 34996688,
+  "combatant_vtable": 34997400,
+  "player_vtable": 34986328,
+  "player_stats_vtable": 35029304,
+  "buff_manager_vtable": 35139864,
+  "buff_node_vtable": 35139792,
+  "buff_node_vtable_note": "Installed by the table node constructor (RVA 0x12C1890, 0x78-byte object). Reported by --diagnose only; not an active guard until a live run confirms it.",
+  "offline_links": [
+    {
+      "name": "node_constructor_installs_node_vtable",
+      "kind": "rel32",
+      "at_rva": 19667145,
+      "target_rva": 35139792
+    }
+  ],
+  "slots": [
+    {
+      "vtable": "char_context_vtable",
+      "slot": 104,
+      "target": "controlled_character_getter",
+      "target_rva": 18564224
+    },
+    {
+      "vtable": "char_context_vtable",
+      "slot": 112,
+      "target": "local_player_getter",
+      "target_rva": 4819040
+    },
+    {
+      "vtable": "char_context_vtable",
+      "slot": 280,
+      "target": "player_by_id_getter",
+      "target_rva": 18574688
+    },
+    {
+      "vtable": "character_vtable",
+      "slot": 256,
+      "target": "combatant_cast",
+      "target_rva": 18704928
+    },
+    {
+      "vtable": "combatant_vtable",
+      "slot": 56,
+      "target": "buff_manager_getter",
+      "target_rva": 4194400
+    },
+    {
+      "vtable": "character_agent_vtable",
+      "slot": 104,
+      "target": "is_player",
+      "target_rva": 18714960
+    },
+    {
+      "vtable": "character_agent_vtable",
+      "slot": 24,
+      "target": "player_id_getter",
+      "target_rva": 18709072
+    },
+    {
+      "vtable": "player_vtable",
+      "slot": 800,
+      "target": "player_stats_getter",
+      "target_rva": 18589488
+    },
+    {
+      "vtable": "player_stats_vtable",
+      "slot": 48,
+      "target": "account_luck_level_getter",
+      "target_rva": 4205280
+    },
+    {
+      "vtable": "buff_manager_vtable",
+      "slot": 24,
+      "target": "modifier_value",
+      "target_rva": 19670096
+    },
+    {
+      "vtable": "buff_manager_vtable",
+      "slot": 32,
+      "target": "pushed_modifier_sum",
+      "target_rva": 19670304
+    },
+    {
+      "vtable": "buff_manager_vtable",
+      "slot": 40,
+      "target": "buff_iterator",
+      "target_rva": 19671248
+    }
+  ],
+  "guards": [
+    {
+      "name": "local_player_getter",
+      "rva": 4819040,
+      "size": 8,
+      "sha256": "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392"
+    },
+    {
+      "name": "controlled_character_getter",
+      "rva": 18564224,
+      "size": 29,
+      "sha256": "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b"
+    },
+    {
+      "name": "player_by_id_getter",
+      "rva": 18574688,
+      "size": 25,
+      "sha256": "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086"
+    },
+    {
+      "name": "player_stats_getter",
+      "rva": 18589488,
+      "size": 8,
+      "sha256": "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e"
+    },
+    {
+      "name": "account_luck_level_getter",
+      "rva": 4205280,
+      "size": 4,
+      "sha256": "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635"
+    },
+    {
+      "name": "combatant_cast",
+      "rva": 18704928,
+      "size": 14,
+      "sha256": "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf"
+    },
+    {
+      "name": "buff_manager_getter",
+      "rva": 4194400,
+      "size": 8,
+      "sha256": "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b"
+    },
+    {
+      "name": "is_player",
+      "rva": 18714960,
+      "size": 24,
+      "sha256": "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e"
+    },
+    {
+      "name": "player_id_getter",
+      "rva": 18709072,
+      "size": 54,
+      "sha256": "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891"
+    },
+    {
+      "name": "modifier_value",
+      "rva": 19670096,
+      "size": 129,
+      "sha256": "02c17502d33b741829ee827be8a95cbaf91e69d27f07171cff624f77662a268a"
+    },
+    {
+      "name": "pushed_modifier_sum",
+      "rva": 19670304,
+      "size": 212,
+      "sha256": "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88"
+    },
+    {
+      "name": "buff_iterator",
+      "rva": 19671248,
+      "size": 188,
+      "sha256": "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18"
+    },
+    {
+      "name": "buff_filter",
+      "rva": 19677984,
+      "size": 142,
+      "sha256": "490a1348d0a788393e5af59d0a10a6ffb9ac46b65a6ba3dbea93e607c7a58ffe"
+    },
+    {
+      "name": "buff_lookup",
+      "rva": 2432544,
+      "size": 296,
+      "sha256": "4da24189ebd19ebf99989e17bcdde5d7804b974ca6761d697fbad6357dc70784"
+    },
+    {
+      "name": "modifier_sum",
+      "rva": 19662144,
+      "size": 2536,
+      "sha256": "887f54e8f9981ecacb51c55324f2174d2adb2c91b7238b07f6361a051c906593"
+    },
+    {
+      "name": "modifier_formula",
+      "rva": 19664688,
+      "size": 816,
+      "sha256": "03c40bfe57089a26ee53e0790bdfee39a26a3645e94b93cbc5c6d2df45ffd132"
+    },
+    {
+      "name": "magic_find_case",
+      "rva": 4081656,
+      "size": 241,
+      "sha256": "eb21265687ff6a00dc5f53148d98f6a44b268bcde2c93b6c5d77ac419346e93e"
+    },
+    {
+      "name": "attribute_modifier_map",
+      "rva": 4079104,
+      "size": 296,
+      "sha256": "6bad628623282ed7de1d3f5ca56adbd3ee756b9f790460b43e6adb3b3ac25912"
+    },
+    {
+      "name": "hash_table",
+      "rva": 28900784,
+      "size": 1024,
+      "sha256": "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6"
+    }
+  ]
+}

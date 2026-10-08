@@ -408,6 +408,7 @@ pub fn uncovered_reason(reason: Uncovered, english: bool) -> &'static str {
         Uncovered::Unsupported => ("un efecto necesita estado en vivo", "an effect needs live state"),
         Uncovered::Changed => ("cambió durante la lectura", "changed while reading"),
         Uncovered::ReadFailed => ("lectura fallida", "read failed"),
+        Uncovered::Deadline => ("se acabó el tiempo de lectura", "the read ran out of time"),
     };
     tr(english, es, en)
 }

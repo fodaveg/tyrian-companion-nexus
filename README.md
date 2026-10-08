@@ -251,19 +251,38 @@ condition makes the whole value "no coverage", never a partial total.
 
 Both readers keep the rules of the other two: twelve and nineteen static ranges must match
 their audited SHA-256 digests, every vtable and dispatch slot on the route is compared (never
-called), every owner, header and table is read again after the copy, and a difference rejects
-the value. Two pointer rules are part of the profile: heap objects sit on 8 bytes and
+called), and a second look after the copy rejects the value on any difference. That second
+look reads again every owner, vtable and header and every table the game mutates: the bag
+list, the whole position array, the pushed-modifier table and the buff table. It does not
+read again what hangs from them as game content — bag and buff definitions and their records
+— which is read once. Two pointer rules are part of the profile: heap objects sit on 8 bytes and
 pointers into game content sit 4 past a multiple of 8. The second one is an observation of
 one game session, not something derived from code; if it stops holding, the reason shown is
 alignment and there is no value.
 
-Budgets are hard and separate: 8192 requested bytes per cycle for the bags and 65536 for
+Budgets are hard and separate: 16384 requested bytes per cycle for the bags and 65536 for
 Magic Find, guards included on the first cycle of a build. A pass that does not fit is no
-coverage. Cadence is the cycle's: once per second, in this order — inventory, wallet, bags,
-Magic Find — under the cycle's single 750 ms deadline, so a slow cycle costs Magic Find its
-coverage first and never the inventory sample. The external probe's whole passes on
-8 October asked for about 1.9 KiB (bags, without the position array, which adds 4 KiB for
-512 positions) and 29 to 33 KiB (Magic Find, with 81 and 92 buffs).
+coverage. The largest bag pass the profile allows, 16 bags and 640 positions copied twice,
+asks for 12195. The external probe's whole passes on 8 October asked for about 1.9 KiB (bags,
+without the position array, which adds 4 KiB per copy for 512 positions) and 29 to 33 KiB
+(Magic Find, with 81 and 92 buffs).
+
+Cadence is the cycle's: once per second, in this order — inventory, wallet, bags, Magic Find.
+The last two run **before** the cycle hands the inventory sample to the client, which then
+reads the game context again and seals the sample or, if the context changed meanwhile,
+discards it. So they cannot change what an inventory sample contains, but the time they take
+does widen the window in which a context change discards that copy. To bound it they share a
+deadline of their own: 250 ms from the moment they start, and never past the cycle's 750 ms.
+A pass cut by that clock is no coverage with the reason "deadline", distinct from a failed
+copy. Neither the 250 ms nor the real duration of a pass has been measured in a running game.
+Reading them after the sample is sealed would remove that effect altogether; it needs a second
+call from the client loop and is not done here.
+
+Known limits of the Magic Find reader, all of which fail closed: the bound of 10000 on a
+pushed value is applied to every pushed record, not only to the two Magic Find types, so one
+out-of-range record of another type leaves Magic Find without coverage; the display cap is
+not read, so the total is uncapped; a negative total is refused as out of bounds, although a
+negative addend is accepted.
 
 The evidence is the external read-only probes of
 `tyrian-companion/docs/audit/loot-bag-capacity-probe` and `loot-mf-probe`, run on Fedora with
@@ -849,7 +868,10 @@ covers what does not need a running game:
   zero, empty and absent maps, wrong vtables and getters, a changed guard byte, malformed
   headers and pointers, failed copies, wrong hashes, unreachable and repeated keys, a count
   that disagrees, out-of-range keys and balances, concurrent changes and the wallet budget;
-- passive bag and Magic Find fixtures over synthetic guard contents (no byte of the game): the
+- passive bag and Magic Find fixtures over synthetic guard contents (no byte of the game),
+  with the production digests, RVAs and slots required to equal verbatim copies of the two
+  audited probe profiles (`core/tests/fixtures/bag_capacity_profile.json` and
+  `magic_find_profile.json`, digests only): the
   live shapes of 8 October 2026 (414 capacity and 101 free; 333.0 and 363.0), covered zeroes,
   every identity on both routes, the bag class and definition type, both pointer rules with
   valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported

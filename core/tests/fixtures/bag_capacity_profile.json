@@ -1,0 +1,206 @@
+{
+  "scope": "candidate_bag_capacity_probe_only; capacity summed from equipped bag definitions; live value unproven",
+  "binary_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+  "image_size": 46432256,
+  "image_base": 5368709120,
+  "bag_item_type": 3,
+  "bags_max": 16,
+  "bag_size_max": 32,
+  "char_context_vtable": 34983752,
+  "character_agent_vtable": 34996688,
+  "inventory_vtable": 35004840,
+  "bag_item_vtable": 36031768,
+  "bag_item_vtable_note": "ItCliBag. The first candidate carried 36032624, the ItCliConsumable vtable, by mistake. The live diagnose run of 2026-10-08 reported 36031768 for all 16 bags, the value the item factory installs for definition type 3.",
+  "bag_item_vtable_candidates": [
+    {
+      "name": "ItCliBag",
+      "vtable": 36031768,
+      "definition_type": 3,
+      "active": true
+    }
+  ],
+  "content_pointer_remainder": 4,
+  "content_pointer_note": "Address modulo 8 required of pointers into game content (item definition and bag payload). Observed live on 2026-10-08: all 32 of these failed the 8-byte check here, and 278 of 278 content pointers measured by the Magic Find probe ended in 4. Not derived from code; this probe's own low bits are first reported by the diagnose survey from now on.",
+  "offline_only_guards": [
+    {
+      "name": "item_factory_type_switch",
+      "rva": 20737539,
+      "size": 40,
+      "sha256": "a461abfdb11f05ee2de3a9ee0603401ac35c692613e5f38ad25ed7133e901f61"
+    },
+    {
+      "name": "item_factory_table_bag_entry",
+      "rva": 20739800,
+      "size": 4,
+      "sha256": "1a6b5a308b0c5ed0908e85ae08f095a4cba8d26b7541daa7e400d6066e73cf9c"
+    },
+    {
+      "name": "item_factory_bag_case",
+      "rva": 20737866,
+      "size": 86,
+      "sha256": "46484198a4575c88c911cc5600f5aa7410ae81230dcca2e4c39db454c0f6d8a2"
+    },
+    {
+      "name": "bag_item_constructor",
+      "rva": 20745232,
+      "size": 44,
+      "sha256": "f527f8d47ef5d0b1c1200a6937de67acacc52a99a09ae9a90e9f6e5d1f059b99"
+    }
+  ],
+  "offline_links": [
+    {
+      "name": "factory_table_entry_3_selects_bag_case",
+      "kind": "u32",
+      "at_rva": 20739800,
+      "target_rva": 20737866
+    },
+    {
+      "name": "bag_case_calls_bag_constructor",
+      "kind": "rel32",
+      "at_rva": 20737943,
+      "target_rva": 20745232
+    },
+    {
+      "name": "bag_constructor_installs_candidate_vtable",
+      "kind": "rel32",
+      "at_rva": 20745249,
+      "target_rva": 36031768
+    }
+  ],
+  "slots": [
+    {
+      "vtable": "char_context_vtable",
+      "slot": 104,
+      "target": "controlled_character_getter",
+      "target_rva": 18564224
+    },
+    {
+      "vtable": "character_agent_vtable",
+      "slot": 200,
+      "target": "character_inventory_getter",
+      "target_rva": 18707664
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 544,
+      "target": "inventory_owner_getter",
+      "target_rva": 4578704
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 312,
+      "target": "bag_getter",
+      "target_rva": 19466464
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 320,
+      "target": "bag_size_getter",
+      "target_rva": 19466544
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 328,
+      "target": "bag_slot_count_getter",
+      "target_rva": 18801408
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 480,
+      "target": "free_slots_getter",
+      "target_rva": 18801824
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 488,
+      "target": "used_slots_getter",
+      "target_rva": 18801888
+    },
+    {
+      "vtable": "inventory_vtable",
+      "slot": 496,
+      "target": "capacity_getter",
+      "target_rva": 18801952
+    },
+    {
+      "vtable": "bag_item_vtable",
+      "slot": 8,
+      "target": "item_definition_getter",
+      "target_rva": 20725264
+    }
+  ],
+  "guards": [
+    {
+      "name": "controlled_character_getter",
+      "rva": 18564224,
+      "size": 29,
+      "sha256": "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b"
+    },
+    {
+      "name": "character_inventory_getter",
+      "rva": 18707664,
+      "size": 70,
+      "sha256": "e7bd0ae3e1e372ee63d98c89639d52046ad8085b5d899cc076e252c808b0410c"
+    },
+    {
+      "name": "inventory_owner_getter",
+      "rva": 4578704,
+      "size": 5,
+      "sha256": "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107"
+    },
+    {
+      "name": "bag_slot_count_getter",
+      "rva": 18801408,
+      "size": 7,
+      "sha256": "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b"
+    },
+    {
+      "name": "bag_getter",
+      "rva": 19466464,
+      "size": 72,
+      "sha256": "bac37e1cff99524d0b12d2ee360c6f462acfc93a8bd73a1d7cf274935d245b90"
+    },
+    {
+      "name": "bag_size_getter",
+      "rva": 19466544,
+      "size": 133,
+      "sha256": "e830e97da7ff9a0a24ac044e3ff26824bda8637d2c07c998bea87d55880453e8"
+    },
+    {
+      "name": "slot_validity",
+      "rva": 19466944,
+      "size": 148,
+      "sha256": "587a452b7f33987938235c45fb271fe137fa495019d31b6b492ca5db6f440587"
+    },
+    {
+      "name": "free_slots_getter",
+      "rva": 18801824,
+      "size": 59,
+      "sha256": "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a"
+    },
+    {
+      "name": "used_slots_getter",
+      "rva": 18801888,
+      "size": 60,
+      "sha256": "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d"
+    },
+    {
+      "name": "capacity_getter",
+      "rva": 18801952,
+      "size": 103,
+      "sha256": "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342"
+    },
+    {
+      "name": "item_definition_getter",
+      "rva": 20725264,
+      "size": 61,
+      "sha256": "d8cf3b68aa76a6ded61325e8533f1ff5735173ed7593a308456a7fa32d84037e"
+    },
+    {
+      "name": "capacity_counter_text",
+      "rva": 6957360,
+      "size": 136,
+      "sha256": "208e0765e402ed4d92092a68ba72c3cb56e5d5b2b793f172800405a6ce265203"
+    }
+  ]
+}

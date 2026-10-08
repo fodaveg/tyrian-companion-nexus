@@ -29,9 +29,20 @@ pub const BAG_ITEM_VTABLE: u64 = 0x225cd18;
 pub const BAGS: usize = 16;
 pub const BAG_SIZE_MAX: u32 = 32;
 const BAG_ITEM_TYPE: u32 = 3;
-/// One cycle: the guards once per verified build (883 bytes), the route, 16 bags of 36 bytes,
-/// the position array (at most 640 pointers) and the rereads.
-pub const MAX_BYTES: usize = 8192;
+const BAG_SIZE_MIN: u32 = 1;
+/// One cycle at its largest, 16 bags and the 640 positions the inventory reader certifies:
+///
+/// * 883 for the guards, once per verified build;
+/// * 272 for the route: 6 pointers and vtables, 10 slots, the flag, the owner, the slot count
+///   and the 128-byte bag list;
+/// * 576 for 16 bags of 36 bytes;
+/// * 16 for the position header and array pointer, and 5120 for the array;
+/// * 208 for the rereads of all of the above except the slots and the bags, and 5120 for the
+///   array again.
+///
+/// 12195 in all, which a test pins. The limit leaves a third of headroom and is never raised
+/// at run time.
+pub const MAX_BYTES: usize = 16_384;
 
 /// The getters of the route and the three counter methods, by the digest of their bytes.
 pub const GUARDS: [Guard; 12] = [
@@ -161,11 +172,24 @@ impl BagProfile {
         r: &mut Reader<M>,
         profile: BuildProfile,
     ) -> Result<Self, Uncovered> {
-        Self::verified_against(r, profile, &GUARDS)
+        Self::build(r, profile, &GUARDS)
     }
-    /// The addon only ever calls [`Self::verified`]. This exists so fixtures can stand for the
-    /// executable without carrying any of its bytes: they own their guard contents and digests.
+    /// For this crate's fixtures only; the addon calls [`Self::verified`] and nothing else.
+    /// Fixtures carry no bytes of the game, so they stand for the executable with guard
+    /// contents and digests of their own. The ranges must still be exactly the audited ones:
+    /// an empty, shorter or shifted list is refused before anything is read.
+    #[doc(hidden)]
     pub fn verified_against<M: Memory>(
+        r: &mut Reader<M>,
+        profile: BuildProfile,
+        guards: &[Guard],
+    ) -> Result<Self, Uncovered> {
+        if !crate::passive::same_ranges(guards, &GUARDS) {
+            return Err(Uncovered::Guard);
+        }
+        Self::build(r, profile, guards)
+    }
+    fn build<M: Memory>(
         r: &mut Reader<M>,
         profile: BuildProfile,
         guards: &[Guard],
@@ -186,7 +210,8 @@ fn bag_size<M: Memory>(r: &mut Reader<M>, base: u64, item: u64) -> Result<u32, U
     }
     let payload = content(qword(&record, 8))?;
     let size = r.scalar(payload + 0x28, 4)? as u32;
-    if size > BAG_SIZE_MAX {
+    // A bag that holds nothing is not a bag the counter can have added.
+    if !(BAG_SIZE_MIN..=BAG_SIZE_MAX).contains(&size) {
         return Err(Uncovered::Bounds);
     }
     Ok(size)
@@ -236,14 +261,15 @@ pub fn bag_slots<M: Memory>(
         return Err(Uncovered::Bounds);
     }
     let array = r.scalar(inventory + 0xc8, 8)?;
-    let mut occupied = 0;
-    if count != 0 {
-        let entries = table(r, heap(array)?, count as usize * 8, 8)?;
-        occupied = entries
-            .chunks_exact(8)
-            .filter(|entry| entry.iter().any(|byte| *byte != 0))
-            .count() as u32;
-    }
+    let entries = if count == 0 {
+        Vec::new()
+    } else {
+        table(r, heap(array)?, count as usize * 8, 8)?
+    };
+    let occupied = entries
+        .chunks_exact(8)
+        .filter(|entry| entry.iter().any(|byte| *byte != 0))
+        .count() as u32;
     if r.scalar(context + 0x98, 8)? != char_context
         || r.scalar(char_context, 8)? != b + CHAR_CONTEXT_VTABLE
         || r.scalar(char_context + 0x98, 8)? != character
@@ -256,6 +282,9 @@ pub fn bag_slots<M: Memory>(
         || r.read::<{ 8 * BAGS }>(inventory + 0x380)? != list
         || r.read::<8>(inventory + 0xd0)? != positions
         || r.scalar(inventory + 0xc8, 8)? != array
+        // The array is copied in up to two reads, and an item can move between them or after
+        // them: only a second copy equal to the first makes `occupied` a count of one moment.
+        || (!entries.is_empty() && table(r, array, entries.len(), 8)? != entries)
     {
         return Err(Uncovered::Changed);
     }

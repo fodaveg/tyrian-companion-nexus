@@ -34,7 +34,11 @@ pub enum Uncovered {
     Unsupported,
     /// An owner, a vtable, a header or a table changed while it was being copied.
     Changed,
+    /// A copy failed: the page was unreadable or the adapter was asked to stop.
     ReadFailed,
+    /// The cycle's time ran out before the pass finished. Nothing in this crate returns it: the
+    /// adapter, which owns the clock, reports it in place of the `ReadFailed` its refusal causes.
+    Deadline,
 }
 impl From<ReadError> for Uncovered {
     fn from(error: ReadError) -> Self {
@@ -69,11 +73,20 @@ pub(crate) fn verify<M: Memory>(
 fn in_range(value: u64) -> bool {
     (0x10000..=MAX_POINTER).contains(&value)
 }
-/// A heap object pointer already read as part of a record. NULL is absence of its owner.
+/// Guards the fixtures stand in for must cover exactly the audited ranges: same names, RVAs
+/// and sizes, in the same order. Only the digests may differ, so an empty or shorter list can
+/// never yield a verified profile.
+pub(crate) fn same_ranges(guards: &[Guard], audited: &[Guard]) -> bool {
+    guards.len() == audited.len()
+        && guards
+            .iter()
+            .zip(audited)
+            .all(|(a, b)| a.name == b.name && a.rva == b.rva && a.size == b.size)
+}
+
+/// A heap pointer already read as part of a record: an array or a node its header says exists.
+/// NULL here is a header that disagrees with its pointer, not an absent character.
 pub(crate) fn heap(value: u64) -> Result<u64, Uncovered> {
-    if value == 0 {
-        return Err(Uncovered::Root);
-    }
     if !in_range(value) {
         return Err(Uncovered::Bounds);
     }
@@ -93,9 +106,13 @@ pub(crate) fn content(value: u64) -> Result<u64, Uncovered> {
     }
     Ok(value)
 }
-/// Read a heap object pointer on the route.
+/// Read a heap object pointer on the route. NULL is absence of that owner right now.
 pub(crate) fn object<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<u64, Uncovered> {
-    heap(r.scalar(address, 8)?)
+    let value = r.scalar(address, 8)?;
+    if value == 0 {
+        return Err(Uncovered::Root);
+    }
+    heap(value)
 }
 /// A vtable pointer or vtable slot must be exactly the certified one.
 pub(crate) fn identity<M: Memory>(

@@ -229,11 +229,24 @@ impl MagicFindProfile {
         r: &mut Reader<M>,
         profile: BuildProfile,
     ) -> Result<Self, Uncovered> {
-        Self::verified_against(r, profile, &GUARDS)
+        Self::build(r, profile, &GUARDS)
     }
-    /// The addon only ever calls [`Self::verified`]. This exists so fixtures can stand for the
-    /// executable without carrying any of its bytes: they own their guard contents and digests.
+    /// For this crate's fixtures only; the addon calls [`Self::verified`] and nothing else.
+    /// Fixtures carry no bytes of the game, so they stand for the executable with guard
+    /// contents and digests of their own. The ranges must still be exactly the audited ones:
+    /// an empty, shorter or shifted list is refused before anything is read.
+    #[doc(hidden)]
     pub fn verified_against<M: Memory>(
+        r: &mut Reader<M>,
+        profile: BuildProfile,
+        guards: &[Guard],
+    ) -> Result<Self, Uncovered> {
+        if !crate::passive::same_ranges(guards, &GUARDS) {
+            return Err(Uncovered::Guard);
+        }
+        Self::build(r, profile, guards)
+    }
+    fn build<M: Memory>(
         r: &mut Reader<M>,
         profile: BuildProfile,
         guards: &[Guard],
@@ -368,8 +381,8 @@ fn pushed_total(records: &[u8], wanted: u32) -> f32 {
     records
         .chunks_exact(PUSHED)
         .filter(|record| dword(record, 0) == wanted)
-        .map(|record| f32::from_bits(dword(record, 4)))
-        .sum()
+        // Not `sum()`: an empty f32 sum is -0.0, and the client's accumulator starts at +0.0.
+        .fold(0.0, |total, record| total + f32::from_bits(dword(record, 4)))
 }
 
 /// Context -> controlled character, local player and the character's buff manager.
@@ -538,9 +551,14 @@ pub fn magic_find<M: Memory>(
     {
         return Err(Uncovered::Changed);
     }
+    let total = from_pushed + from_buffs + level as f32;
+    // One addend may be negative. A negative total is not a Magic Find anyone can be shown.
+    if total < 0.0 {
+        return Err(Uncovered::Bounds);
+    }
     Ok((
         MagicFind {
-            total: from_pushed + from_buffs + level as f32,
+            total,
             luck: level,
             pushed: from_pushed,
             buffs: from_buffs,
