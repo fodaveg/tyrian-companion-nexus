@@ -110,12 +110,22 @@ impl PanelMemory {
     }
 }
 
+/// Why a live source has no capture of this second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// The last capture failed as a whole.
+    CaptureFailed,
+    /// There is no character in a map, so no capture was tried: character select, or a loading
+    /// screen. Nothing failed.
+    NoCharacter,
+}
+
 /// Whether the reader's output can describe the game now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
-    /// Cycles are running, or the last one failed as a whole: a reading counts for
-    /// [`READING_HOLD`] from the instant of its own cycle.
-    Live { capture_failed: bool },
+    /// Cycles are running, or there is none of this second and `gap` says why: a reading counts
+    /// for [`READING_HOLD`] from the instant of its own cycle.
+    Live { gap: Option<Gap> },
     /// No connection, no negotiated source, a source conflict, an unsupported build, storage
     /// down or the game closing: nothing is read, so nothing counts and nothing is kept.
     Stopped,
@@ -125,13 +135,18 @@ enum Source {
 /// ran out of time) leaves `Unavailable` for the second until the next one. That is a failed
 /// cycle, not a reader that stopped, and what was read just before is held through it. The
 /// same status after the connection is lost is the reader stopped.
+///
+/// `Unavailable` is also what the source says while there is no character in a map. That is
+/// held through in the same way, a loading screen being a matter of seconds, but it is told
+/// apart ([`Gap`]), so that the panel does not call it a capture that failed.
 fn source(input: &PanelInput<'_>) -> Source {
     if input.connection != Status::Connected {
         return Source::Stopped;
     }
     match input.live {
-        live if live.is_sampling() => Source::Live { capture_failed: false },
-        LiveStatus::Unavailable => Source::Live { capture_failed: true },
+        live if live.is_sampling() => Source::Live { gap: None },
+        LiveStatus::Unavailable if input.character_in_map => Source::Live { gap: Some(Gap::CaptureFailed) },
+        LiveStatus::Unavailable => Source::Live { gap: Some(Gap::NoCharacter) },
         _ => Source::Stopped,
     }
 }
@@ -141,8 +156,8 @@ fn source(input: &PanelInput<'_>) -> Source {
 enum Why {
     /// The reader ran and said why it has none.
     Reader(Uncovered),
-    /// The whole capture failed before this reader ran.
-    CaptureFailed,
+    /// No capture of this second, for this reason.
+    Gap(Gap),
     /// No new cycle has run: the plugin is slow to confirm the last one.
     NoCycle,
 }
@@ -170,7 +185,7 @@ fn take<T: Copy>(
     read_at: Option<Instant>,
     now: Instant,
 ) -> Option<Taken<T>> {
-    let Source::Live { capture_failed } = source else {
+    let Source::Live { gap } = source else {
         *slot = None;
         return None;
     };
@@ -187,18 +202,35 @@ fn take<T: Copy>(
     let held = if fresh.is_some() && age < READING_CURRENT {
         None
     } else {
-        let why = match reason {
-            Some(reason) => Why::Reader(reason),
-            None if capture_failed => Why::CaptureFailed,
-            None => Why::NoCycle,
+        let why = match (reason, gap) {
+            (Some(reason), _) => Why::Reader(reason),
+            (None, Some(gap)) => Why::Gap(gap),
+            (None, None) => Why::NoCycle,
         };
         Some((age.as_secs(), why))
     };
     Some(Taken { value, read: fresh.is_some(), held })
 }
 
-fn capture_failed(english: bool) -> String {
-    tr(english, "Lectura del addon: la última captura falló", "Addon reading: the last capture failed").to_string()
+/// Why the addon's reader has nothing of this second, for the tooltip of a line it feeds.
+fn no_capture(gap: Gap, english: bool) -> String {
+    let (es, en) = match gap {
+        Gap::CaptureFailed => ("Lectura del addon: la última captura falló", "Addon reading: the last capture failed"),
+        Gap::NoCharacter => ("Lectura del addon: no hay personaje en un mapa", "Addon reading: no character in a map"),
+    };
+    tr(english, es, en).to_string()
+}
+
+/// The same for the status, whose tooltip already names the inventory source above it.
+fn no_capture_status(gap: Gap, english: bool) -> String {
+    let (es, en) = match gap {
+        Gap::CaptureFailed => ("La última captura falló", "The last capture failed"),
+        Gap::NoCharacter => (
+            "No hay personaje en un mapa (selección de personaje o pantalla de carga)",
+            "No character in a map (character select or loading screen)",
+        ),
+    };
+    tr(english, es, en).to_string()
 }
 
 /// The tooltip lines of a reading that is being held: how old it is and why there is no new one.
@@ -207,7 +239,7 @@ fn held_lines(held: Option<(u64, Why)>, english: bool) -> Vec<String> {
     let mut lines = vec![if english { format!("Last reading {age} s ago") } else { format!("Última lectura hace {age} s") }];
     match why {
         Why::Reader(reason) => lines.push(no_coverage(reason, english)),
-        Why::CaptureFailed => lines.push(capture_failed(english)),
+        Why::Gap(gap) => lines.push(no_capture(gap, english)),
         Why::NoCycle => {}
     }
     lines
@@ -218,8 +250,9 @@ struct Readings {
     source: Source,
     bags: Option<Taken<BagSlots>>,
     magic_find: Option<Taken<MagicFind>>,
-    /// The last capture failed, and the one before it that worked is no older than
-    /// [`READING_HOLD`]: one failed cycle, which the status does not change colour for.
+    /// There is no capture of this second, and the last one that worked is no older than
+    /// [`READING_HOLD`]: one failed cycle or a short loading screen, which the status does not
+    /// change colour for.
     capture_failed_briefly: bool,
     /// The wallet was read well no more than [`READING_HOLD`] ago: if it has no coverage now,
     /// that is one failed read of it, not a wallet without coverage.
@@ -258,20 +291,20 @@ fn advance(input: &PanelInput<'_>, memory: &mut PanelMemory) -> Readings {
     // stopped has nothing to hold on to, and neither has a connection that never captured.
     // The same for the wallet, which is read in the same capture and can fail on its own.
     match source {
-        Source::Live { capture_failed: false } => {
+        Source::Live { gap: None } => {
             memory.good_capture = input.read_at.or(memory.good_capture);
             if matches!(input.wallet, WalletCoverage::Listed(_)) {
                 memory.good_wallet = input.read_at.or(memory.good_wallet);
             }
         }
-        Source::Live { capture_failed: true } => {}
+        Source::Live { gap: Some(_) } => {}
         Source::Stopped => {
             memory.good_capture = None;
             memory.good_wallet = None;
         }
     }
     let recent = |at: Option<Instant>| at.is_some_and(|at| input.now.saturating_duration_since(at) <= READING_HOLD);
-    let capture_failed_briefly = source == Source::Live { capture_failed: true } && recent(memory.good_capture);
+    let capture_failed_briefly = matches!(source, Source::Live { gap: Some(_) }) && recent(memory.good_capture);
     let wallet_failed_briefly = recent(memory.good_wallet);
     let (bags, bags_reason) = match input.bags {
         BagCoverage::Read(slots) => (Some(slots), None),
@@ -319,6 +352,11 @@ pub struct PanelInput<'a> {
     pub farming: &'a FarmingView,
     pub price: &'a PriceView,
     pub live: LiveStatus,
+    /// A character is in a map: the game context the client reports is `gameplay`
+    /// (`SharedState::character_in_map`, from `NexusLink` and the Mumble Link, not from the
+    /// memory readers). Without one the source says `Unavailable` because there is nothing to
+    /// capture, which is not a capture that failed.
+    pub character_in_map: bool,
     pub wallet: WalletCoverage,
     /// What the addon's own reader says about the bags in its last cycle
     /// (`inventory::Diagnostics::bags`). Only `Read` is a verified figure; without it the line
@@ -691,14 +729,14 @@ fn no_coverage(reason: Uncovered, english: bool) -> String {
 }
 
 /// Why a line's figure is not the addon's own, for the branches that paint the plugin's or `—`:
-/// the reader is stopped, it said why it has none, or the whole capture failed. `None` when the
-/// reader simply has not produced one.
+/// the reader is stopped, it said why it has none, the whole capture failed, or there is no
+/// character in a map. `None` when the reader simply has not produced one.
 fn fallback(source: Source, reason: Option<Uncovered>, english: bool) -> Option<String> {
     match (source, reason) {
         (Source::Stopped, _) => Some(not_sampling(english)),
         (_, Some(reason)) => Some(no_coverage(reason, english)),
-        (Source::Live { capture_failed: true }, None) => Some(capture_failed(english)),
-        (Source::Live { capture_failed: false }, None) => None,
+        (Source::Live { gap: Some(gap) }, None) => Some(no_capture(gap, english)),
+        (Source::Live { gap: None }, None) => None,
     }
 }
 
@@ -964,8 +1002,9 @@ fn status_cell(input: &PanelInput<'_>, readings: &Readings, english: bool) -> (T
         tone = Tone::Warning;
     }
     source(&mut tooltip);
-    if input.live == LiveStatus::Unavailable {
-        tooltip.push(line("La última captura falló", "The last capture failed"));
+    // Why the source has no capture now: one that failed, or no character in a map to read.
+    if let Source::Live { gap: Some(gap) } = readings.source {
+        tooltip.push(no_capture_status(gap, english));
     }
     // A wallet that has no coverage is a lasting problem; one read of it that fails, after one
     // that worked, is not, and says so only in the tooltip line above.

@@ -875,6 +875,16 @@ connection, the game closing, no negotiated source, a source conflict, an unsupp
 storage down) changes the status at once, and so does a failure when no capture of this
 connection has worked yet: there is nothing to hold on to.
 
+The source is also unavailable while there is no character in a map, at character select and
+on a loading screen, and then no capture has failed: there is nothing to read. The panel
+tells the two apart by the game context the addon already reports to the plugin (`gameplay`
+or not, from `NexusLink` and the Mumble Link; no reader is involved). Without a character in
+a map the status tooltip says "No character in a map (character select or loading screen)"
+and the Slots and MF tooltips "Addon reading: no character in a map", where they used to say
+that the last capture failed. Nothing else changes: the readings are held for the same 5
+seconds, so a short loading screen moves nothing, and a longer stay turns the dot orange as a
+source that cannot measure while a session needs it.
+
 Still to be looked at in the game; none of the panel's painting has been seen there:
 
 - That the two readers work in this DLL at all: they have only run against fixtures. The
@@ -985,7 +995,8 @@ covers what does not need a running game:
   figure, the fall of a verified Magic Find from the session's highest, the hold of the last
   verified reading (one failed cycle or one capture that fails as a whole changes neither
   cell, six seconds let go, a stopped reader at once, a new session, and that a held reading
-  does not move the highest), a reading being as old as its own cycle, another session noticed
+  does not move the highest), a reading being as old as its own cycle, no character in a map
+  told apart from a capture that failed, another session noticed
   with the panel closed and without a `starting` frame, a complete session not feeding the
   highest, the two diagnostics lines of Options, and that every text the panel produces is
   covered by a width reserved for its own cell. None of the painting itself is tested;

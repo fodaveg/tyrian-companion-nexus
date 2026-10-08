@@ -111,6 +111,8 @@ struct Case {
     farming: FarmingView,
     price: PriceView,
     live: LiveStatus,
+    /// The reported game context is gameplay. False at character select and on a loading screen.
+    character_in_map: bool,
     wallet: WalletCoverage,
     bags: BagCoverage,
     magic_find: MagicFindCoverage,
@@ -127,6 +129,7 @@ impl Case {
             farming: farming(Some(&farming_frame()), Duration::ZERO),
             price: price(Some(&price_frame("ok")), Duration::ZERO),
             live: LiveStatus::Measuring,
+            character_in_map: true,
             wallet: WalletCoverage::Listed(55),
             bags: BagCoverage::NotRead,
             magic_find: MagicFindCoverage::NotRead,
@@ -148,22 +151,24 @@ impl Case {
         self.with_frame(farming_frame(), change)
     }
 
+    /// What the addon hands the panel for this case.
+    fn input(&self) -> PanelInput<'_> {
+        PanelInput {
+            now: self.now,
+            read_at: self.read_at,
+            connection: self.connection,
+            farming: &self.farming,
+            price: &self.price,
+            live: self.live,
+            character_in_map: self.character_in_map,
+            wallet: self.wallet,
+            bags: self.bags,
+            magic_find: self.magic_find,
+        }
+    }
+
     fn view_with(&self, memory: &mut PanelMemory, english: bool) -> PanelView {
-        panel::view(
-            &PanelInput {
-                now: self.now,
-                read_at: self.read_at,
-                connection: self.connection,
-                farming: &self.farming,
-                price: &self.price,
-                live: self.live,
-                wallet: self.wallet,
-                bags: self.bags,
-                magic_find: self.magic_find,
-            },
-            memory,
-            english,
-        )
+        panel::view(&self.input(), memory, english)
     }
 
     fn view(&self, english: bool) -> PanelView {
@@ -428,20 +433,7 @@ fn a_session_that_starts_while_the_panel_is_closed_does_not_inherit_the_highest(
         panel.case.now = panel.start + Duration::from_secs(seconds);
         panel.case.read_at = Some(panel.case.now);
         panel.case.magic_find = verified(300, 30.0, 3.0);
-        panel::observe(
-            &PanelInput {
-                now: panel.case.now,
-                read_at: panel.case.read_at,
-                connection: panel.case.connection,
-                farming: &panel.case.farming,
-                price: &panel.case.price,
-                live: panel.case.live,
-                wallet: panel.case.wallet,
-                bags: panel.case.bags,
-                magic_find: panel.case.magic_find,
-            },
-            &mut panel.memory,
-        );
+        panel::observe(&panel.case.input(), &mut panel.memory);
     };
     observe(&mut panel, 5, session("complete", 105));
     observe(&mut panel, 10, session("active", 2));
@@ -773,6 +765,55 @@ fn one_failed_wallet_read_does_not_blink_the_status_either() {
     let mut never = Follow::new(Case::sketch());
     never.case.wallet = WalletCoverage::Unavailable(WalletError::Guard);
     assert_eq!(never.at(0, bags(41, 160), verified(300, 30.0, 3.0)).status_dot, Tone::Warning);
+}
+
+/// At character select and on a loading screen the source is `Unavailable` too, but no capture
+/// failed: there is no character in a map to read, and the panel says that instead. The hold
+/// and the colours are the ones of any second without a capture.
+#[test]
+fn without_a_character_in_a_map_the_panel_does_not_say_that_a_capture_failed() {
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(8, 160), verified(300, 30.0, 53.0));
+    let before = panel.at(1, bags(8, 160), verified(300, 30.0, 3.0));
+    // What the client leaves when the context stops being gameplay.
+    panel.case.live = LiveStatus::Unavailable;
+    panel.case.character_in_map = false;
+    let during = panel.at(2, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((during.status_dot, during.status.text.as_str(), during.status.tone), (Tone::Good, "Midiendo", Tone::Normal), "{:?}", during.status);
+    assert!(has(&during.status, "No hay personaje en un mapa (selección de personaje o pantalla de carga)"), "{:?}", during.status);
+    assert!(has(&during.status, "Inventario: lectura no disponible") && !has(&during.status, "captura falló"), "{:?}", during.status);
+    for (held, was) in [(&during.slots, &before.slots), (&during.magic_find, &before.magic_find)] {
+        assert_eq!((held.text.as_str(), held.tone), (was.text.as_str(), was.tone), "{held:?}");
+        assert!(has(held, "Última lectura hace 1 s") && has(held, "Lectura del addon: no hay personaje en un mapa"), "{held:?}");
+        assert!(!has(held, "captura falló") && !has(held, "sin muestreo"), "{held:?}");
+    }
+    // A long stay at character select: the source cannot measure while the session needs it,
+    // as before, and what the tooltips give as the reason is still the true one.
+    let lasting = panel.at(8, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert_eq!((lasting.status_dot, lasting.status.text.as_str(), lasting.status.tone), (Tone::Warning, "Midiendo", Tone::Warning));
+    assert!(has(&lasting.status, "No hay personaje en un mapa") && !has(&lasting.status, "captura falló"), "{:?}", lasting.status);
+    assert_eq!((lasting.slots.text.as_str(), lasting.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
+    for cell in [&lasting.slots, &lasting.magic_find] {
+        assert!(has(cell, "Lectura del addon: no hay personaje en un mapa") && !has(cell, "captura falló") && !has(cell, "Última lectura hace"), "{cell:?}");
+    }
+    let english = panel.case.view_with(&mut panel.memory, true);
+    assert!(has(&english.status, "No character in a map (character select or loading screen)") && !has(&english.status, "capture failed"), "{:?}", english.status);
+    assert!(has(&english.slots, "Addon reading: no character in a map"), "{:?}", english.slots);
+    // Back in a map, a capture that fails is still called that.
+    panel.case.character_in_map = true;
+    let failed = panel.at(9, BagCoverage::NotRead, MagicFindCoverage::NotRead);
+    assert!(has(&failed.status, "La última captura falló") && !has(&failed.status, "No hay personaje"), "{:?}", failed.status);
+    assert!(has(&failed.magic_find, "Lectura del addon: la última captura falló"), "{:?}", failed.magic_find);
+    // And while the reader samples, or has stopped, where the character is changes nothing.
+    for (connection, live) in [(Status::Connected, LiveStatus::Measuring), (Status::Connected, LiveStatus::Conflict), (Status::WaitingForPlugin, LiveStatus::Unavailable)] {
+        let mut case = Case::sketch();
+        case.connection = connection;
+        case.live = live;
+        case.bags = bags(41, 160);
+        let with = case.view(false);
+        case.character_in_map = false;
+        assert_eq!(case.view(false), with, "{connection:?} {live:?}");
+    }
 }
 
 /// One panel followed over time: the same memory, a clock that the test moves, and whatever
@@ -1494,6 +1535,8 @@ fn every_text_the_panel_produces_is_one_line_covered_by_a_reserved_sample() {
                                 farming: farming(frame.as_ref(), Duration::from_secs(local)),
                                 price: if index == 0 { no_price() } else { price(price_frame.as_ref(), Duration::from_secs(local)) },
                                 live: if local == 0 { LiveStatus::Measuring } else { LiveStatus::Unavailable },
+                                // With and without a character in a map, across the states.
+                                character_in_map: index % 2 == 0,
                                 wallet: WalletCoverage::Listed(55),
                                 bags: match read { 0 => BagCoverage::NotRead, 1 => bags(2, 160), _ => BagCoverage::Unavailable(Uncovered::Changed) },
                                 magic_find: match read { 0 => MagicFindCoverage::NotRead, 1 => verified(300, 30.5, 3.0), _ => MagicFindCoverage::Unavailable(Uncovered::Unsupported) },

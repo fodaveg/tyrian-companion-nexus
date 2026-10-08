@@ -444,6 +444,9 @@ pub fn farming_render(ui: &Ui) {
         farming: &farming,
         price: &price,
         live: shared.live_status(),
+        // By the context the client reports, from NexusLink and the Mumble Link: at character
+        // select or on a loading screen the source is unavailable and nothing has failed.
+        character_in_map: shared.character_in_map(),
         wallet: diagnostics.wallet,
         // What the addon's own reader got in its last cycle. Only a `Read` is painted as
         // verified; otherwise the lines use what the plugin sends in `farm1`.

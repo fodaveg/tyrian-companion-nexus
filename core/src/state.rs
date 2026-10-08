@@ -138,6 +138,13 @@ impl SharedState {
     /// Latest reported character/map for local QA; never a memory address.
     pub fn live_context(&self) -> Option<crate::protocol::GameContext> { lock(&self.live_context).clone() }
     pub fn set_live_context(&self, value: crate::protocol::GameContext) { *lock(&self.live_context) = Some(value); }
+    /// Whether a character is in a map, by the game context last reported: `gameplay`, and not
+    /// `loading` or `character_select`. It comes from `NexusLink` and the Mumble Link, never
+    /// from the memory readers. `true` before any context was reported: with nothing known, a
+    /// reading that is missing is not put down to the character.
+    pub fn character_in_map(&self) -> bool {
+        lock(&self.live_context).as_ref().is_none_or(|context| context.state == crate::protocol::GameState::Gameplay)
+    }
     /// Measurement state remains separate from TCP/game presence.
     pub fn live_status(&self) -> crate::live::LiveStatus { *lock(&self.live_status) }
     pub fn set_live_status(&self, value: crate::live::LiveStatus) { *lock(&self.live_status) = value; }
@@ -409,6 +416,19 @@ mod tests {
         assert_eq!(state.obsidian_launch_outcome(), None);
         state.set_obsidian_launch_outcome(ObsidianLaunchOutcome::NoHandler);
         assert_eq!(state.obsidian_launch_outcome(), Some(ObsidianLaunchOutcome::NoHandler));
+    }
+
+    #[test]
+    fn a_character_is_in_a_map_only_while_the_reported_context_is_gameplay() {
+        use crate::protocol::{GameContext, GameState};
+        let state = SharedState::new();
+        assert!(state.character_in_map(), "nothing reported yet: not put down to the character");
+        state.set_live_context(GameContext { state: GameState::Gameplay, map_id: Some(866), character: Some("Astra Uno".into()) });
+        assert!(state.character_in_map());
+        state.set_live_context(GameContext { state: GameState::Loading, map_id: Some(866), character: Some("Astra Uno".into()) });
+        assert!(!state.character_in_map(), "a loading screen");
+        state.set_live_context(GameContext::character_select());
+        assert!(!state.character_in_map(), "character select");
     }
 
     #[test]
