@@ -462,6 +462,27 @@ fn every_later_look_at_a_conditional_quantity_rejects_its_change() {
     }
 }
 #[test]
+fn a_later_look_that_finds_no_pointer_at_all_is_out_of_bounds() {
+    // A field that held a pointer and now holds something else is judged as a pointer before
+    // it is compared, whether it is copied on its own or inside a wider copy.
+    for (stable, target, looks) in [
+        (fixture(570), ITEM, 3),
+        (fixture(570), ITEM + 0x40, 3),
+        (fixture(570), RESOLVER + 17 * 8, 3),
+        (fixture(570), ITEM + 0x58, 3),
+        (fixture(570), ITEM + 0x98, 4),
+        (conditional(570), DEF + 0x30, 4),
+    ] {
+        for visit in 2..=looks {
+            assert_eq!(
+                snapshot(stable.clone().racing(target, visit, 0x1234, 8)),
+                Err(ReadError::Bounds),
+                "{target:x} {visit}"
+            );
+        }
+    }
+}
+#[test]
 fn a_position_that_changes_after_its_copy_rejects_the_capture() {
     // Any position of the matrix, occupied or empty, in the first 512 or after them.
     for position in [0, 1, 300, 511, 512, 569] {
@@ -658,10 +679,10 @@ fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
         asked,
         [
             (35, 8_416),
-            (9_124, 62_974),
-            (14_895, 97_600),
-            (13_508, 88_030),
-            (17_851, 113_684)
+            (7_246, 62_974),
+            (11_823, 97_600),
+            (9_752, 88_030),
+            (12_883, 113_684)
         ]
     );
 }

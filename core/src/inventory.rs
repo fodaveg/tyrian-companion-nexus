@@ -219,7 +219,44 @@ impl Statics {
     }
 }
 
+/// A certified conditional profile: where the item embeds its predicate class, that class's
+/// vtable, the slot and the predicate it must select, the definition subtype, the payload
+/// field with its mask and value, where the stack lies and the quantity getter.
+type Conditional = (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
+/// The conditional profile of an item class, for the three classes that have one.
+fn conditional(base: u64, vt: u64) -> Option<Conditional> {
+    Some(match vt.checked_sub(base) {
+        Some(0x225d580) => (0xa8, 0x225d898, 0, 0x13c9d60, 5, 0, 1, 1, 0x98, 0x13c9d20),
+        Some(0x225dd78) => (0xa8, 0x225e080, 0, 0x13ca590, 10, 0, 1, 1, 0x98, 0x13c9d20),
+        Some(0x225d910) => (
+            0xe0, 0x225dcb8, 0x20, 0x13ca130, 9, 0x18, 0xffffffff, 4, 0xe8, 0x13c9f60,
+        ),
+        _ => return None,
+    })
+}
+/// A definition's subtype and payload pointer, copied only for a class with a conditional
+/// profile.
+type Detail = Option<(u64, u64)>;
+/// A definition's ID at `+0x28` and, when `detail` is asked for, the subtype and the payload
+/// pointer that follow it at `+0x2c` and `+0x30`, in the same copy.
+fn definition_record<M: Memory>(
+    r: &mut Reader<M>,
+    definition: u64,
+    detail: bool,
+) -> Result<(u64, Detail), ReadError> {
+    if !detail {
+        return Ok((r.scalar(definition + 0x28, 4)?, None));
+    }
+    let bytes: [u8; 16] = r.read(definition + 0x28)?;
+    Ok((
+        dword(&bytes, 0)?,
+        Some((dword(&bytes, 4)?, qword(&bytes, 8)?)),
+    ))
+}
+
 /// GetStackQuantity's certified branches. Never invoke the getter or guess an unknown quantity.
+/// `conditional` is the item class's profile with the subtype and payload pointer its
+/// definition held when the ID was copied; a class without a profile has neither.
 fn quantity<M: Memory>(
     r: &mut Reader<M>,
     statics: &mut Statics,
@@ -227,6 +264,7 @@ fn quantity<M: Memory>(
     item: u64,
     vt: u64,
     definition: u64,
+    conditional: Option<(Conditional, (u64, u64))>,
 ) -> Result<Option<u32>, ReadError> {
     let getter = pointer_value(statics.word(r, vt + 0x260, 8)?)?;
     let offset = match getter.checked_sub(base) {
@@ -244,21 +282,18 @@ fn quantity<M: Memory>(
     if let Some(offset) = offset {
         return stack_quantity(r, statics, base, item + offset).map(Some);
     }
-    let p = match vt.checked_sub(base) {
-        Some(0x225d580) => (0xa8, 0x225d898, 0, 0x13c9d60, 5, 0, 1, 1, 0x98, 0x13c9d20),
-        Some(0x225dd78) => (0xa8, 0x225e080, 0, 0x13ca590, 10, 0, 1, 1, 0x98, 0x13c9d20),
-        Some(0x225d910) => (
-            0xe0, 0x225dcb8, 0x20, 0x13ca130, 9, 0x18, 0xffffffff, 4, 0xe8, 0x13c9f60,
-        ),
-        _ => return Ok(None),
+    let Some((p, (subtype, payload))) = conditional else {
+        return Ok(None);
     };
     if getter != base + p.9 {
         return Err(ReadError::ProfileMismatch);
     }
     r.equal(item + p.0, 8, base + p.1)?;
     statics.equal(r, base + p.1 + p.2, base + p.3)?;
-    r.equal(definition + 0x2c, 4, p.4)?;
-    let payload = r.pointer(definition + 0x30)?;
+    if subtype != p.4 {
+        return Err(ReadError::ProfileMismatch);
+    }
+    let payload = pointer_value(payload)?;
     if payload == 0 {
         return Err(ReadError::ProfileMismatch);
     }
@@ -268,21 +303,28 @@ fn quantity<M: Memory>(
     } else {
         1
     };
-    if r.pointer(definition + 0x30)? != payload
-        || r.scalar(definition + 0x2c, 4)? != p.4
+    // Subtype and payload pointer lie together: one copy reads both again.
+    let again: [u8; 12] = r.read(definition + 0x2c)?;
+    if pointer_value(qword(&again, 4)?)? != payload
+        || dword(&again, 0)? != p.4
         || r.scalar(payload + p.5, 4)? != condition
     {
         return Err(ReadError::Changed);
     }
     Ok(Some(result))
 }
+/// A stack's class pointer and its count, which lie together, in one copy.
+fn stack<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<(u64, u64), ReadError> {
+    let bytes: [u8; 12] = r.read(address)?;
+    Ok((pointer_value(qword(&bytes, 0)?)?, dword(&bytes, 8)?))
+}
 fn stack_quantity<M: Memory>(
     r: &mut Reader<M>,
     statics: &mut Statics,
     base: u64,
-    stack: u64,
+    address: u64,
 ) -> Result<u32, ReadError> {
-    let vt = r.pointer(stack)?;
+    let (vt, value) = stack(r, address)?;
     // The stack's class is a pointer the game writes. Among the executable's vtables its
     // first slot is a fixed word like any other; anywhere else it is judged at every use.
     let first = if vtables(base).contains(&vt) {
@@ -293,14 +335,56 @@ fn stack_quantity<M: Memory>(
     if first != base + 0x168d10 {
         return Err(ReadError::ProfileMismatch);
     }
-    let value = r.scalar(stack + 8, 4)?;
     if value > 250 {
         return Err(ReadError::Bounds);
     }
-    if r.pointer(stack)? != vt || r.scalar(stack + 8, 4)? != value {
+    if stack(r, address)? != (vt, value) {
         return Err(ReadError::Changed);
     }
     Ok(value as u32)
+}
+
+/// One owned stack as its turn left it, to be read again after its quantity and in the final
+/// pass.
+#[derive(Clone, Copy)]
+struct Held {
+    item: u64,
+    vt: u64,
+    definition: u64,
+    reference: u64,
+    id: u64,
+    location: u64,
+    value: Option<u32>,
+}
+/// Read again what identifies and places a held stack: its class, ID, instance reference,
+/// resolver entry, definition, location and owner. `None` if any of them moved; otherwise the
+/// definition's subtype and payload pointer when `detail` asks for them with the ID.
+fn placed<M: Memory>(
+    r: &mut Reader<M>,
+    held: &Held,
+    item_array: u64,
+    inventory: u64,
+    detail: bool,
+) -> Result<Option<Detail>, ReadError> {
+    if r.pointer(held.item)? != held.vt {
+        return Ok(None);
+    }
+    let (id, detail) = definition_record(r, held.definition, detail)?;
+    if id != held.id
+        || r.scalar(held.item + 0x38, 4)? != held.reference
+        || r.pointer(item_array + held.reference * 8)? != held.item
+    {
+        return Ok(None);
+    }
+    // The definition pointer and the location lie together: one copy for both.
+    let place: [u8; 10] = r.read(held.item + 0x40)?;
+    if pointer_value(qword(&place, 0)?)? != held.definition
+        || word16(&place, 8)? != held.location
+        || r.pointer(held.item + 0x58)? != inventory
+    {
+        return Ok(None);
+    }
+    Ok(Some(detail))
 }
 
 /// The rule of [`Reader::pointer`] for a pointer that arrived inside a wider copy.
@@ -311,12 +395,21 @@ fn pointer_value(value: u64) -> Result<u64, ReadError> {
     Ok(value)
 }
 /// A little-endian field of an owned copy. A copy too short for its field fails closed.
-fn qword(bytes: &[u8], offset: usize) -> Result<u64, ReadError> {
+fn field<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], ReadError> {
     bytes
         .get(offset..)
-        .and_then(|rest| rest.first_chunk::<8>())
-        .map(|field| u64::from_le_bytes(*field))
+        .and_then(|rest| rest.first_chunk::<N>())
+        .copied()
         .ok_or(ReadError::Bounds)
+}
+fn qword(bytes: &[u8], offset: usize) -> Result<u64, ReadError> {
+    Ok(u64::from_le_bytes(field(bytes, offset)?))
+}
+fn dword(bytes: &[u8], offset: usize) -> Result<u64, ReadError> {
+    Ok(u32::from_le_bytes(field(bytes, offset)?).into())
+}
+fn word16(bytes: &[u8], offset: usize) -> Result<u64, ReadError> {
+    Ok(u16::from_le_bytes(field(bytes, offset)?).into())
 }
 /// Copy the whole position matrix in exact reads of whole pointers, at most 512 of them a
 /// read. The caller has already held `count` to [`MAX_POSITIONS`].
@@ -411,11 +504,13 @@ pub fn inventory_snapshot<M: Memory>(
             return Err(ReadError::Changed);
         }
         let definition = r.pointer(item + 0x40)?;
-        let id = r.scalar(definition + 0x28, 4)?;
+        let profile = conditional(b, vt);
+        let (id, detail) = definition_record(r, definition, profile.is_some())?;
         if !(1..1_000_000).contains(&id) {
             return Err(ReadError::Bounds);
         }
-        let value = quantity(r, &mut statics, b, item, vt, definition)?;
+        let profile = profile.zip(detail);
+        let value = quantity(r, &mut statics, b, item, vt, definition, profile)?;
         if let Some(value) = value {
             let total = quantities.entry(id as u32).or_default();
             *total = total
@@ -426,16 +521,18 @@ pub fn inventory_snapshot<M: Memory>(
             unknown += 1;
             unsupported.insert(id as u32);
         }
-        checked.push((item, vt, definition, reference, id, location, value));
+        let held = Held {
+            item,
+            vt,
+            definition,
+            reference,
+            id,
+            location,
+            value,
+        };
+        checked.push(held);
         // Identity, owner and quantity must agree on the second pass; no volatile pointer escapes.
-        if r.pointer(item)? != vt
-            || r.pointer(item + 0x40)? != definition
-            || r.scalar(definition + 0x28, 4)? != id
-            || r.scalar(item + 0x38, 4)? != reference
-            || r.pointer(item_array + reference * 8)? != item
-            || r.scalar(item + 0x48, 2)? != location
-            || r.pointer(item + 0x58)? != inventory
-        {
+        if placed(r, &held, item_array, inventory, false)?.is_none() {
             return Err(ReadError::Changed);
         }
     }
@@ -450,16 +547,20 @@ pub fn inventory_snapshot<M: Memory>(
             return Err(ReadError::Changed);
         }
     }
-    for (item, vt, definition, reference, id, location, value) in checked {
-        if r.pointer(item)? != vt
-            || r.pointer(item + 0x40)? != definition
-            || r.scalar(definition + 0x28, 4)? != id
-            || r.scalar(item + 0x38, 4)? != reference
-            || r.pointer(item_array + reference * 8)? != item
-            || r.scalar(item + 0x48, 2)? != location
-            || r.pointer(item + 0x58)? != inventory
-            || quantity(r, &mut statics, b, item, vt, definition)? != value
-        {
+    for held in checked {
+        let profile = conditional(b, held.vt);
+        let Some(detail) = placed(r, &held, item_array, inventory, profile.is_some())? else {
+            return Err(ReadError::Changed);
+        };
+        let Held {
+            item,
+            vt,
+            definition,
+            value,
+            ..
+        } = held;
+        let profile = profile.zip(detail);
+        if quantity(r, &mut statics, b, item, vt, definition, profile)? != value {
             return Err(ReadError::Changed);
         }
     }
