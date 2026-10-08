@@ -112,8 +112,19 @@ pub struct RateLine {
 
 impl FarmingView {
     /// Source age is independent of transport refreshes. Exact age 5 is already stale.
+    ///
+    /// Nothing the panel paints follows this any more. It equals the host's 5 s send period, so
+    /// it turns false at the tail of every cycle in normal measurement (see [`Self::rate_line`]);
+    /// what is painted follows [`Self::observation_current`].
     pub fn source_fresh(&self) -> bool {
         self.fresh && self.age.is_some_and(|age| age < 5)
+    }
+
+    /// Whether the last observation still stands for what the panel paints from it: the rate
+    /// as a current rate and the bags ETA. A fresh transport and a reading younger than
+    /// [`READING_AGE_NOTICE`]. One threshold for both, so neither blinks between two frames.
+    pub fn observation_current(&self) -> bool {
+        self.fresh && self.age.is_some_and(|age| age < READING_AGE_NOTICE)
     }
 
     /// Whether "last reading ago Xs" (and the slot reading's age) is worth painting. In normal
@@ -138,7 +149,8 @@ impl FarmingView {
     /// every 5 s and `age` keeps ticking locally in between, so with that 5 s threshold a frame
     /// that arrives with `age` 1 is stale for the last second of every cycle, and one with
     /// `age` 0 for as long as the next frame is late: the note came and went in normal
-    /// measurement. It uses [`READING_AGE_NOTICE`], as the reading's age already did.
+    /// measurement. It follows [`Self::observation_current`], with the 15 s the reading's age
+    /// already used.
     pub fn rate_line(&self, english: bool) -> Option<RateLine> {
         let reading = self.reading.as_ref()?;
         let tr = |es: &'static str, en: &'static str| if english { en } else { es };
@@ -152,7 +164,7 @@ impl FarmingView {
         if reading.lo.is_none() {
             notes.push(tr("Ritmo aún no disponible", "Rate not available yet").to_string());
         }
-        if !self.fresh || self.age.is_none_or(|age| age >= READING_AGE_NOTICE) {
+        if !self.observation_current() {
             notes.push(tr("Último ritmo registrado", "Last recorded rate").to_string());
         }
         if self.show_reading_age() {
@@ -168,14 +180,18 @@ impl FarmingView {
         })
     }
 
-    /// Bags depend on a fresh observation; duration is the host's declared countdown and
-    /// remains available through an observation error. Transport and phase still apply.
+    /// Bags depend on a current observation ([`Self::observation_current`], 15 s); duration is
+    /// the host's declared countdown and remains available through an observation error.
+    /// Transport and phase still apply.
+    ///
+    /// The bags ETA used to follow [`Self::source_fresh`], and its line turned into "ETA not
+    /// available yet" at the tail of every 5 s cycle for the same reason the rate's note did.
     pub fn eta(&self) -> Option<i32> {
         let reading = self.reading.as_ref()?;
         if !self.fresh || reading.phase != Phase::Active { return None; }
         let allowed = match reading.goal {
             Goal::Duration => matches!(reading.err, None | Some(FarmingError::Observe)),
-            Goal::Bags => reading.err.is_none() && self.source_fresh(),
+            Goal::Bags => reading.err.is_none() && self.observation_current(),
             Goal::None => false,
         };
         if allowed { reading.eta } else { None }

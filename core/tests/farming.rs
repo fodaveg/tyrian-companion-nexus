@@ -207,21 +207,32 @@ fn duration_eta_is_independent_of_observation_age_and_observe_error() {
 }
 
 #[test]
-fn bags_eta_expires_at_exactly_five_seconds_without_transport_refresh_reset() {
+fn bags_eta_expires_at_exactly_fifteen_seconds_without_transport_refresh_reset() {
     let state = SharedState::new();
     let now = Instant::now();
     state.begin_farming_connection(NONCE);
     state.enable_farming(NONCE);
-    let mut value = frame(); value["age"] = json!(0);
+    // A reading 10 s old on arrival: the transport stays fresh while its age crosses 15 s.
+    let mut value = frame(); value["age"] = json!(10);
     state.accept_farming(reading(&value), now);
-    assert!(state.farming_view(now + Duration::from_secs(4)).source_fresh());
+    // The 5 s source freshness no longer decides it: stale by that measure, the ETA stays.
+    assert!(!state.farming_view(now).source_fresh());
     assert_eq!(state.farming_view(now + Duration::from_secs(4)).eta(), Some(4834));
-    assert!(!state.farming_view(now + Duration::from_secs(5)).source_fresh());
-    assert_eq!(state.farming_view(now + Duration::from_secs(5)).eta(), None);
-    value["seq"] = json!(2); value["age"] = json!(5);
+    let at_fifteen = state.farming_view(now + Duration::from_secs(5));
+    assert!(at_fifteen.fresh);
+    assert_eq!((at_fifteen.age, at_fifteen.eta()), (Some(15), None));
+    // A transport refresh does not make an old observation young again.
+    value["seq"] = json!(2); value["age"] = json!(15);
     state.accept_farming(reading(&value), now + Duration::from_secs(5));
     assert_eq!(state.farming_view(now + Duration::from_secs(5)).eta(), None);
-    value["seq"] = json!(3); value["age"] = Value::Null;
+    value["seq"] = json!(3); value["age"] = json!(14);
     state.accept_farming(reading(&value), now + Duration::from_secs(6));
-    assert_eq!(state.farming_view(now + Duration::from_secs(6)).eta(), None);
+    assert_eq!(state.farming_view(now + Duration::from_secs(6)).eta(), Some(4834));
+    value["seq"] = json!(4); value["age"] = Value::Null;
+    state.accept_farming(reading(&value), now + Duration::from_secs(7));
+    assert_eq!(state.farming_view(now + Duration::from_secs(7)).eta(), None);
+    // An error still removes a bags ETA at once, whatever the age.
+    value["seq"] = json!(5); value["age"] = json!(0); value["err"] = json!("observe");
+    state.accept_farming(reading(&value), now + Duration::from_secs(8));
+    assert_eq!(state.farming_view(now + Duration::from_secs(8)).eta(), None);
 }

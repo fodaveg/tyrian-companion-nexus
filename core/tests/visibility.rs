@@ -141,6 +141,32 @@ fn normal_measurement_never_colours_the_rate_line_between_two_frames() {
     assert_eq!(flips, 3, "the 5 s threshold is crossed in every one of those cycles");
 }
 
+/// The same cycle for a bags goal: the ETA line keeps its figure from one frame to the next,
+/// second by second and in between, instead of turning into "ETA not available yet" at the
+/// tail of each cycle. It goes at 15 s, like the rate's note.
+#[test]
+fn normal_measurement_keeps_the_bags_eta_between_two_frames() {
+    let mut flips = 0;
+    for emitted_age in [0, 1, 2] {
+        let value = frame("active", Value::Null, json!(emitted_age));
+        let mut fresh_at_start = None;
+        for millis in (0..=5_500).step_by(50) {
+            let view = view_after(&value, Duration::from_millis(millis));
+            assert_eq!(view.eta(), Some(4834), "age {emitted_age} +{millis} ms");
+            let fresh = view.source_fresh();
+            if *fresh_at_start.get_or_insert(fresh) != fresh {
+                flips += 1;
+            }
+        }
+        for seconds in 0..15 {
+            let expected = if emitted_age + seconds < 15 { Some(4834) } else { None };
+            let view = view_after(&value, Duration::from_secs(seconds));
+            assert_eq!(view.eta(), expected, "age {emitted_age} +{seconds} s");
+        }
+    }
+    assert!(flips >= 3, "the 5 s threshold is crossed in every one of those cycles");
+}
+
 #[test]
 fn the_rate_line_warns_with_what_used_to_be_lines_of_their_own() {
     let notes = |value: &Value, local: u64, english: bool| {

@@ -420,7 +420,7 @@ The read-only window separates measurement phase from host connection. It shows 
 if there is no upper bound), the observation's age, and free character bag slots with their
 own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
 numeric progress and the host's estimate; the addon never estimates a rate or advances the
-duration by itself. A bags ETA requires an observation younger than five seconds. The rate is
+duration by itself. A bags ETA requires an observation younger than 15 seconds. The rate is
 one line that never grows: what there is to say about it is its colour and tooltip (see "A
 panel that does not jump"). Duration countdowns remain
 available through observation errors and unknown/old source age, while still requiring
@@ -503,8 +503,15 @@ them applies the line is painted in the warning colour (orange):
 
 "Last recorded rate" used to follow the 5 s freshness of the source. The host sends a frame
 every 5 s and the age keeps counting in between, so that line came and went in normal
-measurement and made the window jump. The 5 s freshness still decides the bags ETA, whose
-line changes its text but is always there.
+measurement and made the window jump. The bags ETA followed the same 5 s and its line turned
+into "ETA not available yet" at the tail of each cycle. Both now use one threshold: the
+observation counts as current until it is 15 s old, with a fresh transport.
+
+Still to be looked at in the game: the inventory footer ("Inventory: unresolved quantities",
+then "waiting for confirmation") appears for a couple of seconds after a partial sample or a
+new epoch, and the wallet line is one line whose longest texts ("Currencies: no coverage
+(changed while reading)") may wrap into two. Neither has been seen to come and go in normal
+measurement, and neither has been ruled out.
 
 ### Lines that only appear with a problem
 
