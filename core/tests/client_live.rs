@@ -6,7 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tyrian_companion_nexus_core::client::{spawn, ClientConfig, ClientHandle, GameReading, Host};
+use tyrian_companion_nexus_core::client::{spawn, ClientConfig, ClientHandle, GameReading, Host, Readiness};
 use tyrian_companion_nexus_core::game_context::MumbleSnapshot;
 use tyrian_companion_nexus_core::inventory::{InventorySnapshot, ReadError};
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
@@ -31,6 +31,9 @@ struct FakeHost {
     pending: Arc<AtomicU32>,
     /// How many times the loop asked whether it is ready.
     prepared: Arc<AtomicU32>,
+    /// From which of those times on a source that is not ready has been getting ready for too
+    /// long, as the adapter's hash past `executable::OVERDUE`. Never, unless a test says.
+    overdue_from: Arc<AtomicU32>,
     /// What the verification comes to once it is done: `None` is a source that samples.
     verdict: Arc<Mutex<Option<ReadError>>>,
     /// The slice of pending work does not end until it is interrupted.
@@ -50,6 +53,7 @@ impl FakeHost {
             wallet: Arc::new(Mutex::new(None)),
             pending: Arc::new(AtomicU32::new(0)),
             prepared: Arc::new(AtomicU32::new(0)),
+            overdue_from: Arc::new(AtomicU32::new(u32::MAX)),
             verdict: Arc::new(Mutex::new(None)),
             block_prepare: Arc::new(AtomicBool::new(false)),
             exiting: Arc::new(AtomicBool::new(false)),
@@ -72,17 +76,22 @@ impl Host for FakeHost {
     fn read_game(&self) -> GameReading {
         self.game.lock().unwrap().clone()
     }
-    fn prepare_inventory(&self, _stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
-        self.prepared.fetch_add(1, Ordering::Relaxed);
+    fn prepare_inventory(&self, _stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Readiness {
+        let asked = self.prepared.fetch_add(1, Ordering::Relaxed) + 1;
+        // Not ready, and whether that has gone on for too long.
+        let unready = if asked >= self.overdue_from.load(Ordering::Relaxed) { Readiness::Overdue } else { Readiness::Pending };
         // A slice that would go on for as long as it is let: only being interrupted ends it.
         if self.block_prepare.load(Ordering::Relaxed) {
             while !interrupted() {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            return false;
+            return unready;
         }
         // One slice of the work that is left, as the adapter does on each call.
-        self.pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1)).is_err()
+        match self.pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1)) {
+            Ok(_) => unready,
+            Err(_) => Readiness::Ready,
+        }
     }
     fn read_inventory(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -196,6 +205,18 @@ impl Peer {
             if wire.last().is_some_and(|line| line["type"] != "heartbeat") {
                 return wire;
             }
+        }
+    }
+    /// The same for a line that is owed: it fails after `most` heartbeats without it, where
+    /// the other would go on reading them for as long as the worker lives.
+    fn through_first_other_within(&mut self, most: usize) -> Vec<Value> {
+        let mut wire = Vec::new();
+        loop {
+            wire.push(self.sequenced());
+            if wire.last().is_some_and(|line| line["type"] != "heartbeat") {
+                return wire;
+            }
+            assert!(wire.len() <= most, "{most} heartbeats and nothing else: {wire:?}");
         }
     }
     /// The next `count` lines, which must all be heartbeats: nothing else is being said.
@@ -364,6 +385,85 @@ fn a_pending_verdict_that_ends_in_a_system_failure_says_read_failed() {
     // Said once; the source goes on trying, a second apart, and has nothing new to say.
     p.only_heartbeats(6);
     assert_eq!(state.live_epochs_opened(), 0);
+    handle.stop();
+}
+
+/// The hash has no limit of its own, and while it was under way the loop said nothing: on a
+/// cold, slow disk the plugin saw the capability and then heartbeats for as long as that took,
+/// and the panel waited without a word of why. Past what the source keeps quiet about, the
+/// plugin is told that it could not complete a reading, once, and no sample is asked for. The
+/// hash is not given up: the source is asked for its next slice on every pass as before, and
+/// when it is over it opens as on any other load.
+#[test]
+fn a_verdict_pending_for_too_long_says_read_failed_once_and_the_source_opens_when_it_is_over() {
+    use tyrian_companion_nexus_core::live::LiveStatus;
+    use tyrian_companion_nexus_core::panel;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, state, handle) = start(&listener);
+    // A hash that goes on for as long as the test lets it, overdue from its fourth slice.
+    host.pending.store(u32::MAX, Ordering::Relaxed);
+    host.overdue_from.store(4, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    // Three slices of silence, and on the fourth the plugin is told.
+    let wire = p.through_first_other_within(12);
+    let (status, before) = wire.split_last().unwrap();
+    assert!(before.iter().all(|line| line["type"] == "heartbeat"), "{wire:?}");
+    assert_eq!(
+        (status["type"].as_str(), status["status"].as_str(), status["reason"].as_str(), &status["epoch"]),
+        (Some("live_status"), Some("unavailable"), Some("read_failed"), &Value::Null),
+        "{wire:?}"
+    );
+    // The panel and Options say it too, where they said the source was waiting.
+    assert_eq!(state.live_status(), LiveStatus::Unavailable);
+    assert_eq!(panel::inventory_status(state.live_status(), true), "Inventory: reading unavailable");
+    // Said once. Six more passes: each asked the source for its next slice, so the hash went on
+    // at the pace it had, and none asked for a sample, there being no verdict to read under.
+    p.only_heartbeats(6);
+    assert!(host.prepared.load(Ordering::Relaxed) >= 9, "asked {} times", host.prepared.load(Ordering::Relaxed));
+    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(state.live_epochs_opened(), 0);
+    assert_eq!(state.inventory_reading().1, None, "no pass of the reader to show");
+    // Two slices left, and the hash is over: the source opens, with nothing said in between.
+    host.pending.store(2, Ordering::Relaxed);
+    let wire = p.through_first_other_within(12);
+    let (open, before) = wire.split_last().unwrap();
+    assert!(before.iter().all(|line| line["type"] == "heartbeat"), "{wire:?}");
+    assert_eq!(open["type"], "live_open", "{wire:?}");
+    assert_eq!((host.pending.load(Ordering::Relaxed), host.calls.load(Ordering::Relaxed)), (0, 1));
+    assert_eq!(state.live_epochs_opened(), 1);
+    // The baseline of that epoch, and the samples after it, as on any other load.
+    let epoch = open["epoch"].as_str().unwrap().to_string();
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    host.quantity.store(2, Ordering::Relaxed);
+    p.ack(&epoch, 0, "stored");
+    p.sample(&epoch, 1, 2);
+    p.ack(&epoch, 1, "stored");
+    handle.stop();
+}
+
+/// The slice of a hash that is overdue, cut short because the game is closing: nothing is said
+/// about the source on the way out, as when it was only pending.
+#[test]
+fn an_overdue_slice_cut_short_by_the_game_closing_says_nothing_before_the_bye() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    host.block_prepare.store(true, Ordering::Relaxed);
+    host.overdue_from.store(1, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    let waiting = std::time::Instant::now();
+    while host.prepared.load(Ordering::Relaxed) == 0 {
+        assert!(waiting.elapsed() < Duration::from_secs(5), "the source was never asked to prepare");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    host.exiting.store(true, Ordering::Relaxed);
+    let bye = p.next();
+    assert_eq!((bye["type"].as_str(), bye["reason"].as_str()), (Some("bye"), Some("game_exit")), "{bye}");
+    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
     handle.stop();
 }
 

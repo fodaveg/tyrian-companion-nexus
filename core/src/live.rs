@@ -321,28 +321,7 @@ impl Channel {
         self.next_capture = Some(now + CAPTURE_INTERVAL);
         let mut snapshot = match result {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                let reason = match error {
-                    ReadError::UnsupportedBuild => "unsupported_build",
-                    ReadError::RootUnavailable => "root_unavailable",
-                    _ => "read_failed",
-                };
-                self.epoch = None;
-                let epoch = self.last_declared_epoch.clone();
-                self.status = if error == ReadError::UnsupportedBuild {
-                    self.blocked = true;
-                    LiveStatus::UnsupportedBuild
-                } else {
-                    LiveStatus::Unavailable
-                };
-                if self.reason == Some(reason) {
-                    return vec![];
-                }
-                self.reason = Some(reason);
-                return vec![
-                    json!({"type":"live_status","epoch":epoch,"status":"unavailable","reason":reason}),
-                ];
-            }
+            Err(error) => return self.unavailable(error),
         };
         self.reason = None;
         if self
@@ -396,6 +375,39 @@ impl Channel {
         e.sent_at = now;
         e.partial = snapshot.unknown != 0;
         frames
+    }
+    /// The source has been getting ready to sample for longer than it keeps quiet about
+    /// (`client::Readiness::Overdue`). No sample was taken, and the plugin is told what is true
+    /// of that: a reading the source could not complete, with the line and the reason of a
+    /// capture that failed, once per discontinuity like it. Nothing new goes on the wire.
+    ///
+    /// Unlike [`Channel::capture`] it does not put the next sample off. The source is asked
+    /// again on the next pass, so what it is getting ready goes on at the pace it had, and the
+    /// first sample it gives opens an epoch as on any other load.
+    pub fn overdue(&mut self) -> Vec<Value> {
+        self.unavailable(ReadError::ReadFailed)
+    }
+    /// No sample, and why: the epoch is cut and the reason is said once, until a sample or a
+    /// change of context makes it worth saying again.
+    fn unavailable(&mut self, error: ReadError) -> Vec<Value> {
+        let reason = match error {
+            ReadError::UnsupportedBuild => "unsupported_build",
+            ReadError::RootUnavailable => "root_unavailable",
+            _ => "read_failed",
+        };
+        self.epoch = None;
+        let epoch = self.last_declared_epoch.clone();
+        self.status = if error == ReadError::UnsupportedBuild {
+            self.blocked = true;
+            LiveStatus::UnsupportedBuild
+        } else {
+            LiveStatus::Unavailable
+        };
+        if self.reason == Some(reason) {
+            return vec![];
+        }
+        self.reason = Some(reason);
+        vec![json!({"type":"live_status","epoch":epoch,"status":"unavailable","reason":reason})]
     }
     /// Non-gameplay status is emitted once per discontinuity, never every poll.
     pub fn gameplay_status(&mut self) -> Vec<Value> {

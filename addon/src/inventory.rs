@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots};
+use tyrian_companion_nexus_core::client::Readiness;
 use tyrian_companion_nexus_core::executable::{self, Build, HashedFile, Hashing, Stamp, Step};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
@@ -261,7 +262,7 @@ pub fn release_executable() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Unverified {
     /// The hash is still under way: nothing has failed and nothing is known. The source is not
-    /// ready to sample (`prepare`), and says nothing.
+    /// ready to sample (`prepare`), and says nothing until the hash is overdue.
     Pending,
     /// The system failed to open or read the file, or to copy the image: a reading that
     /// failed, reported as one and tried again [`VERIFY_RETRY`] later.
@@ -317,15 +318,26 @@ fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<N
 }
 
 /// Does one slice of the verification of the executable, if it is not over, and says whether
-/// the source can be asked for a sample: `false` only while the hash is still under way. The
-/// bridge worker asks this before every sample and takes none while it says no, so a verdict
-/// that is pending never reaches the plugin as a reading that failed. Once there is a verdict,
-/// or the system has failed, [`sample`] says which.
+/// the source can be asked for a sample: not while the hash is still under way. The bridge
+/// worker asks this before every sample and takes none while it is not ready, so a verdict that
+/// is pending is never read past and never reaches the plugin as a sample that was tried. Once
+/// there is a verdict, or the system has failed, [`sample`] says which.
+///
+/// A hash that has taken `executable::OVERDUE` of slices and is not over is `Overdue` instead
+/// of `Pending`: the worker then tells the plugin that the source could not complete a reading,
+/// where it used to say nothing for as long as a slow disk took. That is all that changes. The
+/// hash is where it was, the next call does the next slice of it, and the call on which it
+/// ends is `Ready`. The time is the `Verdict`'s, counted over the slices of one hash: a hash
+/// that the system fails is started again [`VERIFY_RETRY`] later, with its own.
 ///
 /// `interrupted` is the worker's: it cuts the slice short when it was told to stop or the game
 /// is closing, so that neither waits for the hash.
-pub fn prepare(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
-    READER.get_or_try(Instant::now, || verify(stop, interrupted)).err() != Some(Unverified::Pending)
+pub fn prepare(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Readiness {
+    match READER.get_or_try(Instant::now, || verify(stop, interrupted)).err() {
+        Some(Unverified::Pending) if executable::overdue(READER.unfinished_for()) => Readiness::Overdue,
+        Some(Unverified::Pending) => Readiness::Pending,
+        _ => Readiness::Ready,
+    }
 }
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     threads: 0,

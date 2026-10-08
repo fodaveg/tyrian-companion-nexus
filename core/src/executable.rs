@@ -15,6 +15,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::inventory::{BuildProfile, Memory, ReadError, Reader, BUILD_SHA256};
+use crate::live::RESPONSE_TIMEOUT;
 use crate::sha256::hex;
 
 /// The largest executable that is hashed at all. A larger file is not the certified build,
@@ -34,6 +35,32 @@ pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 /// six and a half seconds in the worst case. A longer slice would get the verdict no sooner:
 /// the thread already hashes four fifths of the time.
 pub const SLICE: Duration = Duration::from_secs(1);
+
+/// How much hashing the source keeps quiet about. While the hash is under way the source takes
+/// no sample and tells the plugin nothing, and the hash has no limit of its own: on a cold, slow
+/// disk, or with something holding up the reads of the file, that was a plugin that saw the
+/// capability negotiated and then heartbeats for as long as it took, and a panel waiting without
+/// a word of why. Past this much the source says what is true of it, that it could not complete
+/// a reading (`live_status unavailable`, `read_failed`), and goes on hashing where it was: the
+/// hash is never given up or started over for being slow, which on such a disk would be never
+/// finishing it.
+///
+/// Ten seconds of slices, by two numbers there already were. It is what the source itself gives
+/// the plugin to answer before it takes its silence for a failure ([`RESPONSE_TIMEOUT`]), and
+/// it is what the hash was given when it was done in one go, with the difference that those ten
+/// seconds ended it. It is the time spent hashing that counts ([`Verdict::unfinished_for`]), so
+/// a loading screen in the middle, during which no slice runs and the plugin has been told
+/// there is no character in a map, is not held against it. Ten slices are ten passes of the
+/// worker: about twelve and a half seconds on the clock with a character in a map.
+///
+/// [`Verdict::unfinished_for`]: crate::verdict::Verdict::unfinished_for
+pub const OVERDUE: Duration = RESPONSE_TIMEOUT;
+
+/// Whether a hash that has taken `spent` so far, and is not over, has gone on for longer than
+/// the source keeps quiet about.
+pub fn overdue(spent: Duration) -> bool {
+    spent >= OVERDUE
+}
 
 /// How one step of checking the executable ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +380,19 @@ mod tests {
         assert_eq!(hashing.file.reads, 42);
         // The same digest as in one go.
         assert_eq!(hashing.file.finish(), Some(crate::sha256::sha256(&data)));
+    }
+
+    /// Ten slices, and not one before: the tenth is the one after which the source speaks.
+    #[test]
+    fn the_hash_is_overdue_after_ten_seconds_of_slices_and_not_before() {
+        assert_eq!(OVERDUE, Duration::from_secs(10));
+        assert!(!overdue(Duration::ZERO));
+        assert!(!overdue(SLICE * 9));
+        assert!(!overdue(OVERDUE - Duration::from_millis(1)));
+        assert!(overdue(SLICE * 10));
+        assert!(overdue(Duration::from_secs(3600)));
+        // A whole number of slices, so that the count of passes is what the doc says it is.
+        assert_eq!(OVERDUE.as_millis() % SLICE.as_millis(), 0);
     }
 
     #[test]

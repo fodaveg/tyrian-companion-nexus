@@ -9,6 +9,8 @@
 //! [`Verdict`] keeps a final answer for ever and a failed attempt only for a wait, after which
 //! the next call tries again. An attempt may also do its work a bounded part at a time and say
 //! it is not finished: that is neither kept nor waited for, and the next call goes on with it.
+//! How long those parts have taken, added up, is kept ([`Verdict::unfinished_for`]), so that the
+//! caller can stop keeping quiet about work that goes on for too long without giving it up.
 //! It reads no clock of its own: the caller hands one in, which is what lets the tests move
 //! time.
 
@@ -32,9 +34,18 @@ pub enum Attempt<T, E> {
 #[derive(Debug)]
 pub struct Verdict<T, E> {
     settled: OnceLock<T>,
-    /// The last attempt that reached no verdict: when it ended, and why.
-    failed: Mutex<Option<(Instant, E)>>,
+    unsettled: Mutex<Unsettled<E>>,
     wait: Duration,
+}
+
+/// What is known while there is no verdict.
+#[derive(Debug)]
+struct Unsettled<E> {
+    /// The last attempt that reached no verdict: when it ended, and why.
+    failed: Option<(Instant, E)>,
+    /// How long the attempts left unfinished have taken, added up, since the work they are
+    /// doing began: since the first call, or since the last attempt that failed.
+    unfinished: Duration,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -44,7 +55,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl<T, E: Copy> Verdict<T, E> {
     /// `wait` is how long after an attempt that reached no verdict the next one may run.
     pub const fn new(wait: Duration) -> Self {
-        Self { settled: OnceLock::new(), failed: Mutex::new(None), wait }
+        Self { settled: OnceLock::new(), unsettled: Mutex::new(Unsettled { failed: None, unfinished: Duration::ZERO }), wait }
     }
 
     /// The settled verdict, reaching for it with `attempt` when there is none yet.
@@ -54,34 +65,55 @@ impl<T, E: Copy> Verdict<T, E> {
     /// and the next call goes on with it at once. An [`Attempt::Failed`] one is handed back
     /// as it is, and handed back again without running `attempt` until `wait` has passed since
     /// that attempt ended: `clock` is read again after it, and the wait is between attempts.
+    ///
+    /// `clock` is read before and after an attempt, which is how the time an unfinished one
+    /// took is known ([`Verdict::unfinished_for`]).
     pub fn get_or_try(&self, clock: impl Fn() -> Instant, attempt: impl FnOnce() -> Attempt<T, E>) -> Result<&T, E> {
         if let Some(settled) = self.settled.get() {
             return Ok(settled);
         }
         // Held through the attempt: two callers never verify at the same time.
-        let mut failed = lock(&self.failed);
+        let mut unsettled = lock(&self.unsettled);
         if let Some(settled) = self.settled.get() {
             return Ok(settled);
         }
-        if let Some((ended, error)) = *failed {
-            if clock().saturating_duration_since(ended) < self.wait {
+        let began = clock();
+        if let Some((ended, error)) = unsettled.failed {
+            if began.saturating_duration_since(ended) < self.wait {
                 return Err(error);
             }
         }
         match attempt() {
             Attempt::Settled(verdict) => {
-                *failed = None;
+                *unsettled = Unsettled { failed: None, unfinished: Duration::ZERO };
                 Ok(self.settled.get_or_init(|| verdict))
             }
             Attempt::Unfinished(error) => {
-                *failed = None;
+                unsettled.failed = None;
+                unsettled.unfinished = unsettled.unfinished.saturating_add(clock().saturating_duration_since(began));
                 Err(error)
             }
             Attempt::Failed(error) => {
-                *failed = Some((clock(), error));
+                // What was under way is lost with the failure: the attempt after the wait
+                // starts the work again, and its time is counted from nothing.
+                *unsettled = Unsettled { failed: Some((clock(), error)), unfinished: Duration::ZERO };
                 Err(error)
             }
         }
+    }
+
+    /// How long the work that is under way has taken so far: the time of every attempt left
+    /// unfinished since it began, added up. Zero when nothing is under way, which is before the
+    /// first attempt, after one that failed and once there is a verdict.
+    ///
+    /// It is the time spent in the attempts, not the time gone by since the first of them: a
+    /// caller that stops asking for a while is not doing the work meanwhile, and that while is
+    /// not counted. It only says how long; what is too long is the caller's to say, and nothing
+    /// here gives the work up or starts it again for having taken long.
+    ///
+    /// Waits for an attempt that is running, like [`Verdict::get_or_try`].
+    pub fn unfinished_for(&self) -> Duration {
+        lock(&self.unsettled).unfinished
     }
 }
 
@@ -159,6 +191,53 @@ mod tests {
         assert_eq!(follow.attempts.get(), 6);
         assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Ok(Some("reader")));
         assert_eq!(follow.attempts.get(), 6);
+    }
+
+    /// A hash that goes on and on, a cold slow disk, used to say nothing for as long as it
+    /// took. The time of its slices is added up for the caller to see, and nothing else changes
+    /// for it: every call still does its slice, and what the last one reaches is the verdict.
+    #[test]
+    fn the_time_of_the_unfinished_attempts_adds_up_and_the_work_goes_on_all_the_same() {
+        let follow = Follow::new();
+        let slice = Duration::from_secs(1);
+        assert_eq!(follow.verdict.unfinished_for(), Duration::ZERO, "nothing under way yet");
+        for call in 1..=25 {
+            assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+            assert_eq!(follow.attempts.get(), call, "every call does its slice, however long it has been");
+            assert_eq!(follow.verdict.unfinished_for(), slice * call);
+            // Between two slices the caller does something else: that is not time of the work.
+            follow.after(Duration::from_millis(250));
+        }
+        // The caller stops asking for a minute, as on a loading screen. No slice, no time.
+        follow.after(Duration::from_secs(60));
+        assert_eq!(follow.verdict.unfinished_for(), slice * 25);
+        assert_eq!(follow.attempting(slice, Attempt::Settled(Some("reader"))), Ok(Some("reader")));
+        assert_eq!(follow.attempts.get(), 26, "one more slice, not the work over again");
+        assert_eq!(follow.verdict.unfinished_for(), Duration::ZERO, "nothing under way any more");
+    }
+
+    /// Every attempt that fails opens its own wait, and the work after it is another: its time
+    /// is counted from nothing, not on top of the one that was lost.
+    #[test]
+    fn the_work_that_starts_again_after_a_failure_has_its_own_time() {
+        let follow = Follow::new();
+        let slice = Duration::from_secs(1);
+        for _ in 0..12 {
+            assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+        }
+        assert_eq!(follow.verdict.unfinished_for(), slice * 12);
+        // The file cannot be read any more.
+        assert_eq!(follow.attempting(slice, Attempt::Failed(TimedOut)), Err(TimedOut));
+        assert_eq!(follow.verdict.unfinished_for(), Duration::ZERO);
+        // Its wait, during which nothing runs and no time is added.
+        follow.after(WAIT - Duration::from_millis(1));
+        assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+        assert_eq!((follow.attempts.get(), follow.verdict.unfinished_for()), (13, Duration::ZERO));
+        follow.after(Duration::from_millis(1));
+        for call in 1..=3 {
+            assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+            assert_eq!(follow.verdict.unfinished_for(), slice * call);
+        }
     }
 
     #[test]

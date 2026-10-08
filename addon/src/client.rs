@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nexus::data_link::{read_nexus_link, read_resource};
-use tyrian_companion_nexus_core::client::{GameReading, Host};
+use tyrian_companion_nexus_core::client::{GameReading, Host, Readiness};
 use tyrian_companion_nexus_core::game_context::{MumbleSnapshot, MUMBLE_LINK_BYTES};
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 
@@ -60,8 +60,9 @@ impl Host for NexusHost {
     fn inventory_diagnostics(&self) -> tyrian_companion_nexus_core::inventory::Diagnostics { crate::inventory::diagnostics() }
 
     /// The game's executable is verified before the first sample, a slice of its hash on each
-    /// pass: not ready, and nothing to tell the plugin, while that is under way.
-    fn prepare_inventory(&self, stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> bool {
+    /// pass: not ready while that is under way, with nothing to tell the plugin until it has
+    /// taken too long.
+    fn prepare_inventory(&self, stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Readiness {
         crate::inventory::prepare(stop, interrupted)
     }
 

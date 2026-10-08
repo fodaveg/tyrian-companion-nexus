@@ -92,6 +92,22 @@ pub struct GameReading {
     pub mumble: Option<MumbleSnapshot>,
 }
 
+/// How the source stands when the worker asks whether it can take a sample
+/// ([`Host::prepare_inventory`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    /// It can be asked for a sample now. That sample may still fail, and says so itself.
+    Ready,
+    /// Still getting ready, and nothing has failed: the loop takes no sample, opens no epoch
+    /// and tells the plugin nothing, as on a pass in which it is not time to sample yet.
+    Pending,
+    /// Still getting ready, for longer than it keeps quiet about. The loop takes no sample
+    /// either, and says that to the plugin as a reading that could not be completed
+    /// (`live_status unavailable`, `read_failed`), once. The source goes on with what it was
+    /// doing, a part on each pass, and is ready when that is over.
+    Overdue,
+}
+
 /// Everything the client needs from the host it runs in.
 pub trait Host: Send + 'static {
     /// Paints one line for the player. In Nexus, `GUI_SendAlert`.
@@ -105,16 +121,16 @@ pub trait Host: Send + 'static {
     }
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
     /// Does a bounded part of whatever the source has to do before it can take a sample at all,
-    /// and says whether that is done. Asked on this worker right before each sample. While it
-    /// says `false` there is no sample to take on this pass and nothing has failed: the loop
-    /// does not call [`Host::read_inventory`], opens no epoch and tells the plugin nothing, as
-    /// when it is not time to sample yet. The Windows adapter verifies the game's executable
-    /// here, a slice of its hash at a time. A host with nothing to prepare is always ready.
+    /// and says how that stands ([`Readiness`]). Asked on this worker right before each sample.
+    /// The loop calls [`Host::read_inventory`] only on [`Readiness::Ready`]: while the source is
+    /// not ready there is no sample to take on this pass, and it is asked again on the next.
+    /// The Windows adapter verifies the game's executable here, a slice of its hash at a time.
+    /// A host with nothing to prepare is always ready.
     ///
     /// `interrupted` says when that part of the work has to be cut short at once: the worker
     /// was told to stop, or the game is closing and its `bye` is owed. The loop decides that,
     /// not the host; `stop` is the worker's own flag, as [`Host::read_inventory`] gets it.
-    fn prepare_inventory(&self, _stop: &AtomicBool, _interrupted: &dyn Fn() -> bool) -> bool { true }
+    fn prepare_inventory(&self, _stop: &AtomicBool, _interrupted: &dyn Fn() -> bool) -> Readiness { Readiness::Ready }
     /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
     /// that allows a `bye` with `game_exit`.
     fn game_exiting(&self) -> bool;
@@ -508,28 +524,39 @@ fn serve(
                 let ctx = session.last_context_seq.unwrap_or(0);
                 let mut frames = session.live.gameplay_status();
                 if let Some(pending) = session.live.pending_frames(ctx, now) { frames.extend(pending); }
-                // A source that is still getting ready has no sample and no failure to report:
-                // the pass goes by like one in which it is not time to sample, and it is asked
-                // again on the next. Nothing about it is put on the wire.
-                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context)
-                    && host.prepare_inventory(stop, &|| stop.load(Ordering::Relaxed) || host.game_exiting())
-                {
-                    let sample = host.read_inventory(stop);
-                    if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
-                    state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());
-                    let captured_at = Instant::now();
-                    let reading = host.read_game();
-                    let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
-                    if after != context {
-                        // The context changed while copying the inventory: discard it entirely.
-                        if let Some(line) = session.next_outgoing(captured_at, &after) {
-                            if stream.write_all(line.as_bytes()).is_err() { return end; }
+                else if session.live.wants_sample(now) && session.last_context.as_ref() == Some(&context) {
+                    match host.prepare_inventory(stop, &|| stop.load(Ordering::Relaxed) || host.game_exiting()) {
+                        // A source that is still getting ready has no sample and no failure to
+                        // report: the pass goes by like one in which it is not time to sample,
+                        // and it is asked again on the next. Nothing about it is put on the wire.
+                        Readiness::Pending => {}
+                        // Still getting ready, and for too long to go on saying nothing: no
+                        // sample is asked for, and the plugin is told once that the source could
+                        // not complete a reading. It is asked again on the next pass all the
+                        // same, so what it is getting ready is not held up by having said so.
+                        Readiness::Overdue => {
+                            if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
+                            frames.extend(session.live.overdue());
                         }
-                    } else {
-                        let opened = session.live.epochs_opened();
-                        frames.extend(session.live.capture(sample, ctx, captured_at));
-                        // For the Options window only: how often the source starts an epoch.
-                        state.count_live_epochs(session.live.epochs_opened().saturating_sub(opened));
+                        Readiness::Ready => {
+                            let sample = host.read_inventory(stop);
+                            if stop.load(Ordering::Relaxed) || host.game_exiting() { continue; }
+                            state.set_inventory_diagnostics(host.inventory_diagnostics(), Instant::now());
+                            let captured_at = Instant::now();
+                            let reading = host.read_game();
+                            let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
+                            if after != context {
+                                // The context changed while copying the inventory: discard it entirely.
+                                if let Some(line) = session.next_outgoing(captured_at, &after) {
+                                    if stream.write_all(line.as_bytes()).is_err() { return end; }
+                                }
+                            } else {
+                                let opened = session.live.epochs_opened();
+                                frames.extend(session.live.capture(sample, ctx, captured_at));
+                                // For the Options window only: how often the source starts an epoch.
+                                state.count_live_epochs(session.live.epochs_opened().saturating_sub(opened));
+                            }
+                        }
                     }
                 }
                 state.set_live_status(session.live.status);

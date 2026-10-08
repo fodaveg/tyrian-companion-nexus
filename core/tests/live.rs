@@ -237,6 +237,51 @@ fn unavailable_status_before_any_open_has_null_epoch_and_invalidated_ready_is_ig
     never_opened.context_changed(&ctx);
     assert_eq!(never_opened.gameplay_status()[0]["epoch"], Value::Null);
 }
+/// A source that has been getting ready for too long says so as a reading it could not
+/// complete: the line a failed capture sends, once. What it must not do is what a failed
+/// capture does next, put the following sample off a second: nothing was sampled, and the
+/// source has to be asked again on the next pass for what it is getting ready to go on.
+#[test]
+fn an_overdue_source_says_read_failed_once_and_is_asked_again_on_the_next_pass() {
+    let now = Instant::now();
+    let mut c = channel(now);
+    assert_eq!(c.status, LiveStatus::Waiting);
+    assert_eq!(
+        c.overdue(),
+        vec![json!({"type":"live_status","epoch":null,"status":"unavailable","reason":"read_failed"})]
+    );
+    assert_eq!(c.status, LiveStatus::Unavailable);
+    // Pass after pass while it is still getting ready: nothing more to say, and still asked.
+    for pass in 0..40 {
+        assert!(c.wants_sample(now + Duration::from_millis(250) * pass), "pass {pass}");
+        assert_eq!(c.overdue(), Vec::<Value>::new(), "pass {pass}");
+    }
+    assert_eq!(c.epochs_opened(), 0);
+    // A capture that fails is not asked again for a second: that is the difference.
+    let mut failed = channel(now);
+    assert_eq!(failed.capture(Err(ReadError::ReadFailed), 0, now)[0]["reason"], "read_failed");
+    assert!(!failed.wants_sample(now + Duration::from_millis(250)));
+    // Ready at last: the first sample opens an epoch and is its baseline, as on any load.
+    let later = now + Duration::from_secs(10);
+    let open = c.capture(Ok(sample(0)), 0, later).remove(0);
+    assert_eq!((open["type"].as_str(), c.status, c.epochs_opened()), (Some("live_open"), LiveStatus::Waiting, 1));
+    ready(&mut c, &open, later);
+    assert_eq!(c.pending_frames(0, later).unwrap()[0]["mode"], "baseline");
+    // A failure of the system once the hash is over is the same reason, already said: only a
+    // change of context makes it worth saying again.
+    let mut said = channel(now);
+    assert_eq!(said.overdue().len(), 1);
+    assert_eq!(said.capture(Err(ReadError::ReadFailed), 0, now), Vec::<Value>::new());
+    let mut elsewhere = context();
+    elsewhere.map_id = Some(50);
+    said.context_changed(&elsewhere);
+    assert_eq!(said.overdue()[0]["reason"], "read_failed");
+    // And another build, when that is what the hash comes to, is still said.
+    let mut other = channel(now);
+    assert_eq!(other.overdue().len(), 1);
+    assert_eq!(other.capture(Err(ReadError::UnsupportedBuild), 0, now)[0]["reason"], "unsupported_build");
+    assert_eq!(other.status, LiveStatus::UnsupportedBuild);
+}
 #[test]
 fn identical_periodic_context_preserves_epoch_and_batch() {
     let now = Instant::now();

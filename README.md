@@ -140,21 +140,39 @@ a quarter between two chances to send a heartbeat, and the slice is cut short at
 the worker is told to stop or the game is closing.
 
 The hash has no time limit of its own, and nothing shows how far it has got. For as long as
-it takes, the source stays in "waiting for confirmation", nothing of the game is read and
-there is no sample. It ends in a verdict, or in a failure of the system if the file stops
-being readable; being slow never ends it. On a disk slow enough, that is a source that goes
-on waiting with nothing on screen that says why.
+it takes, nothing of the game is read and there is no sample. It ends in a verdict, or in a
+failure of the system if the file stops being readable; being slow never ends it, and never
+starts it over, which on a disk slow enough would be never finishing it.
 
-**While that verdict is pending the addon says nothing about it to the plugin.** It is not a
-reading that failed: the source is not ready to sample yet (`Host::prepare_inventory`), so the
-loop takes no sample, opens no epoch and sends no `live_status`, exactly as when it is not
-time to sample. A `live_status` would open a gap in the plugin's session on every load, and
-`docs/SPEC-live-loot.md` asks for nothing between `live_cap` and the first `live_open`: the
-plugin only starts expecting samples once it has answered a `live_open` with `ready`. On the
-wire there are heartbeats and then the `live_open` and its baseline, as on any load; the first
-sample comes those few seconds later than when the hash ran in one go. Meanwhile Options and
-the panel's status tooltip say "Inventory: waiting for confirmation", the state the source is
-in before its first capture.
+**For its first ten seconds of hashing the addon says nothing about it to the plugin.** A
+verdict that is pending is not a reading that failed: the source is not ready to sample yet
+(`Host::prepare_inventory`, `Readiness::Pending`), so the loop takes no sample, opens no epoch
+and sends no `live_status`, exactly as when it is not time to sample. A `live_status` would
+open a gap in the plugin's session on every load, and `docs/SPEC-live-loot.md` asks for
+nothing between `live_cap` and the first `live_open`: the plugin only starts expecting samples
+once it has answered a `live_open` with `ready`, and has no timer of its own on that stretch.
+On the wire there are heartbeats and then the `live_open` and its baseline, as on any load;
+the first sample comes those few seconds later than when the hash ran in one go. Meanwhile
+Options and the panel's status tooltip say "Inventory: waiting for confirmation", the state
+the source is in before its first capture.
+
+**Past those ten seconds it says so, and goes on hashing** (`executable::OVERDUE`,
+`Readiness::Overdue`). The plugin gets `live_status unavailable` with `read_failed`, the line
+and the reason of any reading the source could not complete, once; Options and the panel's
+status tooltip change to "Inventory: reading unavailable". Before this the silence had no end:
+on a cold, slow disk, or with something holding up the reads of the file, the plugin saw the
+capability and then heartbeats for as long as the hash took, and the panel waited without a
+word of why. No sample is asked for meanwhile, there being no verdict to read under, and the
+hash is where it was: the next pass does its next slice, at the same pace, and the pass on
+which it ends takes the first sample, which opens its epoch with a baseline as on any load.
+
+Ten seconds because that is what the source itself gives the plugin to answer before it takes
+its silence for a failure (`live::RESPONSE_TIMEOUT`), and what the hash was given when it ran
+in one go, where they ended it. They are seconds spent hashing, added up over the slices
+(`Verdict::unfinished_for`), not seconds on the clock: with a character in a map that is ten
+passes, about twelve and a half seconds, and a loading screen in the middle, during which no
+slice runs and the plugin has been told `not_gameplay`, is not held against the hash. A hash
+that the system fails is started again 30 seconds later, and that one has its own ten.
 
 What the system fails to do is not a verdict: the file cannot be opened or read, it is
 written while it is hashed, or a copy of the header fails. That used to be kept as
@@ -1165,11 +1183,16 @@ covers what does not need a running game:
   digest deciding the build, the hash going on across slices with every byte in it once, a
   header that is not the certified one decided for good, everything the system can fail at
   deciding nothing, and a verdict kept only when final, an unfinished slice neither kept nor
-  waited for and a failure tried again after its wait. On the real loop
+  waited for, the time of the unfinished slices added up and counted from nothing after a
+  failure, the tenth second of them being the overdue one, and a failure tried again after
+  its wait. On the real loop
   (`core/tests/client_live.rs`), a source whose verdict is pending puts nothing but heartbeats
   on the wire, then opens with its baseline as always, or says `unsupported_build` once, or
-  `read_failed` for a failure of the system. The adapter that opens the real file and calls
-  the system's SHA-256 is not tested;
+  `read_failed` for a failure of the system; one whose verdict is overdue says `read_failed`
+  once, is asked for its next slice on every pass and never for a sample, and opens with its
+  baseline when the hash is over. The adapter that opens the real file and calls the system's
+  SHA-256 is not tested, and neither is the one line in it that asks whether the hash is
+  overdue;
 - the counters of the reader diagnostics (`core/src/perf.rs`): last and longest time of a
   pass, captures counted by how they ended with a copy refused by the clock kept apart from
   one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and
