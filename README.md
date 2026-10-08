@@ -411,8 +411,9 @@ The read-only window separates measurement phase from host connection. It shows 
 if there is no upper bound), the observation's age, and free character bag slots with their
 own age. A recent-character slot source is explicitly marked. Optional bag/time goals show
 numeric progress and the host's estimate; the addon never estimates a rate or advances the
-duration by itself. A bags ETA requires an observation younger than five seconds; an older
-or unknown age labels the rate as the last recorded rate. Duration countdowns remain
+duration by itself. A bags ETA requires an observation younger than five seconds. The rate is
+one line that never grows: what there is to say about it is its colour and tooltip (see "A
+panel that does not jump"). Duration countdowns remain
 available through observation errors and unknown/old source age, while still requiring
 a fresh transport snapshot and active session. The feed does not identify the source type.
 Closing reconciliation shows signed **net bags at close** separately
@@ -451,9 +452,12 @@ once is offered) and **Sell offer** (the lowest sell offer), each for one bag an
 250. The figures are **gross, as the trading post shows them**: no fee is taken off, and a
 stack is exactly 250 times the unit price. They are written as `8g 62s 50c`. The contract's
 full labels ("Highest buy order", "Lowest sell offer") do not fit the panel's width next to the
-amounts, so the block uses its short forms. The block also says when there is no quote on a
-side (`—`), when the price has not been read yet, and, in the warning colour, when it expired
-(`Bag: price expired (11 min ago)`). When the quote is fine its age is not shown.
+amounts, so the block uses its short forms. When the quote is fine its age is not shown.
+
+The block is always three lines: the header and the two sides. With no figure to show, the
+sides stay in place with `—` and the header says why: `Bag · price not read yet` (no frame
+yet, `pending`, or a transport of 15 s or more), `Bag · no quote`, or, in the warning colour,
+`Bag · price expired (11 min ago)`. One side alone can also be `—`.
 
 The price comes from the public trading-post data and can be up to about **2 minutes** old,
 and older if the plugin's network fails (it expires after 10 minutes). It is not "live" and the
@@ -472,14 +476,33 @@ or null, null whenever `st` is not `ok`). Same 512-byte cap, 22-character nonce,
 sequence and 15-second monotonic transport expiry as `farm1`; disconnecting removes the figures
 at once. `farm1` and `live1` are unchanged. No item id, name or account travels in the feed.
 
+### A panel that does not jump
+
+The rate block is one line, `480–560 bags/h` (or `— bags/h`), and the price block is three
+lines or none; neither changes its number of lines while a session runs, so the rest of the
+window stays where it is.
+
+"Rate not available yet", "Last recorded rate" and "Last reading ago Xs" / "No reading" used to
+be lines of their own under the rate. They are now the rate line's tooltip, and while any of
+them applies the line is painted in the warning colour (orange):
+
+- no rate yet: the host has sent no band;
+- last recorded rate: the transport is 15 s old or more, or the reading is, or has no age;
+- reading age: only while a session is starting, active, stopping, provisional or in error,
+  and the transport is 15 s old or more, the host reports an error, there is no reading, or
+  the reading is 15 s old or more.
+
+"Last recorded rate" used to follow the 5 s freshness of the source. The host sends a frame
+every 5 s and the age keeps counting in between, so that line came and went in normal
+measurement and made the window jump. The 5 s freshness still decides the bags ETA, whose
+line changes its text but is always there.
+
 ### Lines that only appear with a problem
 
-In normal measurement the panel no longer repeats "Last reading ago Xs", "Slot reading ago Xs"
-or the footer "Inventory: observations stored". The two age lines show only while a session is
-starting, active, stopping, provisional or in error **and** one of these holds: the transport is
-more than 15 s old, the host reports an error, there is no reading, or the reading is 15 s old
-or more. The inventory footer is hidden only while the status is "measuring"; every other
-status still shows. Nexus's Options keep all of these lines as diagnostics.
+In normal measurement the panel does not paint "Slot reading ago Xs" or the footer "Inventory:
+observations stored". The slot age line shows under the same conditions as the reading age
+above. The inventory footer is hidden only while the status is "measuring"; every other status
+still shows, and Nexus's Options show the inventory status always.
 
 ### Quick access icons
 

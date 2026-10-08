@@ -342,7 +342,8 @@ fn wallet_status(status: tyrian_companion_nexus_core::live::LiveStatus, coverage
 }
 
 /// The bag price block, between the rate and the character's slots. It paints exactly what
-/// `price::panel_lines` returns, which is nothing in most states.
+/// `price::panel_lines` returns: nothing without the capability or outside a session, and the
+/// same three lines in every other state.
 fn price_block(ui: &Ui, view: &tyrian_companion_nexus_core::price::PriceView, english: bool) {
     let lines = tyrian_companion_nexus_core::price::panel_lines(view, english);
     if lines.is_empty() { return; }
@@ -422,21 +423,11 @@ pub fn farming_render(ui: &Ui) {
                 let elapsed = reading.elapsed.map_or_else(|| "—".into(), duration);
                 ui.text_wrapped(format!("{elapsed} · {}", tr("Duración", "Duration")));
                 ui.separator();
-                let rate = match (reading.lo, reading.hi) {
-                    (Some(lo), Some(hi)) if hi != lo => format!("{lo}–{hi}"),
-                    (Some(lo), None) => format!("≥{lo}"),
-                    (Some(lo), Some(_)) => lo.to_string(),
-                    _ => "—".into(),
-                };
-                ui.text_wrapped(format!("{rate} {}", tr("bolsas/h", "bags/h")));
-                if reading.lo.is_none() { ui.text_wrapped(tr("Ritmo aún no disponible", "Rate not available yet")); }
-                if !view.source_fresh() { ui.text_wrapped(tr("Último ritmo registrado", "Last recorded rate")); }
-                // Only when it reports a problem (`FarmingView::show_reading_age`).
-                if view.show_reading_age() {
-                    ui.text_wrapped(view.age.map_or_else(
-                        || tr("Sin lectura", "No reading").to_string(),
-                        |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),
-                    ));
+                // One line, always (`FarmingView::rate_line`): what there is to say about the
+                // rate is its colour and its tooltip, never a line that comes and goes.
+                if let Some(rate) = view.rate_line(english) {
+                    if rate.warning { text_colored_wrapped(ui, ORANGE, &rate.text); } else { ui.text_wrapped(&rate.text); }
+                    if !rate.notes.is_empty() && ui.is_item_hovered() { ui.tooltip_text(rate.notes.join("\n")); }
                 }
                 price_block(ui, &shared.price_view(std::time::Instant::now()), english);
                 ui.separator();

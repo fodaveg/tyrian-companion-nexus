@@ -175,9 +175,15 @@ fn side(label: &str, unit: Option<i32>, stack: Option<i32>) -> String {
     }
 }
 
-/// The lines of the price block, empty when nothing must be painted: no capability, no frame
-/// yet, transport of 15 s or more, disconnected, or `idle`. The quote's age is shown only on
-/// `stale`.
+/// How many lines the price block takes whenever it is painted: a header and the two sides.
+pub const PANEL_LINES: usize = 3;
+
+/// The lines of the price block: none without a capability (which includes disconnected) or
+/// on `idle`, and [`PANEL_LINES`] in every other state, so the rest of the panel never moves
+/// when the price changes state. The header carries the state and the two sides stay in place
+/// with `—` when there is no figure to show: no frame yet, `pending`, `stale`, no quote, or a
+/// transport of 15 s or more, whose old figures are not painted. The quote's age is shown only
+/// on `stale`, in the warning colour.
 pub fn panel_lines(view: &PriceView, english: bool) -> Vec<PriceLine> {
     let tr = |es: &str, en: &str| {
         if english {
@@ -187,45 +193,59 @@ pub fn panel_lines(view: &PriceView, english: bool) -> Vec<PriceLine> {
         }
     };
     let line = |text: String, warning: bool| PriceLine { text, warning };
-    let Some(reading) = view.reading.as_ref().filter(|_| view.capable && view.fresh) else {
+    // `idle` hides the block even after its transport expires: it is not a state the price
+    // leaves on its own, and a block that came back 15 s later would be a jump.
+    let idle = view.reading.as_ref().is_some_and(|reading| reading.st == PriceStatus::Idle);
+    if !view.capable || idle {
         return Vec::new();
-    };
-    match reading.st {
-        PriceStatus::Idle => Vec::new(),
-        PriceStatus::Pending => vec![line(
-            tr("Saco: precio aún sin leer", "Bag: price not read yet"),
+    }
+    // Only a reading whose transport is still fresh says anything about the price now.
+    let reading = view.reading.as_ref().filter(|_| view.fresh);
+    let figures = reading.filter(|reading| reading.st == PriceStatus::Ok);
+    let header = match reading.map(|reading| reading.st) {
+        None | Some(PriceStatus::Pending | PriceStatus::Idle) => line(
+            tr("Saco · precio aún sin leer", "Bag · price not read yet"),
             false,
-        )],
-        PriceStatus::Stale => {
-            let text = match view.age.or(reading.age.map(|age| age as u64)) {
+        ),
+        Some(PriceStatus::Stale) => {
+            let text = match view.age.or(reading.and_then(|reading| reading.age).map(|age| age as u64)) {
                 Some(age) => {
                     let minutes = age / 60;
                     if english {
-                        format!("Bag: price expired ({minutes} min ago)")
+                        format!("Bag · price expired ({minutes} min ago)")
                     } else {
-                        format!("Saco: precio caducado (hace {minutes} min)")
+                        format!("Saco · precio caducado (hace {minutes} min)")
                     }
                 }
-                None => tr("Saco: precio caducado", "Bag: price expired"),
+                None => tr("Saco · precio caducado", "Bag · price expired"),
             };
-            vec![line(text, true)]
+            line(text, true)
         }
-        PriceStatus::Ok if reading.sell.is_none() && reading.list.is_none() => {
-            vec![line(tr("Saco: sin cotización", "Bag: no quote"), false)]
+        Some(PriceStatus::Ok) if figures.is_some_and(|reading| reading.sell.is_none() && reading.list.is_none()) => {
+            line(tr("Saco · sin cotización", "Bag · no quote"), false)
         }
-        // The contract's full labels are "Pedido más alto" / "Oferta más baja" ("Highest buy
-        // order" / "Lowest sell offer"). With the amounts after them they run to 40 characters,
-        // past what the panel holds on one line, so its own short forms are used.
-        PriceStatus::Ok => vec![
-            line(tr("Saco · precio del bazar", "Bag · trading post price"), false),
-            line(
-                side(&tr("Pedido", "Buy order"), reading.sell, reading.sell_stack),
-                false,
+        Some(PriceStatus::Ok) => line(tr("Saco · precio del bazar", "Bag · trading post price"), false),
+    };
+    // The contract's full labels are "Pedido más alto" / "Oferta más baja" ("Highest buy
+    // order" / "Lowest sell offer"). With the amounts after them they run to 40 characters,
+    // past what the panel holds on one line, so its own short forms are used.
+    vec![
+        header,
+        line(
+            side(
+                &tr("Pedido", "Buy order"),
+                figures.and_then(|reading| reading.sell),
+                figures.and_then(|reading| reading.sell_stack),
             ),
-            line(
-                side(&tr("Oferta", "Sell offer"), reading.list, reading.list_stack),
-                false,
+            false,
+        ),
+        line(
+            side(
+                &tr("Oferta", "Sell offer"),
+                figures.and_then(|reading| reading.list),
+                figures.and_then(|reading| reading.list_stack),
             ),
-        ],
-    }
+            false,
+        ),
+    ]
 }

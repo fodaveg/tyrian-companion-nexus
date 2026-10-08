@@ -99,6 +99,17 @@ pub struct FarmingView {
     pub slot_age: Option<u64>,
 }
 
+/// The one painted line of the rate block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLine {
+    /// `480–560 bolsas/h`, `≥480 bolsas/h`, `480 bolsas/h` or `— bolsas/h`.
+    pub text: String,
+    /// Painted in the warning colour: there is at least one note.
+    pub warning: bool,
+    /// What the line's tooltip says, one entry per line; empty when there is nothing to say.
+    pub notes: Vec<String>,
+}
+
 impl FarmingView {
     /// Source age is independent of transport refreshes. Exact age 5 is already stale.
     pub fn source_fresh(&self) -> bool {
@@ -114,6 +125,47 @@ impl FarmingView {
         let Some(reading) = self.reading.as_ref() else { return false };
         matches!(reading.phase, Phase::Starting | Phase::Active | Phase::Stopping | Phase::Provisional | Phase::Error)
             && (!self.fresh || reading.err.is_some() || self.age.is_none_or(|age| age >= READING_AGE_NOTICE))
+    }
+
+    /// The rate block of the panel: always exactly one line, `None` only without any reading
+    /// (the panel paints another layout then).
+    ///
+    /// "Rate not available yet", "Last recorded rate" and "Last reading ago Xs" / "No reading"
+    /// used to be lines of their own under the rate, so the rest of the window jumped every
+    /// time one came or went. They are `notes` now: they colour the line and are its tooltip.
+    ///
+    /// "Last recorded rate" no longer follows [`Self::source_fresh`]. The host sends a frame
+    /// every 5 s and `age` keeps ticking locally in between, so with that 5 s threshold a frame
+    /// that arrives with `age` 1 is stale for the last second of every cycle, and one with
+    /// `age` 0 for as long as the next frame is late: the note came and went in normal
+    /// measurement. It uses [`READING_AGE_NOTICE`], as the reading's age already did.
+    pub fn rate_line(&self, english: bool) -> Option<RateLine> {
+        let reading = self.reading.as_ref()?;
+        let tr = |es: &'static str, en: &'static str| if english { en } else { es };
+        let rate = match (reading.lo, reading.hi) {
+            (Some(lo), Some(hi)) if hi != lo => format!("{lo}–{hi}"),
+            (Some(lo), None) => format!("≥{lo}"),
+            (Some(lo), Some(_)) => lo.to_string(),
+            _ => "—".into(),
+        };
+        let mut notes = Vec::new();
+        if reading.lo.is_none() {
+            notes.push(tr("Ritmo aún no disponible", "Rate not available yet").to_string());
+        }
+        if !self.fresh || self.age.is_none_or(|age| age >= READING_AGE_NOTICE) {
+            notes.push(tr("Último ritmo registrado", "Last recorded rate").to_string());
+        }
+        if self.show_reading_age() {
+            notes.push(self.age.map_or_else(
+                || tr("Sin lectura", "No reading").to_string(),
+                |age| format!("{} {age}s", tr("Última lectura hace", "Last reading ago:")),
+            ));
+        }
+        Some(RateLine {
+            text: format!("{rate} {}", tr("bolsas/h", "bags/h")),
+            warning: !notes.is_empty(),
+            notes,
+        })
     }
 
     /// Bags depend on a fresh observation; duration is the host's declared countdown and
