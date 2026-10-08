@@ -4,9 +4,11 @@
 //! game function, input, write or thread suspension is used. Called only by the background
 //! bridge worker after live1 negotiation, at most once per second; render does no memory reads.
 //!
-//! One cycle reads the owned inventory and then the wallet, from the same verified build and
-//! context and before the same deadline. The wallet has its own smaller read budget and can
-//! only fail on its own: an inventory sample never depends on it.
+//! One cycle reads the owned inventory, then the wallet, then the bag slots and last the Magic
+//! Find, from the same verified build and context and before the same deadline. Each of the
+//! last three has its own smaller read budget and can only fail on its own: an inventory
+//! sample never depends on them, and they do not depend on each other. Magic Find goes last
+//! because it is the largest; if the deadline cuts it, only it loses coverage for that cycle.
 
 use std::collections::BTreeSet;
 use std::ffi::{c_void, OsString};
@@ -16,9 +18,14 @@ use std::os::windows::ffi::OsStringExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
 };
+use tyrian_companion_nexus_core::magic_find::{
+    self, MagicFind, MagicFindCoverage, MagicFindProfile,
+};
+use tyrian_companion_nexus_core::passive::Uncovered;
 use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
@@ -106,6 +113,9 @@ struct NativeReader {
     /// The wallet's static guards, checked once for this verified build: `Some` holds the
     /// proof, `None` records bytes that differ. A failed copy is not recorded and is retried.
     wallet: OnceLock<Option<WalletProfile>>,
+    /// The same once-per-build verdict for the bag and Magic Find guards.
+    bags: OnceLock<Option<BagProfile>>,
+    magic_find: OnceLock<Option<MagicFindProfile>>,
 }
 static READER: OnceLock<Result<NativeReader, ReadError>> = OnceLock::new();
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
@@ -117,6 +127,12 @@ static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     wallet: WalletCoverage::NotRead,
     wallet_bytes: 0,
     wallet_reads: 0,
+    bags: BagCoverage::NotRead,
+    bag_bytes: 0,
+    bag_reads: 0,
+    magic_find: MagicFindCoverage::NotRead,
+    magic_find_bytes: 0,
+    magic_find_reads: 0,
 });
 pub fn diagnostics() -> Diagnostics {
     *DIAGNOSTICS.lock().unwrap_or_else(|p| p.into_inner())
@@ -184,7 +200,43 @@ impl NativeReader {
             profile,
             query,
             wallet: OnceLock::new(),
+            bags: OnceLock::new(),
+            magic_find: OnceLock::new(),
         })
+    }
+    /// The bag slots of the context the inventory was just read from, guards verified once.
+    fn bags<M: Memory>(
+        &self,
+        reader: &mut Reader<M>,
+        context: u64,
+    ) -> Result<BagSlots, Uncovered> {
+        let verified = match self.bags.get() {
+            Some(verified) => verified,
+            None => match BagProfile::verified(reader, self.profile) {
+                Ok(profile) => self.bags.get_or_init(|| Some(profile)),
+                Err(Uncovered::Guard) => self.bags.get_or_init(|| None),
+                Err(error) => return Err(error),
+            },
+        };
+        let profile = verified.as_ref().ok_or(Uncovered::Guard)?;
+        bags::bag_slots(reader, profile, context).map(|(slots, _owner)| slots)
+    }
+    /// The Magic Find of the same context, guards verified once.
+    fn magic_find<M: Memory>(
+        &self,
+        reader: &mut Reader<M>,
+        context: u64,
+    ) -> Result<MagicFind, Uncovered> {
+        let verified = match self.magic_find.get() {
+            Some(verified) => verified,
+            None => match MagicFindProfile::verified(reader, self.profile) {
+                Ok(profile) => self.magic_find.get_or_init(|| Some(profile)),
+                Err(Uncovered::Guard) => self.magic_find.get_or_init(|| None),
+                Err(error) => return Err(error),
+            },
+        };
+        let profile = verified.as_ref().ok_or(Uncovered::Guard)?;
+        magic_find::magic_find(reader, profile, context).map(|(value, _owner)| value)
     }
     /// The wallet of the context the inventory was just read from. Its guards are verified on
     /// the first cycle that reaches this point; every later cycle reuses that verdict.
@@ -209,7 +261,12 @@ impl NativeReader {
         let mut reader = Reader::new(ProcessMemory::until(stop, deadline));
         let mut wallet_reader =
             Reader::bounded(ProcessMemory::until(stop, deadline), wallet::MAX_BYTES);
+        let mut bag_reader = Reader::bounded(ProcessMemory::until(stop, deadline), bags::MAX_BYTES);
+        let mut magic_find_reader =
+            Reader::bounded(ProcessMemory::until(stop, deadline), magic_find::MAX_BYTES);
         let mut coverage = WalletCoverage::NotRead;
+        let mut bag_coverage = BagCoverage::NotRead;
+        let mut magic_find_coverage = MagicFindCoverage::NotRead;
         let mut own = 0;
         let result = (|| {
             let pid = unsafe { GetCurrentProcessId() };
@@ -296,6 +353,16 @@ impl NativeReader {
                 }
                 Err(error) => coverage = WalletCoverage::Unavailable(error),
             }
+            // Reader output only: these two stay in the local diagnostics. Nothing here changes
+            // the sample that goes out, whose `free_slots` remains `None`.
+            bag_coverage = match self.bags(&mut bag_reader, context) {
+                Ok(slots) => BagCoverage::Read(slots),
+                Err(error) => BagCoverage::Unavailable(error),
+            };
+            magic_find_coverage = match self.magic_find(&mut magic_find_reader, context) {
+                Ok(value) => MagicFindCoverage::Read(value),
+                Err(error) => MagicFindCoverage::Unavailable(error),
+            };
             Ok(snapshot)
         })();
         publish(Diagnostics {
@@ -307,6 +374,12 @@ impl NativeReader {
             wallet: coverage,
             wallet_bytes: wallet_reader.bytes as u32,
             wallet_reads: wallet_reader.reads as u32,
+            bags: bag_coverage,
+            bag_bytes: bag_reader.bytes as u32,
+            bag_reads: bag_reader.reads as u32,
+            magic_find: magic_find_coverage,
+            magic_find_bytes: magic_find_reader.bytes as u32,
+            magic_find_reads: magic_find_reader.reads as u32,
         });
         result
     }

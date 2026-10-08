@@ -207,6 +207,64 @@ currency reaching zero, a first-ever currency, a character change or a map rehas
 not a run of this DLL: the wallet reader in the addon has only been exercised against
 fixtures.
 
+### Bag slots and Magic Find (reader output only)
+
+In the same cycle, after the wallet, the worker reads two more things from the same verified
+build and context. **Neither is on the wire or on the panel yet**: both end in the local
+reader diagnostics (`inventory::Diagnostics::bags` and `::magic_find`), each as a value or as
+"no coverage" with one closed reason. The inventory sample that goes out is unchanged, and its
+`free_slots` stays `None`.
+
+The game stores neither number. It computes both when it paints, from stored inputs, and the
+reader repeats that arithmetic without calling anything.
+
+**Bag slots** (`core/src/bags.rs`). The inventory window's `used/total` counter asks the
+inventory for three numbers: the total is the sum of the sizes of the equipped bags, the used
+count is the number of non-null positions of the inventory array, and free is their
+difference. The reader takes the bag slot count (`inventory+0x440`), the 16 bag pointers
+(`+0x380`) and, for each bag, item `+0x40` -> definition, definition `+0x30` -> bag payload,
+payload `+0x28` -> size; then the position array the inventory reader already walks
+(`+0xC8`, count `+0xD4`). It requires the `ItCliBag` class on every bag, definition type 3
+and a size of at most 32.
+
+The 512 positions the diagnostics line shows (16 bag slots of 32) are the reserved array, not
+the capacity: a bag of 20 leaves 12 of its 32 positions unusable. Free slots are therefore
+`capacity - occupied`, never `512 - occupied`. With the state of the morning of 8 October
+2026 (bags adding up to 414, 313 positions in use) that is 101.
+
+**Magic Find** (`core/src/magic_find.rs`). The hero panel shows
+`account luck level + modifiers pushed by the server + modifiers of the applied buffs`, capped.
+The reader returns that total, uncapped, with its three addends, so a drop can be attributed:
+luck (the account base the API also gives), pushed, and buffs (food, boosters, banners). It
+walks the character's buff table, checks every bucket's hash and every node's class, and
+evaluates only constant records. A counted record that needs a game mode, a trait or a state
+condition makes the whole value "no coverage", never a partial total.
+
+Both readers keep the rules of the other two: twelve and nineteen static ranges must match
+their audited SHA-256 digests, every vtable and dispatch slot on the route is compared (never
+called), every owner, header and table is read again after the copy, and a difference rejects
+the value. Two pointer rules are part of the profile: heap objects sit on 8 bytes and
+pointers into game content sit 4 past a multiple of 8. The second one is an observation of
+one game session, not something derived from code; if it stops holding, the reason shown is
+alignment and there is no value.
+
+Budgets are hard and separate: 8192 requested bytes per cycle for the bags and 65536 for
+Magic Find, guards included on the first cycle of a build. A pass that does not fit is no
+coverage. Cadence is the cycle's: once per second, in this order — inventory, wallet, bags,
+Magic Find — under the cycle's single 750 ms deadline, so a slow cycle costs Magic Find its
+coverage first and never the inventory sample. The external probe's whole passes on
+8 October asked for about 1.9 KiB (bags, without the position array, which adds 4 KiB for
+512 positions) and 29 to 33 KiB (Magic Find, with 81 and 92 buffs).
+
+The evidence is the external read-only probes of
+`tyrian-companion/docs/audit/loot-bag-capacity-probe` and `loot-mf-probe`, run on Fedora with
+GE-Proton11-7 on 8 October 2026: capacity 414 twice, equal to the inventory window, and Magic
+Find 333.0 and then 363.0, equal to the hero panel, the rise carried only by the buff addend.
+That is one account, one character, one game session and one executable. It does not cover a
+drop, a bag change, another launch of the game or native Windows. **It is not a run of this
+DLL**: these two readers have only been exercised against fixtures, and the used-positions
+count was not part of the probes at all.
+
 ## Layout
 
 This is a two-crate Cargo workspace, and that split is deliberate:
@@ -747,6 +805,11 @@ covers what does not need a running game:
   zero, empty and absent maps, wrong vtables and getters, a changed guard byte, malformed
   headers and pointers, failed copies, wrong hashes, unreachable and repeated keys, a count
   that disagrees, out-of-range keys and balances, concurrent changes and the wallet budget;
+- passive bag and Magic Find fixtures over synthetic guard contents (no byte of the game): the
+  live shapes of 8 October 2026 (414 capacity and 101 free; 333.0 and 363.0), covered zeroes,
+  every identity on both routes, the bag class and definition type, both pointer rules with
+  valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported
+  records, stacking, the boon rule, concurrent changes, failed copies and both budgets;
 - live1 canonical wire fixtures, 512/513 cap, old-host negotiation, epochs/baselines, context
   equality, ACK isolation, source/storage failure, partial samples and bounded chunks, and
   `currencies:listed` rows: their order and chunking, a failed wallet read next to a valid

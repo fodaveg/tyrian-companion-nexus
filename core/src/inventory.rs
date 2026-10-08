@@ -403,4 +403,13 @@ pub struct Diagnostics {
     pub wallet: WalletCoverage,
     pub wallet_bytes: u32,
     pub wallet_reads: u32,
+    /// Bag capacity and free slots of the same cycle, with their own budget and counters.
+    /// This is the reader's output: nothing puts it on the wire or on the panel yet.
+    pub bags: crate::bags::BagCoverage,
+    pub bag_bytes: u32,
+    pub bag_reads: u32,
+    /// Magic Find of the same cycle, with its own budget and counters. Reader output only.
+    pub magic_find: crate::magic_find::MagicFindCoverage,
+    pub magic_find_bytes: u32,
+    pub magic_find_reads: u32,
 }

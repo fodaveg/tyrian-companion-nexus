@@ -2,8 +2,9 @@
 //!
 //! Everything in this crate is plain, host-testable Rust: no `nexus`, no `windows`, no
 //! `nexus::alert::send_alert` call. That includes the TCP client loop itself (`client`), which
-//! reaches the game only through its `Host` trait, and the inventory and wallet interpreters
-//! (`inventory`, `wallet`), which read only through a `Memory` trait. The `addon` crate (a `cdylib`, Nexus's own
+//! reaches the game only through its `Host` trait, and the inventory, wallet, bag and Magic
+//! Find interpreters (`inventory`, `wallet`, `bags`, `magic_find`), which read only through a
+//! `Memory` trait. The `addon` crate (a `cdylib`, Nexus's own
 //! `nexus` bindings, and the `Host` that reads `NexusLink`/Mumble Link and paints alerts) is the
 //! other half, and only builds when targeting Windows — the `windows` crate it pulls in
 //! gates most of its own types behind `cfg(windows)`, so it cannot compile for this
@@ -14,6 +15,7 @@
 //! included, into the addon DLL. See `../README.md`.
 
 pub mod backoff;
+pub mod bags;
 pub mod client;
 pub mod framer;
 pub mod farming;
@@ -21,8 +23,10 @@ pub mod game_context;
 pub mod instance;
 pub mod inventory;
 pub mod live;
+pub mod magic_find;
 pub mod obsidian_launch;
 pub mod panel;
+pub mod passive;
 pub mod price;
 pub mod protocol;
 pub mod quick_access;
