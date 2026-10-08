@@ -334,8 +334,9 @@ fn paint_cell(ui: &Ui, draw: &DrawListMut<'_>, cell: &Cell, outlined: bool) {
 enum Icon {
     /// A triangle: down while the panel is open, right while it is folded.
     Fold { collapsed: bool },
-    /// A square: filled while the panel has its background, hollow while it does not.
-    Background { transparent: bool },
+    /// The usual contrast sign: a ring with its left half filled. The same in both states: the
+    /// panel itself shows whether it has its background, and the tooltip says what a click does.
+    Background,
     /// A cross.
     Close,
 }
@@ -357,7 +358,19 @@ fn icon_button(ui: &Ui, draw: &DrawListMut<'_>, id: &str, size: f32, icon: Icon,
         match icon {
             Icon::Fold { collapsed: false } => draw.add_triangle([left, top], [right, top], [(left + right) / 2.0, bottom], color).filled(true).build(),
             Icon::Fold { collapsed: true } => draw.add_triangle([left, top], [right, (top + bottom) / 2.0], [left, bottom], color).filled(true).build(),
-            Icon::Background { transparent } => draw.add_rect([left, top], [right, bottom], color).filled(!transparent).thickness(thickness).build(),
+            Icon::Background => {
+                // A little wider than the box of the other two, as a circle of the same box
+                // looks smaller than a triangle or a cross; on whole pixels so the edge of the
+                // filled half is sharp. The crate has no filled arc: the half is a filled
+                // circle clipped to the left of the centre.
+                let centre = [((left + right) / 2.0).round(), ((top + bottom) / 2.0).round()];
+                let radius = size * 0.23;
+                let reach = radius + thickness;
+                draw.with_clip_rect_intersect([centre[0] - reach, centre[1] - reach], [centre[0], centre[1] + reach], || {
+                    draw.add_circle(centre, radius, color).filled(true).build();
+                });
+                draw.add_circle(centre, radius, color).thickness(thickness).build();
+            }
             Icon::Close => {
                 draw.add_line([left, top], [right, bottom], color).thickness(thickness).build();
                 draw.add_line([left, bottom], [right, top], color).thickness(thickness).build();
@@ -464,7 +477,7 @@ pub fn farming_render(ui: &Ui) {
             }
             draw.add_text(title_at, ui.style_color(StyleColor::Text), title);
             ui.same_line_with_pos(origin + width - 2.0 * button - 8.0 * scale);
-            clicks.background = icon_button(ui, &draw, "##background", button, Icon::Background { transparent: windows.transparent },
+            clicks.background = icon_button(ui, &draw, "##background", button, Icon::Background,
                 if windows.transparent { tr("Poner el fondo del panel", "Give the panel its background") }
                 else { tr("Quitar el fondo del panel", "Remove the panel's background") }, outlined);
             ui.same_line();

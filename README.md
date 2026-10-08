@@ -610,7 +610,7 @@ a pending token edit. The host's font and DPI are retained.
 Since 0.8.0 the panel follows David's sketch of 8 Oct 2026 and has a fixed shape:
 
 ```
-▾ Tyrian · Laberinto        ▪ ×
+▾ Tyrian · Laberinto        ◐ ×
 ────────────────────────────────
 bolsas          stack
 143             7g 7s 62c
@@ -731,9 +731,12 @@ keeps what the native one had and adds one button:
 
 - the triangle folds the panel down to its bar, and unfolds it;
 - drag the bar, or any empty spot of the panel, to move it;
-- the square removes the window's background and leaves the text, which then gets a dark
-  outline so it stays readable over the game; the square is filled while the background is
-  there and hollow while it is not. Options has the same switch as a checkbox;
+- the contrast sign, a ring with its left half filled, removes the window's background and
+  leaves the text, which then gets a dark outline so it stays readable over the game; a second
+  click puts the background back. The sign is the same in both states: the panel itself shows
+  which one it is in, and the tooltip says what a click does. Options has the same switch as a
+  checkbox. Until 0.8.0 this button was a square, which between the fold triangle and the
+  cross read as "stop";
 - the cross hides the panel until it is re-enabled in Options or from the quick access bar.
 
 Folded and background are saved in `settings.json`, like the panel's visibility. The three
