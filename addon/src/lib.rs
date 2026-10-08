@@ -144,6 +144,9 @@ fn unload() {
     if let Some(handle) = handle {
         handle.stop();
     }
+    // The worker has ended: if it left the executable half hashed, its file and its hash
+    // object are closed here, as nothing drops a static when the DLL goes.
+    inventory::release_executable();
 }
 
 /// Watches the game window's messages for the one thing this addon needs from them: that the

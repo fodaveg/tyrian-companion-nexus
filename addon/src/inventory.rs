@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots};
-use tyrian_companion_nexus_core::executable::{self, Step};
+use tyrian_companion_nexus_core::executable::{self, Build, HashedFile, Hashing, Stamp, Step};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
 };
@@ -34,12 +34,12 @@ use tyrian_companion_nexus_core::magic_find::{
 };
 use tyrian_companion_nexus_core::passive::Uncovered;
 use tyrian_companion_nexus_core::perf::{CycleTimes, ReaderCounters};
-use tyrian_companion_nexus_core::verdict::Verdict;
+use tyrian_companion_nexus_core::verdict::{Attempt, Verdict};
 use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
 use windows::core::{s, w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, HMODULE};
 use windows::Win32::Security::Cryptography::*;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -152,32 +152,158 @@ struct NativeReader {
     magic_find: OnceLock<Option<MagicFindProfile>>,
 }
 
-/// How long after a verification of the executable that could not be finished the next one is
-/// tried. An attempt hashes the whole file on the bridge worker, for up to ten seconds in which
-/// that thread sends no heartbeat, so it is not repeated on every cycle. What a first attempt
-/// on a cold disk managed to read is in the system's cache for the next one.
+/// How long after a verification of the executable that the system failed (the file could not
+/// be opened or read, a copy of the image failed) the next one is tried. Not on every cycle: a
+/// failure of that kind does not go away in a second.
 const VERIFY_RETRY: Duration = Duration::from_secs(30);
 
-/// Why the executable is not verified.
-enum Unverified {
-    /// Decided by the file or by its loaded image (`executable`): its size cannot be the
-    /// certified build's, its SHA-256 is not, or its header is not. Another build, for as long
-    /// as this process lives.
-    OtherBuild,
-    /// The verification could not be finished: the system failed to open, read or copy
-    /// something, or the time ran out. Not an answer about the build.
-    Failed(ReadError),
+/// The system's SHA-256: its provider and one hash object over it. Closed on every path.
+struct HashHandles {
+    algorithm: BCRYPT_ALG_HANDLE,
+    hash: BCRYPT_HASH_HANDLE,
 }
-impl From<ReadError> for Unverified {
-    fn from(error: ReadError) -> Self {
-        Self::Failed(error)
+impl Drop for HashHandles {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hash.0.is_null() {
+                let _ = BCryptDestroyHash(self.hash);
+            }
+            if !self.algorithm.0.is_null() {
+                let _ = BCryptCloseAlgorithmProvider(self.algorithm, 0);
+            }
+        }
+    }
+}
+// Safety: the two CNG handles are provider objects of the process, not of the thread that
+// made them. They are only used under `CHECK`'s lock, by one thread at a time, and that is
+// the bridge worker except for the release on unload, which runs after the worker has ended.
+unsafe impl Send for HashHandles {}
+
+/// The executable's own file on disk and the hash over it, kept from one cycle to the next
+/// while the hash is under way. Nothing of the running game is read here.
+struct Executable {
+    file: File,
+    handles: HashHandles,
+}
+impl Executable {
+    /// `None` when the system fails to name the file, open it or give a hash object.
+    fn open(module: HMODULE) -> Option<Self> {
+        let mut path = [0u16; 32768];
+        // Safety: OS module metadata, copied into a buffer of this size.
+        let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+        if length == 0 || length >= path.len() {
+            return None;
+        }
+        let file = File::open(OsString::from_wide(&path[..length])).ok()?;
+        let mut handles = HashHandles {
+            algorithm: BCRYPT_ALG_HANDLE::default(),
+            hash: BCRYPT_HASH_HANDLE::default(),
+        };
+        if unsafe {
+            BCryptOpenAlgorithmProvider(
+                &mut handles.algorithm,
+                BCRYPT_SHA256_ALGORITHM,
+                PCWSTR::null(),
+                BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+            )
+        }
+        .0 < 0
+            || unsafe { BCryptCreateHash(handles.algorithm, &mut handles.hash, None, None, 0) }.0
+                < 0
+        {
+            return None;
+        }
+        Some(Self { file, handles })
+    }
+}
+impl HashedFile for Executable {
+    fn stamp(&mut self) -> Option<Stamp> {
+        let metadata = self.file.metadata().ok()?;
+        Some(Stamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+    fn read(&mut self, buffer: &mut [u8]) -> Option<usize> {
+        self.file.read(buffer).ok()
+    }
+    fn update(&mut self, bytes: &[u8]) -> bool {
+        unsafe { BCryptHashData(self.handles.hash, bytes, 0) }.0 >= 0
+    }
+    fn finish(&mut self) -> Option<[u8; 32]> {
+        let mut digest = [0u8; 32];
+        (unsafe { BCryptFinishHash(self.handles.hash, &mut digest, 0) }.0 >= 0).then_some(digest)
     }
 }
 
-/// The verified build's reader, or `None` for an executable whose hash was computed and is
-/// another build's: the two final answers, kept for the whole load. A verification that could
-/// not be finished is not kept: it is tried again [`VERIFY_RETRY`] later.
+/// How far the verification of the executable has got. The hash is done a slice on each cycle
+/// (`executable::SLICE`), so the file and the hash object wait here in between; once the file
+/// is known to be the certified build it is not hashed again, whatever fails after that.
+enum Check {
+    Unstarted,
+    Hashing(Hashing<Executable>),
+    Certified,
+}
+static CHECK: Mutex<Check> = Mutex::new(Check::Unstarted);
+
+/// Closes the executable's file and the hash object if a hash was left half done. For the
+/// unload, once the worker has ended: a static is not dropped when the DLL goes.
+pub fn release_executable() {
+    let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
+    if matches!(*check, Check::Hashing(_)) {
+        *check = Check::Unstarted;
+    }
+}
+
+/// The verified build's reader, or `None` for an executable that is another build by what the
+/// file or its loaded image says: the two final answers, kept for the whole load. A
+/// verification the system failed is not kept: it is tried again [`VERIFY_RETRY`] later.
 static READER: Verdict<Option<NativeReader>, ReadError> = Verdict::new(VERIFY_RETRY);
+
+/// One step of verifying the executable: at most `executable::SLICE` of hashing, and once the
+/// file is the certified build's, the check of its loaded image.
+fn verify(stop: &AtomicBool) -> Attempt<Option<NativeReader>, ReadError> {
+    // What the source is told while there is no verdict: a reading that failed, which it
+    // tries again a second later. `UnsupportedBuild` is for the verdict alone, as it stops the
+    // source until the game context changes.
+    const NOT_YET: ReadError = ReadError::ReadFailed;
+    // Safety: OS module metadata; no game function is resolved or called.
+    let Ok(module) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else {
+        return Attempt::Failed(NOT_YET);
+    };
+    let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
+    if matches!(*check, Check::Unstarted) {
+        let Some(file) = Executable::open(module) else {
+            return Attempt::Failed(NOT_YET);
+        };
+        match Hashing::start(file) {
+            Ok(hashing) => *check = Check::Hashing(hashing),
+            // Its size alone: not the certified build, and no byte of it was read.
+            Err(Step::Decided(_)) => return Attempt::Settled(None),
+            Err(_) => return Attempt::Failed(NOT_YET),
+        }
+    }
+    if let Check::Hashing(hashing) = &mut *check {
+        let until = Instant::now() + executable::SLICE;
+        let step = hashing.advance(|| stop.load(Ordering::Relaxed) || Instant::now() >= until);
+        match step {
+            Step::Unfinished => return Attempt::Unfinished(NOT_YET),
+            Step::Decided(Build::Certified) => *check = Check::Certified,
+            Step::Decided(Build::Other) => {
+                *check = Check::Unstarted;
+                return Attempt::Settled(None);
+            }
+            Step::Failed => {
+                *check = Check::Unstarted;
+                return Attempt::Failed(NOT_YET);
+            }
+        }
+    }
+    match NativeReader::of_image(module.0 as u64, stop) {
+        Step::Decided(reader) => Attempt::Settled(reader),
+        _ => Attempt::Failed(NOT_YET),
+    }
+}
 static DIAGNOSTICS: Mutex<Diagnostics> = Mutex::new(Diagnostics {
     threads: 0,
     bytes: 0,
@@ -210,71 +336,52 @@ fn publish(d: Diagnostics) {
 /// Lazily verify the executable on the worker. Unknown build never reaches inventory offsets.
 /// One sample owns its entire read budget and returns no pointers over the bridge.
 ///
-/// Only a final answer of that verification is kept for the load. One that could not be
-/// finished comes back as `ReadFailed`, not as `UnsupportedBuild`: the build is not known to
-/// be another, and `UnsupportedBuild` stops the source until the game context changes, which
-/// would leave the next attempt waiting for a change of map.
+/// The verification takes several cycles: the executable is hashed a quarter of a second on
+/// each, so that this thread, which also keeps the connection alive, is never held by it.
+/// Until there is a verdict this comes back as `ReadFailed`, not as `UnsupportedBuild`: the
+/// build is not known to be another, and `UnsupportedBuild` stops the source until the game
+/// context changes. Only a final answer is kept for the load (`verify`).
 pub fn sample(stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
     if stop.load(Ordering::Relaxed) {
         return Err(ReadError::ReadFailed);
     }
     publish(Diagnostics::default());
-    let native = READER.get_or_try(Instant::now, || match NativeReader::new(stop) {
-        Ok(reader) => Ok(Some(reader)),
-        Err(Unverified::OtherBuild) => Ok(None),
-        Err(Unverified::Failed(ReadError::UnsupportedBuild)) => Err(ReadError::ReadFailed),
-        Err(Unverified::Failed(error)) => Err(error),
-    })?;
+    let native = READER.get_or_try(Instant::now, || verify(stop))?;
     native
         .as_ref()
         .ok_or(ReadError::UnsupportedBuild)?
         .sample(stop)
 }
 impl NativeReader {
-    fn new(stop: &AtomicBool) -> Result<Self, Unverified> {
-        // Safety: these calls return OS module metadata; no game function is resolved or called.
-        let module =
-            unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|_| ReadError::UnsupportedBuild)?;
-        let mut path = [0u16; 32768];
-        let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
-        if length == 0 || length >= path.len() {
-            return Err(ReadError::UnsupportedBuild.into());
-        }
-        let file = File::open(OsString::from_wide(&path[..length]))
-            .map_err(|_| ReadError::UnsupportedBuild)?;
-        // What the file itself decides is final: a size that cannot be the certified build's,
-        // a digest that is not its, and below a loaded image that is not what it loads as.
-        let size = file.metadata().map_err(|_| ReadError::UnsupportedBuild)?.len();
-        if !executable::size_in_range(size) {
-            return Err(Unverified::OtherBuild);
-        }
-        let digest = executable_hash(file, stop)?;
-        if digest != inventory::BUILD_SHA256 {
-            return Err(Unverified::OtherBuild);
-        }
-        let base = module.0 as u64;
+    /// The reader for the image loaded at `base`, of an executable whose file is the certified
+    /// build's: `None` when the image is not what that build loads as, which is final.
+    fn of_image(base: u64, stop: &AtomicBool) -> Step<Option<Self>> {
         let profile =
             match executable::image_profile(&mut Reader::new(ProcessMemory::new(stop)), base) {
                 Step::Decided(Some(profile)) => profile,
-                Step::Decided(None) => return Err(Unverified::OtherBuild),
-                Step::Failed => return Err(ReadError::ReadFailed.into()),
+                Step::Decided(None) => return Step::Decided(None),
+                _ => return Step::Failed,
             };
-        let ntdll =
-            unsafe { GetModuleHandleW(w!("ntdll.dll")) }.map_err(|_| ReadError::ReadFailed)?;
-        let address = unsafe { GetProcAddress(ntdll, s!("NtQueryInformationThread")) }
-            .ok_or(ReadError::ReadFailed)?;
+        // Safety: OS module metadata; no game function is resolved or called.
+        let Ok(ntdll) = (unsafe { GetModuleHandleW(w!("ntdll.dll")) }) else {
+            return Step::Failed;
+        };
+        let Some(address) = (unsafe { GetProcAddress(ntdll, s!("NtQueryInformationThread")) })
+        else {
+            return Step::Failed;
+        };
         // Safety: Windows exports this function with the NTAPI ThreadBasicInformation ABI.
         // We check returned size, process, thread, TEB self pointer on every result.
         let query = unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, QueryThread>(address)
         };
-        Ok(Self {
+        Step::Decided(Some(Self {
             profile,
             query,
             wallet: OnceLock::new(),
             bags: OnceLock::new(),
             magic_find: OnceLock::new(),
-        })
+        }))
     }
     /// The bag slots of the context the inventory was just read from, guards verified once.
     fn bags<M: Memory>(
@@ -498,78 +605,4 @@ impl NativeReader {
         });
         result
     }
-}
-
-/// SHA-256 through the OS already linked by `windows`; fixed memory and file-size limits.
-/// File size/mtime must remain stable during hashing. Handles close on every error path.
-fn executable_hash(mut file: File, stop: &AtomicBool) -> Result<String, ReadError> {
-    let before = file.metadata().map_err(|_| ReadError::UnsupportedBuild)?;
-    if !executable::size_in_range(before.len()) {
-        return Err(ReadError::UnsupportedBuild);
-    }
-    struct HashHandles {
-        algorithm: BCRYPT_ALG_HANDLE,
-        hash: BCRYPT_HASH_HANDLE,
-    }
-    impl Drop for HashHandles {
-        fn drop(&mut self) {
-            unsafe {
-                if !self.hash.0.is_null() {
-                    let _ = BCryptDestroyHash(self.hash);
-                }
-                if !self.algorithm.0.is_null() {
-                    let _ = BCryptCloseAlgorithmProvider(self.algorithm, 0);
-                }
-            }
-        }
-    }
-    let mut handles = HashHandles {
-        algorithm: BCRYPT_ALG_HANDLE::default(),
-        hash: BCRYPT_HASH_HANDLE::default(),
-    };
-    if unsafe {
-        BCryptOpenAlgorithmProvider(
-            &mut handles.algorithm,
-            BCRYPT_SHA256_ALGORITHM,
-            PCWSTR::null(),
-            BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
-        )
-    }
-    .0 < 0
-        || unsafe { BCryptCreateHash(handles.algorithm, &mut handles.hash, None, None, 0) }.0 < 0
-    {
-        return Err(ReadError::UnsupportedBuild);
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut buffer = [0u8; 65536];
-    let mut total = 0u64;
-    loop {
-        if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
-            return Err(ReadError::UnsupportedBuild);
-        }
-        let n = file
-            .read(&mut buffer)
-            .map_err(|_| ReadError::UnsupportedBuild)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > executable::MAX_BYTES
-            || unsafe { BCryptHashData(handles.hash, &buffer[..n], 0) }.0 < 0
-        {
-            return Err(ReadError::UnsupportedBuild);
-        }
-    }
-    let after = file.metadata().map_err(|_| ReadError::UnsupportedBuild)?;
-    if total != before.len()
-        || before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-    {
-        return Err(ReadError::UnsupportedBuild);
-    }
-    let mut digest = [0u8; 32];
-    if unsafe { BCryptFinishHash(handles.hash, &mut digest, 0) }.0 < 0 {
-        return Err(ReadError::UnsupportedBuild);
-    }
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }

@@ -123,16 +123,28 @@ No session pointer or PID is hardcoded. The currently certified executable is
 `27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c`, profile
 `owned-bags-v3`. All other builds are unavailable until separately certified.
 
-That verification runs on the first cycle and its answer is kept for the whole load only when
-it is final, which is whenever the file or its loaded image decides it: the certified build,
-or another one, by a size that cannot be the certified build's (no bytes, or more than
+That verification starts on the first cycle and its answer is kept for the whole load only
+when it is final, which is whenever the file or its loaded image decides it: the certified
+build, or another one, by a size that cannot be the certified build's (no bytes, or more than
 128 MiB), a hash that was computed and is not its, or a header in memory that is not its. A
-"no" of those is `unsupported_build` to the host and stops the source, as it always did. One
-that could not be finished, because hashing the executable did not fit its 10 seconds or the
-file could not be read, used to be kept as well, and the source then said "unsupported game
-build" until the addon was loaded again. It is now reported as a reading that failed
-("reading unavailable", `read_failed` to the host) and tried again 30 seconds later, not on
-every cycle. Which builds are accepted, and how the hash is computed, are unchanged.
+"no" of those is `unsupported_build` to the host and stops the source, as it always did.
+
+The hash is done a quarter of a second on each cycle (`executable::SLICE`), going on from
+where the cycle before left it, with the same calls to the system's SHA-256. It used to be
+done in one go, with 10 seconds for it, on the thread that keeps the connection to the plugin
+alive: on a cold, slow disk that thread sent no heartbeat for as long as the hash took, which
+is longer than the plugin waits before it takes the connection for lost. Now the hash holds
+that thread for a quarter of a second at a time, and has no time limit of its own: a disk
+however slow gets its verdict, some cycles later. Until then the source reports a reading
+that failed ("reading unavailable", `read_failed` to the host), which stops nothing, and the
+first sample comes a few seconds later than it did.
+
+What the system fails to do is not a verdict: the file cannot be opened or read, it is
+written while it is hashed, or a copy of the header fails. That used to be kept as
+"unsupported game build" until the addon was loaded again. It is reported as a reading that
+failed too, and tried again 30 seconds later, from the start if it happened during the hash
+and without hashing again if the file was already known to be the certified build's. Which
+builds are accepted, and the hash they are told by, are unchanged.
 
 Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
 including coherence rechecks and TEB discovery. The Windows adapter also checks a
@@ -1077,6 +1089,13 @@ covers what does not need a running game:
   same memory as a panel computed on every frame, frame by frame through a whole session, a
   folded panel leaving the memory a painted one would, and every setter of what the panel
   paints moving the counter the cache looks at;
+- the check of the executable (`core/src/executable.rs`, `core/src/verdict.rs`), over a file,
+  a hash and a memory handed in: a size out of range decided without reading a byte, the
+  digest deciding the build, the hash going on across slices with every byte in it once, a
+  header that is not the certified one decided for good, everything the system can fail at
+  deciding nothing, and a verdict kept only when final, an unfinished slice neither kept nor
+  waited for and a failure tried again after its wait. The adapter that opens the real file
+  and calls the system's SHA-256 is not tested;
 - the counters of the reader diagnostics (`core/src/perf.rs`): last and longest time of a
   pass, captures counted by how they ended with a copy refused by the clock kept apart from
   one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and

@@ -6,12 +6,26 @@
 //! not be opened or read. Keeping whichever came first for the whole load turned a slow disk on
 //! the first attempt into "unsupported build" until the addon was loaded again.
 //!
-//! [`Verdict`] keeps a final answer for ever and an unfinished attempt only for a wait, after
-//! which the next call tries again. It reads no clock of its own: the caller hands one in,
-//! which is what lets the tests move time.
+//! [`Verdict`] keeps a final answer for ever and a failed attempt only for a wait, after which
+//! the next call tries again. An attempt may also do its work a bounded part at a time and say
+//! it is not finished: that is neither kept nor waited for, and the next call goes on with it.
+//! It reads no clock of its own: the caller hands one in, which is what lets the tests move
+//! time.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
+
+/// How one attempt at a verdict ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt<T, E> {
+    /// A final verdict, whatever it says.
+    Settled(T),
+    /// Not there yet, by design: the attempt does a bounded part of the work on each call so
+    /// that its caller is never held for long. The error is what to answer meanwhile.
+    Unfinished(E),
+    /// No verdict could be reached now. The error is what to answer until the next attempt.
+    Failed(E),
+}
 
 /// A final verdict reached at most once, and a failure to reach one that is tried again after
 /// a wait instead of on every call.
@@ -35,12 +49,12 @@ impl<T, E: Copy> Verdict<T, E> {
 
     /// The settled verdict, reaching for it with `attempt` when there is none yet.
     ///
-    /// `attempt` answers `Ok` with a verdict that is final, whatever it says, and `Err` when it
-    /// could not reach one. A final verdict is kept and `attempt` never runs again. An `Err` is
-    /// handed back as it is, and handed back again without running `attempt` until `wait` has
-    /// passed since that attempt ended: `clock` is read again after it, as an attempt can take
-    /// long, and the wait is between attempts.
-    pub fn get_or_try(&self, clock: impl Fn() -> Instant, attempt: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+    /// A [`Attempt::Settled`] verdict is kept and `attempt` never runs again. An
+    /// [`Attempt::Unfinished`] one is work left half done on purpose: its error is handed back
+    /// and the next call goes on with it at once. An [`Attempt::Failed`] one is handed back
+    /// as it is, and handed back again without running `attempt` until `wait` has passed since
+    /// that attempt ended: `clock` is read again after it, and the wait is between attempts.
+    pub fn get_or_try(&self, clock: impl Fn() -> Instant, attempt: impl FnOnce() -> Attempt<T, E>) -> Result<&T, E> {
         if let Some(settled) = self.settled.get() {
             return Ok(settled);
         }
@@ -55,11 +69,15 @@ impl<T, E: Copy> Verdict<T, E> {
             }
         }
         match attempt() {
-            Ok(verdict) => {
+            Attempt::Settled(verdict) => {
                 *failed = None;
                 Ok(self.settled.get_or_init(|| verdict))
             }
-            Err(error) => {
+            Attempt::Unfinished(error) => {
+                *failed = None;
+                Err(error)
+            }
+            Attempt::Failed(error) => {
                 *failed = Some((clock(), error));
                 Err(error)
             }
@@ -100,8 +118,17 @@ mod tests {
             self.asking_for(Duration::ZERO, outcome)
         }
 
-        /// One call whose attempt, if it runs, takes `takes` of the clock.
+        /// One call whose attempt, if it runs, takes `takes` of the clock and ends for good:
+        /// with a verdict, or without one.
         fn asking_for(&self, takes: Duration, outcome: Result<Build, TimedOut>) -> Result<Build, TimedOut> {
+            self.attempting(takes, match outcome {
+                Ok(build) => Attempt::Settled(build),
+                Err(error) => Attempt::Failed(error),
+            })
+        }
+
+        /// One call whose attempt, if it runs, takes `takes` of the clock and ends as `outcome`.
+        fn attempting(&self, takes: Duration, outcome: Attempt<Build, TimedOut>) -> Result<Build, TimedOut> {
             self.verdict
                 .get_or_try(
                     || self.now.get(),
@@ -113,6 +140,44 @@ mod tests {
                 )
                 .copied()
         }
+    }
+
+    /// The executable is hashed a slice on each call, so that the caller, which also keeps a
+    /// connection alive, is never held for long. A slice that leaves work to do is neither a
+    /// verdict nor a failure: nothing is kept, and nothing is waited for.
+    #[test]
+    fn an_unfinished_attempt_goes_on_at_the_next_call_without_a_wait() {
+        let follow = Follow::new();
+        let slice = Duration::from_millis(250);
+        for call in 1..=5 {
+            assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+            assert_eq!(follow.attempts.get(), call, "every call does its slice");
+            follow.after(Duration::from_secs(1));
+        }
+        // What the last slice reaches is the verdict, and it is kept.
+        assert_eq!(follow.attempting(slice, Attempt::Settled(Some("reader"))), Ok(Some("reader")));
+        assert_eq!(follow.attempts.get(), 6);
+        assert_eq!(follow.attempting(slice, Attempt::Unfinished(TimedOut)), Ok(Some("reader")));
+        assert_eq!(follow.attempts.get(), 6);
+    }
+
+    #[test]
+    fn a_failure_among_the_slices_is_waited_for_and_the_work_starts_again_after_it() {
+        let follow = Follow::new();
+        assert_eq!(follow.attempting(Duration::ZERO, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+        // The file cannot be read any more: that is a failure, and it is not tried on every call.
+        assert_eq!(follow.attempting(Duration::ZERO, Attempt::Failed(TimedOut)), Err(TimedOut));
+        assert_eq!(follow.attempts.get(), 2);
+        follow.after(WAIT - Duration::from_millis(1));
+        assert_eq!(follow.attempting(Duration::ZERO, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+        assert_eq!(follow.attempts.get(), 2, "still waiting");
+        follow.after(Duration::from_millis(1));
+        // After the wait the slices go on one per call again.
+        for call in 3..=5 {
+            assert_eq!(follow.attempting(Duration::ZERO, Attempt::Unfinished(TimedOut)), Err(TimedOut));
+            assert_eq!(follow.attempts.get(), call);
+        }
+        assert_eq!(follow.attempting(Duration::ZERO, Attempt::Settled(None)), Ok(None), "another build, for good");
     }
 
     #[test]
