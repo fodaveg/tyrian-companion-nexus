@@ -825,7 +825,7 @@ fn source_conflict_is_retried_on_the_same_connection_without_a_context_change() 
         );
     };
     assert_ne!(first, second);
-    assert!(host.calls.load(Ordering::Relaxed) >= 1);
+    assert_eq!(host.calls.load(Ordering::Relaxed), 2);
     p.ready(&second);
     p.sample(&second, 0, 7);
     p.ack(&second, 0, "stored");

@@ -3,6 +3,10 @@
 //! Addresses here are RVAs/field offsets from the 2026-10-06 proof, never session pointers.
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
+//!
+//! Not covered, and not claimed: a change of the game context from A to B and back to A entirely
+//! inside one pass (up to 750 ms), and one that leaves the state, the map and the character the
+//! same, which the context probe cannot tell from no change.
 
 use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};

@@ -94,7 +94,10 @@ and the panel's timing counters. The protocol with the plugin does not change an
 does the DLL's import table (257).
 
 Nothing of 0.8.2 has been seen inside the game. The known limit stays: a context that names
-one character while the memory belongs to another.
+one character while the memory belongs to another. Two more cases are not covered, and
+never were: a change from A to B and back to A entirely inside one pass (up to 750 ms), and
+a change that the context probe does not see because the state, the map and the character
+are the same after it. Neither is detected, and nothing here claims to detect them.
 
 After 0.8.2 (not released, not seen in the game): the addon reads the Magic Find through
 `magic_find_cached` (`CachedMagicFind`), which the owner accepted on 8 October 2026. The

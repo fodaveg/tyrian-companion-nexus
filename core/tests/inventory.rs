@@ -976,13 +976,14 @@ fn a_search_that_fails_leaves_nothing_kept() {
     let (_, old) = located_fixture();
     let start = Instant::now();
     let now = start + Duration::from_secs(1);
-    for (check_passes, kept) in [(false, true), (false, false)] {
+    // Kept and failing its check, or nothing kept (a check that passes never reaches a search).
+    for kept in [true, false] {
         let mut search = ContextSearch::new();
         if kept {
             search.found(old, start);
         }
         let mut cycle = Cycle::new(Err(ReadError::RootUnavailable));
-        cycle.thread_is_there = check_passes;
+        cycle.thread_is_there = false;
         assert_eq!(cycle.locate(&mut search, now), Err(ReadError::RootUnavailable));
         assert_eq!(search.stored(now), None, "kept: {kept}");
         // And the next cycle searches again, with nothing to check.
