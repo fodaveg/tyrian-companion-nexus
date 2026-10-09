@@ -755,8 +755,12 @@ and Nexus's input thread, for a quick access icon or its key. The settings are r
 their lock and the file is written after that lock is let go, so neither thread waits for
 the other's disk on it. Each save takes a number while it still holds the lock; one that
 reaches the file after a newer one writes nothing, and only one writes at a time, so two of
-them never share `settings.json.tmp`. A click in a window still writes the file on the frame
-of that click.
+them never share `settings.json.tmp`. Neither thread writes the file itself: a save is
+handed to a thread of the addon's own, which writes the saves one after the other in the
+order they were asked for, so a click does not wait for the disk on the frame that took it.
+When the addon unloads that thread writes what is still waiting before it ends, and a save
+asked for while it is not running (before it starts, after it ends, or if it could not be
+started) is written by whoever asked, so none is dropped.
 
 A save that fails used to go to the log and nowhere else, and the window looked as it does
 after one that worked. Options now says so in red above the port, in English and Spanish,

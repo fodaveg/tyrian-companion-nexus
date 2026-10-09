@@ -26,7 +26,7 @@ use tyrian_companion_nexus_core::perf::FrameTime;
 
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
 use tyrian_companion_nexus_core::protocol::{DEFAULT_PORT, TOKEN_REJECTED_STATUS};
-use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, SaveTicket, Settings};
+use tyrian_companion_nexus_core::settings::{self, SaveGuard, SaveRequest, SaveTicket, SaveWriter, Settings};
 use tyrian_companion_nexus_core::state::{self, Status};
 use tyrian_companion_nexus_core::token::{self, TokenRejection};
 
@@ -115,6 +115,25 @@ fn reserve(ui: &Ui, reserved: &mut Option<Reserved>, english: bool, scale: f32) 
 /// from replacing a `settings.json` that could not be loaded: only the Save button writes while
 /// it holds, and Options says so (`settings::SaveGuard`).
 static SAVE_GUARD: SaveGuard = SaveGuard::new();
+
+/// The thread that writes `settings.json`, so that no frame waits for the disk. Started in
+/// `load()` by [`start_saver`] and finished in `unload()` by [`stop_saver`], which writes
+/// whatever is still waiting first.
+static SAVER: SaveWriter = SaveWriter::new();
+
+/// Starts the thread that writes the settings. If it cannot start, saves are written by the
+/// frame or the input thread that asks, as before.
+pub fn start_saver() {
+    if let Err(error) = SAVER.start() {
+        log::error!("could not start the settings thread ({error}); settings are saved on the frame that asks");
+    }
+}
+
+/// Writes every save that is still waiting and ends the settings thread. Saves asked for after
+/// this are written by whoever asks.
+pub fn stop_saver() {
+    SAVER.finish();
+}
 
 /// `notice` is shown under the fields from the first frame: `load()` passes one when it removed
 /// an API key from `settings.json`. `unreadable` is `settings::Loaded::unreadable`: the file is
@@ -391,21 +410,25 @@ fn prepare_save(panel: &Pending, request: SaveRequest) -> PendingSave {
     }
 }
 
-/// Writes a save, with `PENDING` released: the write and the rename wait for the disk, and the
-/// other thread, the frame or Nexus's input one, must not wait for them on that lock. Two saves
-/// that cross are put in order by their tickets and never write at once (`SAVE_GUARD`).
+/// Hands a save to the settings thread (`SAVER`), with `PENDING` released, and returns: the
+/// write and the rename wait for the disk, and neither the frame nor Nexus's input thread
+/// waits for them, on that lock or otherwise. The writes go one after the other in the order
+/// they were handed in, and two that cross are put in order by their tickets and never write
+/// at once (`SAVE_GUARD`). Before `load()` starts the thread and after `unload()` has ended it
+/// the caller writes, so a save is never dropped.
 ///
 /// After a `settings.json` that could not be loaded, an automatic request writes nothing: the
 /// applied settings are then the defaults, with no token, and the file may still hold the
 /// user's. The change stays in memory for this load and Options says why.
 ///
 /// A save that fails goes to the log and is told in Options until one is written
-/// (`SaveGuard::failed`): the window that asked for it looks the same either way.
+/// (`SaveGuard::failed`): the window that asked for it looks the same either way, and it does
+/// not matter which thread made the write.
 fn write_settings(save: PendingSave) {
     match nexus::paths::get_addon_dir(ADDON_DIR_NAME) {
-        Ok(dir) => {
+        Ok(dir) => SAVER.submit(move || {
             if let Err(error) = SAVE_GUARD.save(&dir, &save.settings, save.request, save.ticket) { log::error!("failed to save settings: {error}"); }
-        }
+        }),
         Err(error) => {
             log::error!("failed to save settings: no addon directory ({error})");
             SAVE_GUARD.could_not_try(&save.settings, save.request, save.ticket);
@@ -420,8 +443,7 @@ fn translated<'a>(english: bool, spanish: &'a str, en: &'a str) -> &'a str {
 /// What a quick access icon (or the key the player assigned to it) does. Called from Nexus's
 /// input thread; only flips a window flag and, for the panel, saves the shared setting. The
 /// flag is flipped under `PENDING`, which every frame takes, and the file is written after it
-/// is let go: a frame that saves nothing does not wait for this thread's disk. A frame that
-/// saves, on a click, can: it waits on the guard's own lock for this write to end.
+/// is let go, by the settings thread: neither this thread nor any frame waits for the disk.
 pub fn activate_shortcut(shortcut: Shortcut) {
     let save = {
         let mut panel = pending().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -677,8 +699,7 @@ fn farming_frame(ui: &Ui, now: std::time::Instant) {
             if clicks.close { panel.windows.show_panel = false; }
             prepare_save(&panel, SaveRequest::Automatic)
         };
-        // Still this frame's own disk I/O, on the frame of the click; `PENDING` is not held
-        // through it any more, so the input thread does not wait for it.
+        // Handed to the settings thread: the frame of the click does not wait for the disk.
         write_settings(save);
     }
 }

@@ -174,8 +174,7 @@ pub fn load(dir: &Path) -> Loaded {
 /// The file is replaced whole or not at all: the new contents are written next to it, in
 /// `settings.json.tmp`, and renamed over it. A write cut short, by the game being killed or a
 /// full disk, then leaves the file of before instead of half of a new one that would not parse
-/// on the next load. It is not flushed to the disk first: this runs on the frame that took the
-/// click, and a power cut is not what it is for.
+/// on the next load. It is not flushed to the disk first: a power cut is not what it is for.
 pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let contents = serde_json::to_string_pretty(settings)
@@ -355,6 +354,91 @@ impl SaveGuard {
             line.unwritten = Some((ticket.0, settings.clone()));
         }
         self.failed.store(line.unwritten.is_some(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// One write for [`SaveWriter`] to make.
+type SaveJob = Box<dyn FnOnce() + Send>;
+
+/// A thread of its own for the writes, so the frame that took a click does not wait for the disk.
+///
+/// A save is asked for on the frame of a click, and the write and the rename wait for the disk:
+/// on a cold or busy one that is a stutter in the middle of the game's drawing. The frame builds
+/// the save (the settings, their [`SaveTicket`], the request) and hands the write to this thread
+/// with [`SaveWriter::submit`]; the thread makes the writes one after the other, in the order
+/// they were handed in. That order, and the tickets that [`SaveGuard`] puts in line, are what
+/// keep the newest settings from being overtaken, so the last value a click set is the last one
+/// written. A write that fails is told by the guard ([`SaveGuard::failed`]), not by who made it.
+///
+/// Nothing is lost on the way out: [`SaveWriter::finish`] takes every write that was handed in
+/// to the file, then ends the thread, which is what lets the addon be unloaded after it. And a
+/// save asked for while the thread is not running, before [`SaveWriter::start`] or after
+/// `finish`, is written by whoever asked, as it always was.
+pub struct SaveWriter {
+    running: std::sync::Mutex<Option<WriterThread>>,
+}
+
+struct WriterThread {
+    jobs: std::sync::mpsc::Sender<SaveJob>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl SaveWriter {
+    pub const fn new() -> Self {
+        Self { running: std::sync::Mutex::new(None) }
+    }
+
+    /// Starts the thread, unless it is running already. If it cannot be started the saves go on
+    /// being written by whoever asks, and the error says why.
+    pub fn start(&self) -> std::io::Result<()> {
+        let mut running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if running.is_some() {
+            return Ok(());
+        }
+        let (jobs, queue) = std::sync::mpsc::channel::<SaveJob>();
+        let thread = std::thread::Builder::new().name("tyrian-companion-nexus-settings".into()).spawn(move || {
+            // Ends when the sender is dropped, once everything that was handed in has been run.
+            for job in queue {
+                // A job that panics must not take the writes behind it with it.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            }
+        })?;
+        *running = Some(WriterThread { jobs, thread });
+        Ok(())
+    }
+
+    /// Has `job` run on the thread, after the ones handed in before it, without waiting for it.
+    /// With no thread running it runs here and now.
+    pub fn submit(&self, job: impl FnOnce() + Send + 'static) {
+        let job: SaveJob = Box::new(job);
+        let job = {
+            let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match running.as_ref() {
+                // `send` only fails if the thread is gone; the job comes back in the error.
+                Some(writer) => match writer.jobs.send(job) {
+                    Ok(()) => return,
+                    Err(failed) => failed.0,
+                },
+                None => job,
+            }
+        };
+        job();
+    }
+
+    /// Runs every write that was handed in, ends the thread and waits for it. Saves asked for
+    /// after this are written by whoever asks.
+    pub fn finish(&self) {
+        let writer = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        if let Some(WriterThread { jobs, thread }) = writer {
+            drop(jobs);
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Default for SaveWriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -829,5 +913,97 @@ mod tests {
         let printed = format!("{:?}", Settings { port: 1, token: secret.into(), ..Settings::default() });
         assert!(!printed.contains(secret), "{printed}");
         assert!(printed.contains("<redacted>"));
+    }
+
+    /// The frame that took a click hands the write over and goes on: it does not wait for a
+    /// write that is under way, and the writes run in the order they were handed in.
+    #[test]
+    fn a_write_handed_to_the_writer_does_not_make_the_caller_wait_and_runs_in_order() {
+        use std::sync::{mpsc, Arc, Mutex};
+        let writer = SaveWriter::new();
+        writer.start().expect("the thread starts");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (release, held) = mpsc::channel::<()>();
+        let (started, has_started) = mpsc::channel::<()>();
+        let caller = std::thread::current().id();
+        let first = Arc::clone(&ran);
+        writer.submit(move || {
+            started.send(()).unwrap();
+            // The disk, as slow as it can be: until the test lets it go.
+            held.recv().unwrap();
+            first.lock().unwrap().push((1, std::thread::current().id()));
+        });
+        has_started.recv().unwrap();
+        for n in 2..=4 {
+            let ran = Arc::clone(&ran);
+            writer.submit(move || ran.lock().unwrap().push((n, std::thread::current().id())));
+        }
+        // Handed in, with the first one still on the disk: nothing has run, nobody has waited.
+        assert!(ran.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        writer.finish();
+        let ran = ran.lock().unwrap();
+        assert_eq!(ran.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(ran.iter().all(|(_, thread)| *thread != caller), "the caller wrote");
+    }
+
+    /// With no thread, a save is written by whoever asks: before the addon starts it and after
+    /// it has finished it, a click is never dropped.
+    #[test]
+    fn with_no_thread_running_the_caller_writes() {
+        use std::sync::{Arc, Mutex};
+        let writer = SaveWriter::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let note = |ran: &Arc<Mutex<Vec<std::thread::ThreadId>>>| {
+            let ran = Arc::clone(ran);
+            move || ran.lock().unwrap().push(std::thread::current().id())
+        };
+        writer.submit(note(&ran));
+        writer.start().unwrap();
+        writer.start().unwrap(); // A second start changes nothing.
+        writer.finish();
+        writer.finish(); // Nor does a second finish.
+        writer.submit(note(&ran));
+        let ran = ran.lock().unwrap();
+        assert_eq!(*ran, [std::thread::current().id(); 2]);
+    }
+
+    /// What the guard promises does not depend on who writes: the last of many clicks is what
+    /// is on disk when the writer finishes, and a write the disk refused is still told.
+    #[test]
+    fn saves_through_the_writer_end_with_the_last_settings_and_tell_a_failure() {
+        use std::sync::Arc;
+        let dir = temp_dir("writer");
+        let guard = Arc::new(SaveGuard::new());
+        let writer = SaveWriter::new();
+        writer.start().unwrap();
+        let ask = |settings: Settings, request| {
+            let (guard, dir) = (Arc::clone(&guard), dir.clone());
+            let ticket = guard.ticket();
+            writer.submit(move || {
+                let _ = guard.save(&dir, &settings, request, ticket);
+            });
+        };
+        for port in 50000..50100 {
+            ask(Settings { port, ..Settings::default() }, SaveRequest::Automatic);
+        }
+        writer.finish();
+        assert_eq!(load(&dir).settings.port, 50099, "the last click is the file");
+        assert!(!guard.failed());
+        // The disk refuses the next one: nobody waited for it, and the notice is up all the same.
+        writer.start().unwrap();
+        fs::create_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        ask(Settings { port: 50100, ..Settings::default() }, SaveRequest::Automatic);
+        writer.finish();
+        assert!(guard.failed());
+        assert_eq!(load(&dir).settings.port, 50099, "the file is as it was");
+        // The save after it gets through, and writes the newest there are.
+        fs::remove_dir(dir.join(TEMPORARY_NAME)).unwrap();
+        writer.start().unwrap();
+        ask(Settings { port: 50101, ..Settings::default() }, SaveRequest::Automatic);
+        writer.finish();
+        assert!(!guard.failed());
+        assert_eq!(load(&dir).settings.port, 50101);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

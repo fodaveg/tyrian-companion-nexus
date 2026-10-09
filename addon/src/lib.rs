@@ -109,6 +109,7 @@ fn load() {
         None
     };
     render::init_pending(&settings, notice, loaded.unreadable);
+    render::start_saver();
 
     register_render(
         RenderType::OptionsRender,
@@ -136,6 +137,9 @@ fn load() {
 fn unload() {
     log::info!("Tyrian Companion addon unloading");
     quick_access::unregister();
+    // What was clicked last reaches `settings.json` before the DLL goes: the settings thread
+    // writes what is waiting and ends here, so no thread of this module is left running.
+    render::stop_saver();
     // Safety: see the comment in `load`. Stopping here blocks until the background thread
     // has sent its `bye` and exited, which is what makes it safe for the DLL to be unmapped
     // right after: no thread is left holding an `AddonApi` pointer from an unloaded module.
