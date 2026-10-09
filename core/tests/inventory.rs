@@ -1026,3 +1026,33 @@ fn the_system_must_still_have_the_thread_with_the_same_teb_before_anything_is_re
     reused.put(TEB + 0x48, THREAD as u64 + 1, 8);
     assert_eq!(check(Ok(TEB), reused), (false, 1));
 }
+
+/// Only a `ReadFailed` that the second `OpenThread` confirms as gone is skipped; the closure is
+/// not called for any other error, so no other error costs a system call.
+#[test]
+fn only_a_failed_read_of_a_thread_that_is_gone_is_skipped() {
+    use std::cell::Cell;
+    let all = [
+        ReadError::UnsupportedBuild,
+        ReadError::RootUnavailable,
+        ReadError::ReadFailed,
+        ReadError::Bounds,
+        ReadError::ProfileMismatch,
+        ReadError::Changed,
+    ];
+    for error in all {
+        for gone in [true, false] {
+            let asked = Cell::new(false);
+            let skipped = thread_may_be_skipped(error, || {
+                asked.set(true);
+                gone
+            });
+            let expected = error == ReadError::ReadFailed && gone;
+            assert_eq!(skipped, expected, "{error:?} gone={gone}");
+            assert_eq!(asked.get(), error == ReadError::ReadFailed, "{error:?} asked");
+        }
+    }
+    assert!(is_gone_code(87), "ERROR_INVALID_PARAMETER");
+    assert!(!is_gone_code(5), "ERROR_ACCESS_DENIED");
+    assert!(!is_gone_code(0));
+}

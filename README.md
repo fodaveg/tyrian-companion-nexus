@@ -242,9 +242,10 @@ including coherence rechecks and TEB discovery. The Windows adapter also checks 
 750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 256 own threads
 and 65536 system thread entries (`MAX_OWN_THREADS`, `MAX_SYSTEM_THREAD_ENTRIES`: the first is a
 budget, 44 bytes of the cycle's for each thread; the second only bounds an iteration that
-skips other processes' entries and reserves nothing). A thread that ends between the snapshot
-and its `OpenThread` is skipped, when the system confirms it is gone, instead of failing the
-capture. Quantity is limited to 0..250 **per stack** by this
+skips other processes' entries and reserves nothing). A thread whose look fails with `ReadFailed` is skipped, instead of failing the
+capture, only if a second `OpenThread`, made after the failure, says its id is gone
+(`thread_may_be_skipped`); that call is not the cause of the first failure, and a terminated
+thread another handle keeps alive still opens and fails the capture as before. Quantity is limited to 0..250 **per stack** by this
 profile; aggregation by ID may exceed 250. A cycle that exceeds a budget or changes during
 reread is rejected completely. Excluded entries also recheck their identity and location;
 a location change during copying invalidates the capture. Unsupported quantity profiles preserve unknown coverage:

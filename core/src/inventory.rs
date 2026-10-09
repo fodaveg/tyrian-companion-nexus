@@ -28,10 +28,29 @@ pub const MAX_OWN_THREADS: usize = 256;
 /// walk gives up. The snapshot lists every thread of the machine on native Windows (under Proton
 /// only the prefix's), and a desktop with a browser and a chat client passes 4096 easily. The
 /// entries of other processes are only skipped by their process id, none is opened, stored or
-/// read, so this number reserves no memory: it bounds the iteration, which the cycle's 750 ms
-/// deadline bounds as well. 65536 is the most threads Windows hands out in practice (a machine
+/// read, so the addon reserves no memory for them; the Toolhelp snapshot itself does take system
+/// memory in proportion to the threads of the machine, whatever this number is. The number
+/// bounds the iteration, which the cycle's 750 ms deadline bounds as well. 65536 is the most threads Windows hands out in practice (a machine
 /// with more is not one this reader would run on) and leaves ten times the largest desktop seen.
 pub const MAX_SYSTEM_THREAD_ENTRIES: usize = 65_536;
+
+/// `ERROR_INVALID_PARAMETER`, what `OpenThread` answers for a thread id the system no longer has.
+pub const WIN32_INVALID_PARAMETER: u32 = 87;
+
+/// Whether the Win32 error of an `OpenThread` says that the thread is gone: only 87. Access
+/// denied (5) is a thread that is there and cannot be opened.
+pub fn is_gone_code(code: u32) -> bool {
+    code == WIN32_INVALID_PARAMETER
+}
+
+/// Whether the full search may skip a thread whose look failed with `error`, instead of failing
+/// the capture: only a `ReadFailed` for which `is_gone` (a second `OpenThread`, made after the
+/// failure and not its cause) says the system no longer has the thread. `is_gone` is called
+/// only for `ReadFailed`, so no other error costs a system call. A terminated thread whose
+/// object another handle keeps alive still opens, and fails the capture as before.
+pub fn thread_may_be_skipped(error: ReadError, is_gone: impl FnOnce() -> bool) -> bool {
+    error == ReadError::ReadFailed && is_gone()
+}
 pub(crate) const MAX_POINTER: u64 = 0x0000_7fff_ffff_ffff;
 
 /// Closed diagnostics; no address, character identity or OS error reaches the wire.

@@ -48,7 +48,7 @@ use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
 use windows::core::{s, w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE, HMODULE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, HMODULE};
 use windows::Win32::Security::Cryptography::*;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -550,7 +550,7 @@ impl NativeReader {
         Ok(inventory::context_from_teb(reader, self.profile, teb)?.map(|context| (context, teb)))
     }
     /// Whether the system no longer has thread `id`: `OpenThread` says the id is not valid
-    /// (`ERROR_INVALID_PARAMETER`). A thread that is there but cannot be opened (access denied)
+    /// (`ERROR_INVALID_PARAMETER`, 87). A thread that is there but cannot be opened (access denied)
     /// is not gone. The handle of a successful open is closed on return.
     fn thread_is_gone(id: u32) -> bool {
         match unsafe { OpenThread(THREAD_QUERY_INFORMATION, false, id) } {
@@ -559,7 +559,9 @@ impl NativeReader {
                 false
             }
             Err(error) => {
-                error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0)
+                // A Win32 error as an HRESULT: facility 7 (0x8007) and the code in the low word.
+                let hresult = error.code().0 as u32;
+                hresult >> 16 == 0x8007 && inventory::is_gone_code(hresult & 0xFFFF)
             }
         }
     }
@@ -618,9 +620,16 @@ impl NativeReader {
                     }
                     Ok(None) => {}
                     // A thread that ended after the snapshot was taken is not a failed
-                    // capture: it holds no context any more. Only that is skipped, and only
-                    // when the system confirms the thread is gone; any other failure still is.
-                    Err(ReadError::ReadFailed) if Self::thread_is_gone(entry.th32ThreadID) => {
+                    // capture. The decision is `inventory::thread_may_be_skipped`'s, in core:
+                    // a `ReadFailed` plus a second `OpenThread`, made after the failure, that
+                    // says the id is gone. That is not the cause of the first failure; a
+                    // terminated thread another handle keeps alive still opens and fails the
+                    // capture as before.
+                    Err(error)
+                        if inventory::thread_may_be_skipped(error, || {
+                            Self::thread_is_gone(entry.th32ThreadID)
+                        }) =>
+                    {
                         *own -= 1;
                     }
                     Err(error) => return Err(error),
