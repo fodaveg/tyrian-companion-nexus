@@ -49,6 +49,8 @@ struct FakeHost {
     magic_find: Arc<AtomicU32>,
     /// What the reader says about its last capture.
     diagnostics: Arc<Mutex<Diagnostics>>,
+    /// How many cycles the loop threw away and told the source about.
+    discarded: Arc<AtomicU32>,
 }
 impl FakeHost {
     fn new() -> Self {
@@ -70,6 +72,7 @@ impl FakeHost {
             block_after_change: Arc::new(AtomicBool::new(false)),
             magic_find: Arc::new(AtomicU32::new(0)),
             diagnostics: Arc::new(Mutex::new(Diagnostics::default())),
+            discarded: Arc::new(AtomicU32::new(0)),
             game: Arc::new(Mutex::new(GameReading {
                 is_gameplay: Some(true),
                 mumble: Some(MumbleSnapshot {
@@ -153,6 +156,9 @@ impl Host for FakeHost {
     }
     fn inventory_diagnostics(&self) -> Diagnostics {
         *self.diagnostics.lock().unwrap()
+    }
+    fn discard_cycle(&self) {
+        self.discarded.fetch_add(1, Ordering::Relaxed);
     }
     fn game_exiting(&self) -> bool {
         self.exiting.load(Ordering::Relaxed)
@@ -693,6 +699,8 @@ fn a_cycle_whose_context_changed_leaves_none_of_the_readers_output_for_the_panel
     let changed = p.next();
     assert_eq!((changed["type"].as_str(), changed["character"].as_str()), (Some("context"), Some("Changed Character")), "{changed}");
     assert_eq!(state.live_epochs_opened(), 0);
+    // And the source is told, so that what it kept from that cycle is not used again.
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 1);
     handle.stop();
 }
 
@@ -710,6 +718,7 @@ fn a_cycle_whose_context_held_puts_the_readers_output_where_the_panel_reads_it()
     let (diagnostics, first) = state.inventory_reading();
     assert!(matches!(diagnostics.magic_find, MagicFindCoverage::Read(read) if read.total == 333.0), "{diagnostics:?}");
     assert!(first.is_some());
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 0, "a cycle that held is not discarded");
     // The next capture fails: no sample, and still a pass of the reader, with its own date.
     *host.verdict.lock().unwrap() = Some(ReadError::ReadFailed);
     p.ready(&epoch);

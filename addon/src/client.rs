@@ -58,6 +58,7 @@ impl Host for NexusHost {
         crate::inventory::sample(stop)
     }
     fn inventory_diagnostics(&self) -> tyrian_companion_nexus_core::inventory::Diagnostics { crate::inventory::diagnostics() }
+    fn discard_cycle(&self) { crate::inventory::discard_cycle(); }
 
     /// The game's executable is verified before the first sample, a slice of its hash on each
     /// pass: not ready while that is under way, with nothing to tell the plugin until it has

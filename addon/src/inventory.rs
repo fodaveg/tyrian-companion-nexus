@@ -31,7 +31,7 @@ use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
 };
 use tyrian_companion_nexus_core::magic_find::{
-    self, MagicFind, MagicFindCoverage, MagicFindProfile,
+    self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile,
 };
 use tyrian_companion_nexus_core::passive::Uncovered;
 use tyrian_companion_nexus_core::perf::{CycleTimes, ReaderCounters};
@@ -248,9 +248,23 @@ enum Check {
 }
 static CHECK: Mutex<Check> = Mutex::new(Check::Unstarted);
 
+/// What the Magic Find passes keep between cycles: the content of the applied buffs, read whole
+/// at most every `magic_find::MAX_CONTENT_AGE` and verified by its headers on the passes
+/// between. It stands only for the build, context and character it was read under (the pass
+/// checks that itself), is emptied when the client discards a cycle ([`discard_cycle`]), and
+/// goes with the load.
+static MAGIC_FIND: CachedMagicFind = CachedMagicFind::new();
+
+/// The client threw away the cycle that just ran, because the game context changed under it:
+/// nothing the Magic Find reader kept from it is used again.
+pub fn discard_cycle() {
+    MAGIC_FIND.discard();
+}
+
 /// Closes the executable's file and the hash object if a hash was left half done. For the
 /// unload, once the worker has ended: a static is not dropped when the DLL goes.
 pub fn release_executable() {
+    MAGIC_FIND.discard();
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
     if matches!(*check, Check::Hashing(_)) {
         *check = Check::Unstarted;
@@ -455,7 +469,7 @@ impl NativeReader {
             },
         };
         let profile = verified.as_ref().ok_or(Uncovered::Guard)?;
-        magic_find::magic_find(reader, profile, context).map(|(value, _owner)| value)
+        MAGIC_FIND.read(reader, profile, context).map(|(value, _owner)| value)
     }
     /// The wallet of the context the inventory was just read from. Its guards are verified on
     /// the first cycle that reaches this point; every later cycle reuses that verdict.

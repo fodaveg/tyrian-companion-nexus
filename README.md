@@ -93,9 +93,19 @@ settings are saved in turns and without I/O under the mutex, and Options shows t
 and the panel's timing counters. The protocol with the plugin does not change and neither
 does the DLL's import table (257).
 
-Nothing of 0.8.2 has been seen inside the game. `magic_find_cached` exists and is not wired:
-the addon still calls `magic_find`. The known limit stays: a context that names one
-character while the memory belongs to another.
+Nothing of 0.8.2 has been seen inside the game. The known limit stays: a context that names
+one character while the memory belongs to another.
+
+After 0.8.2 (not released, not seen in the game): the addon reads the Magic Find through
+`magic_find_cached` (`CachedMagicFind`), which the owner accepted on 8 October 2026. The
+content of the applied buffs is read whole at most every 30 seconds; on the cycles between,
+a pass verifies it by the headers (164 reads and 19556 bytes over the live shape, against
+349 and 29328 for a whole pass). Every pass still reads the route, the slots, both table
+headers, the buckets, every node and the first 48 bytes of each definition in use, and a
+buff applied or removed, another build, context, character or definition makes that same
+pass read everything. The cache is also emptied when the client discards a cycle because the
+context changed under it, and by any pass that ends without a value. What a verifying pass
+does not see, for at most 30 seconds, is in the header of `core/src/magic_find.rs`.
 
 ## What it does, and does not do
 

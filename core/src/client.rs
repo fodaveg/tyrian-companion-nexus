@@ -120,6 +120,12 @@ pub trait Host: Send + 'static {
         Err(crate::inventory::ReadError::RootUnavailable)
     }
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
+    /// The loop threw away the cycle [`Host::read_inventory`] just ran, because the game
+    /// context changed while it was copying. Whatever the source keeps from one cycle to the
+    /// next (the Magic Find content) belongs to a cycle that is gone and
+    /// is forgotten here, so the next cycle reads and finds everything again. A host that
+    /// keeps nothing has nothing to do.
+    fn discard_cycle(&self) {}
     /// Does a bounded part of whatever the source has to do before it can take a sample at all,
     /// and says how that stands ([`Readiness`]). Asked on this worker right before each sample.
     /// The loop calls [`Host::read_inventory`] only on [`Readiness::Ready`]: while the source is
@@ -546,6 +552,7 @@ fn serve(
                             let reading = host.read_game();
                             let after = tracker.observe(captured_at, reading.is_gameplay, reading.mumble.as_ref());
                             if after != context {
+                                host.discard_cycle();
                                 // The context changed while copying the inventory: discard it
                                 // entirely, and with it what the reader says of that cycle. Its
                                 // bags and its Magic Find are of a character that was changing,

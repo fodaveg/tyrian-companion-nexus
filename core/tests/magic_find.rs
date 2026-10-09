@@ -1689,3 +1689,29 @@ fn over_a_long_run_of_changes_the_kept_content_gives_what_reading_everything_giv
     }
     assert!(m.heap < PLAYER);
 }
+
+/// The way the addon holds the reader: one cache behind a lock, dated by its own clock, emptied
+/// when the client throws a cycle away. The addon reads through nothing else.
+#[test]
+fn the_reader_the_addon_holds_verifies_between_passes_and_reads_everything_after_a_discard() {
+    let verified = verified();
+    let held = CachedMagicFind::new();
+    let mut m = live_shape(20.0);
+    let cost = |held: &CachedMagicFind, m: &mut Fixture, budget: usize| {
+        let mut reader = Reader::bounded(m, budget);
+        let value = held.read(&mut reader, &verified, CTX).map(|(value, _)| value.total);
+        (value, reader.reads, reader.bytes)
+    };
+    let whole = (Ok(333.0), 349, 29_328);
+    let verifying = (Ok(333.0), 164, 19_556);
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), whole, "the first pass reads everything");
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), verifying, "the next only verifies");
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), verifying);
+    // A cycle the client threw away leaves nothing of the reader: the next pass reads all.
+    held.discard();
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), whole);
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), verifying);
+    // A pass that ends without a value empties it too.
+    assert!(cost(&held, &mut m, 1000).0.is_err());
+    assert_eq!(cost(&held, &mut m, MAX_BYTES), whole);
+}

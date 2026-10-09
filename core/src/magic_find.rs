@@ -39,7 +39,8 @@
 //! What a verifying pass does not see, for at most [`MAX_CONTENT_AGE`]: an instance whose
 //! effect, state or definition pointer changes in place under the same key, node and address;
 //! and a definition whose modifier group or records change in place while its first 48 bytes
-//! do not. [`magic_find`] keeps nothing and has no such window.
+//! do not. [`magic_find`] keeps nothing and has no such window. The addon reads through
+//! [`CachedMagicFind`], which also forgets everything when the client discards a cycle.
 
 use crate::inventory::{BuildProfile, Memory, Reader, TLS_INDEX_RVA};
 use crate::passive::{
@@ -740,6 +741,40 @@ pub fn magic_find_cached<M: Memory>(
         cache.clear();
     }
     result
+}
+
+/// The Magic Find reader as the addon holds it: one [`MagicFindCache`] for as long as the
+/// reader of that process lives, behind a lock because the reader is shared, and the clock
+/// read here, so that no caller can pass a pass the wrong instant.
+///
+/// The cache is emptied by [`CachedMagicFind::discard`], which the client asks for when it
+/// throws a cycle away because the game context changed under it: that cycle leaves nothing
+/// of its reader behind, this cache included. The rest needs no call: a pass reads everything
+/// again by itself when the build, the context, the character (its owners), the table or any
+/// definition differs from what the whole pass kept, and a verdict on the executable that
+/// changes makes another reader, with another cache.
+#[derive(Default)]
+pub struct CachedMagicFind {
+    cache: std::sync::Mutex<MagicFindCache>,
+}
+impl CachedMagicFind {
+    pub const fn new() -> Self {
+        Self { cache: std::sync::Mutex::new(MagicFindCache { kept: None }) }
+    }
+    /// One pass of [`magic_find_cached`], dated now.
+    pub fn read<M: Memory>(
+        &self,
+        r: &mut Reader<M>,
+        profile: &MagicFindProfile,
+        context: u64,
+    ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
+        let mut cache = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        magic_find_cached(r, profile, context, &mut cache, Instant::now())
+    }
+    /// Forget everything the passes kept: the next one reads all the content.
+    pub fn discard(&self) {
+        self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+    }
 }
 
 /// One pass. Without a cache, or with one that cannot answer, it reads all the content.
