@@ -93,34 +93,44 @@ settings are saved in turns and without I/O under the mutex, and Options shows t
 and the panel's timing counters. The protocol with the plugin does not change and neither
 does the DLL's import table (257).
 
-Nothing of 0.8.2 has been seen inside the game. The known limit stays: a context that names
-one character while the memory belongs to another. Two more cases are not covered, and
-never were: a change from A to B and back to A entirely inside one pass (up to 750 ms), and
-a change that the context probe does not see because the state, the map and the character
-are the same after it. Neither is detected, and nothing here claims to detect them.
+Nothing of 0.8.2 has been seen inside the game. `magic_find_cached` exists and is not wired:
+the addon still calls `magic_find`. The known limit stays: a context that names one
+character while the memory belongs to another.
 
-After 0.8.2 (not released, not seen in the game): the addon reads the Magic Find through
-`magic_find_cached` (`CachedMagicFind`), which the owner accepted on 8 October 2026. The
-content of the applied buffs is read whole at most every 30 seconds; on the cycles between,
-a pass verifies it by the headers (164 reads and 19556 bytes over the live shape, against
-349 and 29328 for a whole pass). Every pass still reads the route, the slots, both table
-headers, the buckets, every node and the first 48 bytes of each definition in use, and a
-buff applied or removed, another build, context, character or definition makes that same
-pass read everything. The game's context is found the same way: the walk over the process's
-own threads (about 115 in a running game, each with its handle, a query and a few copies) is
-made every 30 seconds, and the cycles in between only check the thread it found: the system
-still has it with the same TEB, the TEB's self pointer, process and thread ids are the same,
-and its TLS route ends at the same context (6 copies, 68 bytes). A check that fails, or a
-copy or call in it that fails, is a full walk in that same cycle, so nothing is read through a
-thread that was not just checked. That there is only one context is checked by the walk, once
-every 30 seconds, after any change of the game context the client sees, or when the check
-fails, and no longer on every cycle: the owner accepted the search every 30 seconds or on a
-failed check, and this follows from it. The
-cache is also emptied, and the thread found forgotten, whenever the client sees the context
-change (during a cycle, which is then thrown away, or between two, the first one after a
-reconnection included); the cache is emptied as well by any pass that ends without a value.
-What a verifying pass
-does not see, for at most 30 seconds, is in the header of `core/src/magic_find.rs`.
+Version 0.8.3 is the audit's second round on performance. Each `live1` sample is written
+from structs and no longer from a tree of JSON values: the same bytes on the wire, in the
+same order (a golden file recorded from the previous writer pins every line), with 91 allocations
+instead of 762 over the sample measured. `settings.json` is
+written by a thread of the addon's own, in the order the saves were asked for, so a click
+does not wait for the disk on the frame that took it; unload writes what is waiting first.
+The Magic Find is read through `magic_find_cached` (`CachedMagicFind`), which the owner
+accepted on 8 October 2026: the content of the applied buffs is read whole at most every
+30 seconds, and on the cycles between a pass verifies it by the headers (164 reads and
+19556 bytes over the live shape, against 349 and 29328 for a whole pass). Every pass still
+reads the route, the slots, both table headers, the buckets, every node and the first 48
+bytes of each definition in use, and a buff applied or removed, another build, context,
+character or definition makes that same pass read everything. The game's context is found
+the same way: the walk over the process's own threads (about 115 in a running game, each
+with its handle, a query and a few copies) is made every 30 seconds, when the check fails
+and after any change of the game context the client sees, and the cycles in between only
+check the thread it found: the system still has it with the same TEB, the TEB's self
+pointer, process and thread ids are the same, and its TLS route ends at the same context
+(6 copies, 68 bytes). A check that fails, or a copy or call in it that fails, is a full walk
+in that same cycle, so nothing is read through a thread that was not just checked. The
+owner accepted the search every 30 seconds or on a failed check, with the check on every
+cycle between; that the context is the only one is checked by the walk and not on every
+cycle follows from it. The cache is emptied, and the thread found forgotten, whenever the
+client sees the context change (during a cycle, which is then thrown away, or between two,
+the first one after a reconnection included); the cache is emptied as well by any pass that
+ends without a value. What a verifying pass does not see, for at most 30 seconds, is in the
+header of `core/src/magic_find.rs`. The protocol with the plugin does not change and neither
+does the DLL's import table (257).
+
+Nothing of 0.8.3 has been seen inside the game. Two cases are not covered, and never were: a
+change from A to B and back to A entirely inside one pass (up to 750 ms), and a change that
+the context probe does not see because the state, the map and the character are the same
+after it. Neither is detected, and nothing here claims to detect them. The known limit
+stays too: a context that names one character while the memory belongs to another.
 
 ## What it does, and does not do
 
