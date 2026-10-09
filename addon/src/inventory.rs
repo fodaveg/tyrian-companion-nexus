@@ -259,12 +259,14 @@ static CHECK: Mutex<Check> = Mutex::new(Check::Unstarted);
 /// What the Magic Find passes keep between cycles: the content of the applied buffs, read whole
 /// at most every `magic_find::MAX_CONTENT_AGE` and verified by its headers on the passes
 /// between. It stands only for the build, context and character it was read under (the pass
-/// checks that itself), is emptied when the client discards a cycle ([`discard_cycle`]), and
+/// checks that itself), is emptied whenever the client sees the context change ([`discard_cycle`]), and
 /// goes with the load.
 static MAGIC_FIND: CachedMagicFind = CachedMagicFind::new();
 
-/// The client threw away the cycle that just ran, because the game context changed under it:
-/// nothing the Magic Find reader kept from it is used again.
+/// The game context changed, under a cycle that is thrown away or between cycles (the client
+/// calls this whenever it sees one): the Magic Find content that was kept is emptied and the
+/// thread the context was found on is forgotten, so the next cycle reads and finds everything
+/// again, the uniqueness of the context included. Also what unload does.
 pub fn discard_cycle() {
     MAGIC_FIND.discard();
     SEARCH.lock().unwrap_or_else(|p| p.into_inner()).forget();
@@ -272,12 +274,13 @@ pub fn discard_cycle() {
 
 /// The thread and the context the last full search found, and when. The cycles in between
 /// verify them instead of walking every thread of the process; the search is made again after
-/// `inventory::CONTEXT_SEARCH_EVERY`, as soon as a check fails, when the client discards a
-/// cycle and at unload.
+/// `inventory::CONTEXT_SEARCH_EVERY`, as soon as a check fails (in that same cycle), and after
+/// [`discard_cycle`], which forgets it.
 static SEARCH: Mutex<ContextSearch> = Mutex::new(ContextSearch::new());
 
-/// Closes the executable's file and the hash object if a hash was left half done. For the
-/// unload, once the worker has ended: a static is not dropped when the DLL goes.
+/// Closes the executable's file and the hash object if a hash was left half done, and
+/// discards what the readers kept ([`discard_cycle`]). For the unload, once the worker has
+/// ended: a static is not dropped when the DLL goes.
 pub fn release_executable() {
     discard_cycle();
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
@@ -541,14 +544,15 @@ impl NativeReader {
     /// call that fails, is `false`, and the caller searches all the threads in this same
     /// cycle; nothing is read with a thread that was not just checked.
     fn still_there(&self, reader: &mut Reader<ProcessMemory<'_>>, pid: u32, located: &Located) -> bool {
-        self.teb_of_thread(pid, located.thread).is_ok_and(|teb| teb == located.teb)
-            && inventory::verify_located(reader, self.profile, pid, located) == Ok(true)
+        let system_teb = self.teb_of_thread(pid, located.thread);
+        inventory::still_located(reader, self.profile, pid, located, system_teb)
     }
     /// The full search: every thread of the process, its TEB asked of the system and checked,
     /// its TLS route followed. A single context among them, as it was on every cycle before
-    /// the thread was kept; that it is single is now checked here, once per
-    /// [`inventory::CONTEXT_SEARCH_EVERY`] and not every cycle (accepted by the owner on 8
-    /// October 2026). Counts the process's own threads in `own`.
+    /// the thread was kept; that it is single is now checked
+    /// here: every [`inventory::CONTEXT_SEARCH_EVERY`], when a check fails and after any change
+    /// of game context, and not on every cycle. (The owner accepted the search every 30 s or
+    /// on a failed check; the rest follows from it.) Counts the process's own threads in `own`.
     fn search_threads(
         &self,
         reader: &mut Reader<ProcessMemory<'_>>,
@@ -630,23 +634,18 @@ impl NativeReader {
             // the cycles in between check them: the system still has that thread with that
             // TEB, and the TEB and the TLS route are what they were. A check that fails, or a
             // copy or call that fails in it, is a full search in this same cycle.
-            let stored = SEARCH
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .stored(started);
-            let located = match stored.filter(|located| self.still_there(&mut reader, pid, located)) {
-                Some(located) => {
-                    own = located.threads as usize;
-                    located
-                }
-                None => {
-                    let mut search = SEARCH.lock().unwrap_or_else(|p| p.into_inner());
-                    search.forget();
-                    let located = self.search_threads(&mut reader, stop, deadline, pid, &mut own)?;
-                    search.found(located, Instant::now());
-                    located
-                }
-            };
+            // The decision is `ContextSearch::locate`'s, in core, where it is tested; this only
+            // supplies the two operations that ask the system.
+            let located = SEARCH.lock().unwrap_or_else(|p| p.into_inner()).locate(
+                started,
+                &mut reader,
+                |reader, located| self.still_there(reader, pid, located),
+                |reader| self.search_threads(reader, stop, deadline, pid, &mut own),
+            )?;
+            if own == 0 {
+                // A cycle that only verified did not count the threads: the walk's count stands.
+                own = located.threads as usize;
+            }
             let found = Instant::now();
             took.threads = Some(found.saturating_duration_since(started));
             let context = located.context;

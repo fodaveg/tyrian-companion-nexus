@@ -150,8 +150,12 @@ pub fn context_from_teb<M: Memory>(
 }
 
 /// How long the thread and the context a full search found stand for the cycles that only
-/// verify them. After this long, or as soon as the verification fails, the next cycle searches
-/// all the threads again. Accepted by the owner on 8 October 2026.
+/// verify them. After this long a cycle searches all the threads again, and so does one whose
+/// verification fails, in that same cycle. The owner accepted on 8 October 2026 the full search
+/// every 30 seconds, or when the check fails, with the check on every cycle in between. That
+/// the context is the only one is then checked by the search and not on every cycle, which
+/// follows from it; the search is also made again after any change of the game context the
+/// client sees, so the first cycle after a change of map or character checks it.
 pub const CONTEXT_SEARCH_EVERY: Duration = Duration::from_secs(30);
 
 /// Where a full search found the game's context: the thread whose TLS route leads to it, that
@@ -190,11 +194,54 @@ impl ContextSearch {
     pub fn found(&mut self, located: Located, now: Instant) {
         self.kept = Some((located, now));
     }
-    /// Forget it: the next cycle searches. For a failed verification, a cycle the client
-    /// discarded, and the unload.
+    /// Forget it: the next cycle searches. For a cycle the client discarded, a change of the
+    /// game context it saw, and the unload. A failed verification forgets it by itself, in
+    /// [`ContextSearch::locate`].
     pub fn forget(&mut self) {
         self.kept = None;
     }
+    /// Gives the cycle its context: the one kept, if it is young enough and `verify` says it is
+    /// still there; otherwise what `search` finds, in this same cycle, which is then kept. A
+    /// verification that fails forgets what was kept before the search starts, and a search
+    /// that fails leaves nothing kept: the next cycle searches again. `cx` is whatever the
+    /// two need and cannot both borrow (the adapter's reader). `now` is the cycle's.
+    ///
+    /// Nothing is read with a thread that `verify` did not just accept: the decision lives
+    /// here so that it can be tested, and the adapter only supplies the two operations that
+    /// ask the system.
+    pub fn locate<C, E>(
+        &mut self,
+        now: Instant,
+        cx: &mut C,
+        verify: impl FnOnce(&mut C, &Located) -> bool,
+        search: impl FnOnce(&mut C) -> Result<Located, E>,
+    ) -> Result<Located, E> {
+        if let Some(located) = self.stored(now) {
+            if verify(cx, &located) {
+                return Ok(located);
+            }
+        }
+        self.forget();
+        let found = search(cx)?;
+        self.found(found, now);
+        Ok(found)
+    }
+}
+
+/// [`verify_located`] with the system's half of the check done by the caller: `system_teb` is
+/// what the system answered when asked for the TEB of the thread `located` names (an error if
+/// the thread is gone, is not of this process or cannot be asked). The thread must still have
+/// the TEB that was found, and then the memory must be what it was. Anything else, including a
+/// copy that fails, is `false`; when the system's answer is not the TEB, nothing is read.
+pub fn still_located<M: Memory, E>(
+    reader: &mut Reader<M>,
+    profile: BuildProfile,
+    pid: u32,
+    located: &Located,
+    system_teb: Result<u64, E>,
+) -> bool {
+    system_teb.is_ok_and(|teb| teb == located.teb)
+        && verify_located(reader, profile, pid, located) == Ok(true)
 }
 
 /// Checks, with the reader, that `located` is still what a full search found: the TEB at
@@ -218,8 +265,10 @@ pub fn verify_located<M: Memory>(
         return Err(ReadError::Bounds);
     }
     let head: [u8; 32] = reader.read(teb + 0x30)?;
-    let word = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
-    if word(0) != teb || word(0x10) != u64::from(pid) || word(0x18) != u64::from(thread) {
+    if qword(&head, 0)? != teb
+        || qword(&head, 0x10)? != u64::from(pid)
+        || qword(&head, 0x18)? != u64::from(thread)
+    {
         return Ok(false);
     }
     Ok(context_from_teb(reader, profile, teb)? == Some(context))

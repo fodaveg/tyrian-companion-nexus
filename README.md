@@ -110,9 +110,13 @@ still has it with the same TEB, the TEB's self pointer, process and thread ids a
 and its TLS route ends at the same context (6 copies, 68 bytes). A check that fails, or a
 copy or call in it that fails, is a full walk in that same cycle, so nothing is read through a
 thread that was not just checked. That there is only one context is checked by the walk, once
-every 30 seconds, no longer on every cycle; accepted by the owner on 8 October 2026. The
-cache is also emptied, and the thread found forgotten, when the client discards a cycle
-because the context changed under it; the cache is emptied as well by any pass that ends without a value. What a verifying pass
+every 30 seconds, after any change of the game context the client sees, or when the check
+fails, and no longer on every cycle: the owner accepted the search every 30 seconds or on a
+failed check, and this follows from it. The
+cache is also emptied, and the thread found forgotten, whenever the client sees the context
+change (during a cycle, which is then thrown away, or between two, the first one after a
+reconnection included); the cache is emptied as well by any pass that ends without a value.
+What a verifying pass
 does not see, for at most 30 seconds, is in the header of `core/src/magic_find.rs`.
 
 ## What it does, and does not do
@@ -247,7 +251,7 @@ on a conditional one, the route 224 and each item class about a hundred. Over 51
 all of them with a stack,
 a pass asks for 97600 bytes and 11823 reads on the common branch. On a conditional branch
 482 stacks fit and the 483rd makes the pass ask for more than its budget, so it gives no
-sample; beside the largest discovery (128 threads, 5632 bytes) the figure is 460.
+sample; beside the largest discovery (a check that fails at its last step, 68 bytes, and then 128 threads, 5632 bytes: 5700 in all) the figure is 460, by 4 bytes.
 `core/tests/inventory.rs` pins these figures to the byte.
 
 Free slots are `null`: sparse empty entries do not prove usable bag capacity. Magic Find has

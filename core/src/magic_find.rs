@@ -747,12 +747,13 @@ pub fn magic_find_cached<M: Memory>(
 /// reader of that process lives, behind a lock because the reader is shared, and the clock
 /// read here, so that no caller can pass a pass the wrong instant.
 ///
-/// The cache is emptied by [`CachedMagicFind::discard`], which the client asks for when it
-/// throws a cycle away because the game context changed under it: that cycle leaves nothing
-/// of its reader behind, this cache included. The rest needs no call: a pass reads everything
-/// again by itself when the build, the context, the character (its owners), the table or any
-/// definition differs from what the whole pass kept, and a verdict on the executable that
-/// changes makes another reader, with another cache.
+/// The cache is emptied by [`CachedMagicFind::discard`], which the addon calls whenever the
+/// client sees the game context change, during a cycle (which it then throws away) or between
+/// two: nothing kept before a change is used after it. The rest needs no call: a pass reads
+/// everything again by itself when the build (the image base the profile was verified at), the
+/// context, the character (its owners), the table or any definition differs from what the
+/// whole pass kept. The addon holds one of these for the whole load, in a static; the verdict
+/// on the executable is final once it is given, so there is no other reader to give it to.
 #[derive(Default)]
 pub struct CachedMagicFind {
     cache: std::sync::Mutex<MagicFindCache>,

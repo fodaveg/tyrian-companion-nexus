@@ -1,5 +1,6 @@
 //! Sparse fixtures ported from the certified Python reader; never open a real process.
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::inventory::*;
 const BASE: u64 = 0x140000000;
 const CTX: u64 = 0x100000;
@@ -688,8 +689,16 @@ fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
 }
 /// The adapter finds the game context with the same reader before the pass, so that search
 /// comes out of the same budget: `teb+0x30` and the route of [`context_from_teb`] for each of
-/// at most 128 threads of its own.
+/// at most 128 threads of its own. The worst cycle is one whose check of the thread it kept
+/// failed at its last step and then walks them all: the check ([`verify_located`], 68 bytes)
+/// and the walk are both read by the one reader.
 fn discovery() -> usize {
+    let (m, located) = located_fixture();
+    let (_, _, check) = verify(m, &located);
+    walk() + check
+}
+/// The walk over 128 threads alone.
+fn walk() -> usize {
     let mut m = fixture(0);
     for (a, v, z) in [
         (BASE + TLS_INDEX_RVA, 3, 4),
@@ -706,7 +715,8 @@ fn discovery() -> usize {
 }
 #[test]
 fn full_bags_are_read_within_the_cycle_budget_beside_the_discovery() {
-    assert_eq!(discovery(), 5_632);
+    assert_eq!(walk(), 5_632);
+    assert_eq!(discovery(), 5_632 + 68);
     let full = |occupied, branch| {
         let (result, _, bytes) = pass(dense(512, occupied, branch));
         result.map(|snapshot| {
@@ -725,7 +735,9 @@ fn full_bags_are_read_within_the_cycle_budget_beside_the_discovery() {
     // discovery and 482 beside none; from 483 on the pass asks for more than the budget and
     // gives no sample rather than a part of one.
     assert_eq!(full(460, Branch::Conditional), Ok(125_368));
-    assert!(125_368 + discovery() <= MAX_BYTES);
+    assert!(125_368 + discovery() <= MAX_BYTES, "the worst cycle no longer fits: 460 stacks are not 460");
+    // And it is the most: one more stack, 80 bytes, would not fit beside it.
+    assert!(125_368 + 80 + discovery() > MAX_BYTES);
     assert_eq!(full(482, Branch::Conditional), Ok(130_956));
     assert_eq!(full(483, Branch::Conditional), Err(ReadError::Bounds));
     assert_eq!(full(512, Branch::Conditional), Err(ReadError::Bounds));
@@ -894,4 +906,121 @@ fn a_full_search_stands_for_thirty_seconds_and_is_forgotten_on_request() {
     assert_eq!(search.stored(start - std::time::Duration::from_secs(1)), None);
     search.forget();
     assert_eq!(search.stored(start), None);
+}
+
+/// What the adapter does each cycle, with the two operations that ask the system faked: how
+/// many times each was asked, and what they answer.
+struct Cycle {
+    verified: usize,
+    searched: usize,
+    thread_is_there: bool,
+    search_answers: Result<Located, ReadError>,
+}
+impl Cycle {
+    fn new(search_answers: Result<Located, ReadError>) -> Self {
+        Self { verified: 0, searched: 0, thread_is_there: true, search_answers }
+    }
+    fn locate(&mut self, search: &mut ContextSearch, now: Instant) -> Result<Located, ReadError> {
+        search.locate(
+            now,
+            self,
+            |cycle, _| {
+                cycle.verified += 1;
+                cycle.thread_is_there
+            },
+            |cycle| {
+                cycle.searched += 1;
+                cycle.search_answers
+            },
+        )
+    }
+}
+
+#[test]
+fn a_cycle_searches_when_nothing_is_kept_and_verifies_while_it_stands() {
+    let (_, found) = located_fixture();
+    let start = Instant::now();
+    let mut search = ContextSearch::new();
+    let mut cycle = Cycle::new(Ok(found));
+    assert_eq!(cycle.locate(&mut search, start), Ok(found));
+    assert_eq!((cycle.verified, cycle.searched), (0, 1), "nothing was kept: no check, a search");
+    for second in 1..30 {
+        let now = start + Duration::from_secs(second);
+        assert_eq!(cycle.locate(&mut search, now), Ok(found));
+    }
+    assert_eq!((cycle.verified, cycle.searched), (29, 1), "29 cycles checked, none searched");
+    // At 30 s the thread is not asked about: the search is made again, and it is kept.
+    assert_eq!(cycle.locate(&mut search, start + CONTEXT_SEARCH_EVERY), Ok(found));
+    assert_eq!((cycle.verified, cycle.searched), (29, 2));
+    assert!(search.stored(start + CONTEXT_SEARCH_EVERY).is_some());
+}
+
+#[test]
+fn a_check_that_fails_searches_in_that_same_cycle_and_keeps_what_the_search_finds() {
+    let (_, old) = located_fixture();
+    let new = Located { thread: 78, teb: 0x120000, ..old };
+    let start = Instant::now();
+    let mut search = ContextSearch::new();
+    search.found(old, start);
+    // The thread is gone, or its id went to another thread with another TEB: either way the
+    // check says no, and the answer of this cycle is the search's.
+    let mut cycle = Cycle::new(Ok(new));
+    cycle.thread_is_there = false;
+    assert_eq!(cycle.locate(&mut search, start + Duration::from_secs(1)), Ok(new));
+    assert_eq!((cycle.verified, cycle.searched), (1, 1));
+    assert_eq!(search.stored(start + Duration::from_secs(1)), Some(new));
+}
+
+#[test]
+fn a_search_that_fails_leaves_nothing_kept() {
+    let (_, old) = located_fixture();
+    let start = Instant::now();
+    let now = start + Duration::from_secs(1);
+    for (check_passes, kept) in [(false, true), (false, false)] {
+        let mut search = ContextSearch::new();
+        if kept {
+            search.found(old, start);
+        }
+        let mut cycle = Cycle::new(Err(ReadError::RootUnavailable));
+        cycle.thread_is_there = check_passes;
+        assert_eq!(cycle.locate(&mut search, now), Err(ReadError::RootUnavailable));
+        assert_eq!(search.stored(now), None, "kept: {kept}");
+        // And the next cycle searches again, with nothing to check.
+        let verified = cycle.verified;
+        let _ = cycle.locate(&mut search, now);
+        assert_eq!((cycle.verified, cycle.searched), (verified, 2), "kept: {kept}");
+    }
+}
+
+#[test]
+fn what_the_client_discards_or_the_unload_forgets_is_searched_for_again() {
+    let (_, found) = located_fixture();
+    let start = Instant::now();
+    let mut search = ContextSearch::new();
+    let mut cycle = Cycle::new(Ok(found));
+    cycle.locate(&mut search, start).unwrap();
+    // `discard_cycle` and the unload of the adapter are this call.
+    search.forget();
+    cycle.locate(&mut search, start + Duration::from_secs(1)).unwrap();
+    assert_eq!((cycle.verified, cycle.searched), (0, 2), "forgotten: no check, a search");
+}
+
+/// The system's half of the check: it is asked first, and when it does not answer with the TEB
+/// that was found nothing of the game is read.
+#[test]
+fn the_system_must_still_have_the_thread_with_the_same_teb_before_anything_is_read() {
+    let (m, located) = located_fixture();
+    let check = |system: Result<u64, ReadError>, m: Fixture| {
+        let mut r = Reader::new(m);
+        (still_located(&mut r, profile(), PID, &located, system), r.reads)
+    };
+    assert_eq!(check(Ok(TEB), m.clone()), (true, 6));
+    // OpenThread or the query failed: the thread is gone, not ours, or cannot be asked.
+    assert_eq!(check(Err(ReadError::ReadFailed), m.clone()), (false, 0));
+    // The id belongs to another thread now, with another TEB.
+    assert_eq!(check(Ok(TEB + 0x2000), m.clone()), (false, 0));
+    // The system agrees with the TEB but the memory says another thread (reused TEB).
+    let mut reused = m.clone();
+    reused.put(TEB + 0x48, THREAD as u64 + 1, 8);
+    assert_eq!(check(Ok(TEB), reused), (false, 1));
 }
