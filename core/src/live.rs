@@ -713,7 +713,8 @@ impl Frame {
         }
     }
     /// The frame as a JSON value, without the `v`, `tag`, `nonce` and `seq` the transport adds.
-    /// For tests and diagnostics; the wire never goes through it.
+    /// For tests; nothing in the addon calls it and the wire never goes through it.
+    #[doc(hidden)]
     pub fn to_value(&self) -> Value {
         let mut bytes = Vec::new();
         self.write(&mut bytes, "", 0)

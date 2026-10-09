@@ -182,6 +182,13 @@ fn lines() -> Vec<String> {
     c.context_changed(&loading);
     push(c.gameplay_status(), &mut out, &mut seq);
     push(c.gameplay_status(), &mut out, &mut seq);
+    // An empty sample (no item, no currency): a begin and an end, and no rows frame between.
+    // Last, so that every line above keeps the number it was recorded with.
+    push(
+        snapshot_frames(EPOCH, 2, 5, 2000, &snapshot(0, 0, 0, None)).unwrap(),
+        &mut out,
+        &mut seq,
+    );
     out
 }
 

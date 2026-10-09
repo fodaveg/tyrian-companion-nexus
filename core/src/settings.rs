@@ -427,6 +427,10 @@ impl SaveWriter {
 
     /// Runs every write that was handed in, ends the thread and waits for it. Saves asked for
     /// after this are written by whoever asks.
+    ///
+    /// The wait has no limit, on purpose: if the disk does not answer, `unload()` waits for it.
+    /// Giving up after a time would leave a thread running inside a DLL that Nexus is about to
+    /// unmap, which is worse than a slow unload.
     pub fn finish(&self) {
         let writer = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         if let Some(WriterThread { jobs, thread }) = writer {

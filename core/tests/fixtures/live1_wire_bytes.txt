@@ -129,3 +129,5 @@
 {"epoch":null,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","reason":"unsupported_build","seq":128,"status":"unavailable","tag":"live1","type":"live_status","v":3}
 {"epoch":null,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","reason":"root_unavailable","seq":129,"status":"unavailable","tag":"live1","type":"live_status","v":3}
 {"epoch":"AgICAgICAgICAgICAgICAg","nonce":"AQEBAQEBAQEBAQEBAQEBAQ","reason":"not_gameplay","seq":130,"status":"unavailable","tag":"live1","type":"live_status","v":3}
+{"ctx":5,"currencies":"none","cursor":2,"epoch":"AgICAgICAgICAgICAgICAg","items":"complete","mode":"sample","ms":2000,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","rows":0,"seq":131,"slots":null,"tag":"live1","type":"live_begin","unknown":0,"v":3}
+{"cursor":2,"epoch":"AgICAgICAgICAgICAgICAg","nonce":"AQEBAQEBAQEBAQEBAQEBAQ","seq":132,"tag":"live1","type":"live_end","v":3}
