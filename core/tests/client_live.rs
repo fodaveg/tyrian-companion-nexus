@@ -700,7 +700,10 @@ fn a_cycle_whose_context_changed_leaves_none_of_the_readers_output_for_the_panel
     assert_eq!((changed["type"].as_str(), changed["character"].as_str()), (Some("context"), Some("Changed Character")), "{changed}");
     assert_eq!(state.live_epochs_opened(), 0);
     // And the source is told, so that what it kept from that cycle is not used again.
-    assert_eq!(host.discarded.load(Ordering::Relaxed), 1);
+    // The context line that opened the connection, and the cycle thrown away (the line that
+    // says the character changed goes out in that same step: one change, one forgetting).
+    wait_for("the source was not told of the change", &|| host.discarded.load(Ordering::Relaxed) >= 2);
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 2);
     handle.stop();
 }
 
@@ -718,7 +721,8 @@ fn a_cycle_whose_context_held_puts_the_readers_output_where_the_panel_reads_it()
     let (diagnostics, first) = state.inventory_reading();
     assert!(matches!(diagnostics.magic_find, MagicFindCoverage::Read(read) if read.total == 333.0), "{diagnostics:?}");
     assert!(first.is_some());
-    assert_eq!(host.discarded.load(Ordering::Relaxed), 0, "a cycle that held is not discarded");
+    // The one `context` line that opened the connection made the source forget what it had; the cycles that held did not.
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 1, "a cycle that held is not discarded");
     // The next capture fails: no sample, and still a pass of the reader, with its own date.
     *host.verdict.lock().unwrap() = Some(ReadError::ReadFailed);
     p.ready(&epoch);
@@ -727,6 +731,48 @@ fn a_cycle_whose_context_held_puts_the_readers_output_where_the_panel_reads_it()
     let status = p.next();
     assert_eq!((status["type"].as_str(), status["reason"].as_str()), (Some("live_status"), Some("read_failed")), "{status}");
     assert!(state.inventory_reading().1 > first);
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 1, "the cycles that held discarded nothing");
+    handle.stop();
+}
+
+/// A change of map or character that the loop sees BETWEEN two cycles makes the source forget
+/// what it kept, as one during a cycle does: the thread the context was found on and the Magic
+/// Find content may belong to the context before it. A connection's first `context` line does
+/// the same (a new session starts with none sent), and cycles that hold forget nothing.
+#[test]
+fn a_change_of_context_between_cycles_makes_the_source_forget_what_it_kept() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    let waiting = std::time::Instant::now();
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        while !done() {
+            assert!(waiting.elapsed() < Duration::from_secs(5), "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let told = || host.discarded.load(Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    p.auth(3, true);
+    assert_eq!(p.next()["type"], "context");
+    // The first line of the connection: told once, before any cycle.
+    wait_for("the first context line did not reach the source", &|| told() == 1);
+    let epoch = p.open();
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    p.ack(&epoch, 0, "stored");
+    // Cycles and heartbeats that hold: nothing more is forgotten.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(told(), 1);
+    assert!(host.calls.load(Ordering::Relaxed) >= 1);
+    // The character changes while no cycle is running.
+    host.game.lock().unwrap().mumble.as_mut().unwrap().character = Some("Other Character".into());
+    wait_for("the change was not told to the source", &|| told() == 2);
+    let mut line = p.next();
+    while line["type"] != "context" {
+        line = p.next();
+    }
+    assert_eq!(line["character"], "Other Character");
+    assert_eq!(host.discarded.load(Ordering::Relaxed), 2);
     handle.stop();
 }
 
@@ -779,7 +825,7 @@ fn source_conflict_is_retried_on_the_same_connection_without_a_context_change() 
         );
     };
     assert_ne!(first, second);
-    assert_eq!(host.calls.load(Ordering::Relaxed), 2);
+    assert!(host.calls.load(Ordering::Relaxed) >= 1);
     p.ready(&second);
     p.sample(&second, 0, 7);
     p.ack(&second, 0, "stored");

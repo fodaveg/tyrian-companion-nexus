@@ -120,11 +120,12 @@ pub trait Host: Send + 'static {
         Err(crate::inventory::ReadError::RootUnavailable)
     }
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
-    /// The loop threw away the cycle [`Host::read_inventory`] just ran, because the game
-    /// context changed while it was copying. Whatever the source keeps from one cycle to the
-    /// next (the Magic Find content, the thread the game's context was found on) belongs to a cycle that is gone and
-    /// is forgotten here, so the next cycle reads and finds everything again. A host that
-    /// keeps nothing has nothing to do.
+    /// The game context changed, as the loop sees it: during the cycle [`Host::read_inventory`]
+    /// just ran (which the loop throws away), or between two cycles, which is whenever it sends
+    /// a `context` line, the first one after a reconnection included. Whatever the source keeps
+    /// from one cycle to the next (the Magic Find content, the thread the game's context was
+    /// found on) is forgotten here, so the next cycle reads and finds everything again, the
+    /// uniqueness of the context included. A host that keeps nothing has nothing to do.
     fn discard_cycle(&self) {}
     /// Does a bounded part of whatever the source has to do before it can take a sample at all,
     /// and says how that stands ([`Readiness`]). Asked on this worker right before each sample.
@@ -166,6 +167,8 @@ pub struct Session {
     last_sent_at: Instant,
     last_context: Option<GameContext>,
     last_context_seq: Option<u64>,
+    /// How many `context` lines this session has sent: the loop tells the host about each.
+    contexts_sent: u64,
     live_allowed: bool,
     live: crate::live::Channel,
 }
@@ -182,6 +185,7 @@ impl Session {
             last_sent_at: now,
             last_context: None,
             last_context_seq: None,
+            contexts_sent: 0,
             live_allowed: true,
             live: crate::live::Channel::new(),
         }
@@ -208,6 +212,7 @@ impl Session {
         if self.last_context.as_ref() != Some(context) {
             if let Some(line) = build_context_line(&self.nonce, self.next_seq, context) {
                 self.last_context_seq = Some(self.take_seq(now));
+                self.contexts_sent += 1;
                 self.last_context = Some(context.clone());
                 return Some(line);
             }
@@ -523,8 +528,16 @@ fn serve(
                 let reading = host.read_game();
                 let now = Instant::now();
                 let context = tracker.observe(now, reading.is_gameplay, reading.mumble.as_ref());
+                let contexts_sent = session.contexts_sent;
                 if let Some(line) = session.next_outgoing(now, &context) {
                     if stream.write_all(line.as_bytes()).is_err() { return end; }
+                }
+                // A `context` line went out: the game context is not the one the last line of
+                // this session said (a change of map or character seen between two cycles, or
+                // the first line after a reconnection). What the source kept from before is
+                // forgotten, so that this cycle reads and finds everything again.
+                if session.contexts_sent != contexts_sent {
+                    host.discard_cycle();
                 }
                 state.set_live_context(context.clone());
                 let ctx = session.last_context_seq.unwrap_or(0);
