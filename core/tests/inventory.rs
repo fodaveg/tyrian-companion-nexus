@@ -689,7 +689,7 @@ fn a_pass_over_512_positions_asks_for_exactly_these_reads_and_bytes() {
 }
 /// The adapter finds the game context with the same reader before the pass, so that search
 /// comes out of the same budget: `teb+0x30` and the route of [`context_from_teb`] for each of
-/// at most 128 threads of its own. The worst cycle is one whose check of the thread it kept
+/// at most `MAX_OWN_THREADS` threads of its own. The worst cycle is one whose check of the thread it kept
 /// failed at its last step and then walks them all: the check ([`verify_located`], 68 bytes)
 /// and the walk are both read by the one reader.
 fn discovery() -> usize {
@@ -697,7 +697,7 @@ fn discovery() -> usize {
     let (_, _, check) = verify(m, &located);
     walk() + check
 }
-/// The walk over 128 threads alone.
+/// The walk over the most threads it will take alone.
 fn walk() -> usize {
     let mut m = fixture(0);
     for (a, v, z) in [
@@ -711,12 +711,13 @@ fn walk() -> usize {
     }
     let mut r = Reader::new(m);
     context_from_teb(&mut r, profile(), 0x110000).unwrap();
-    128 * (8 + r.bytes)
+    MAX_OWN_THREADS * (8 + r.bytes)
 }
 #[test]
 fn full_bags_are_read_within_the_cycle_budget_beside_the_discovery() {
-    assert_eq!(walk(), 5_632);
-    assert_eq!(discovery(), 5_632 + 68);
+    assert_eq!(MAX_OWN_THREADS, 256);
+    assert_eq!(walk(), 11_264);
+    assert_eq!(discovery(), 11_264 + 68);
     let full = |occupied, branch| {
         let (result, _, bytes) = pass(dense(512, occupied, branch));
         result.map(|snapshot| {
@@ -731,13 +732,13 @@ fn full_bags_are_read_within_the_cycle_budget_beside_the_discovery() {
     // The 512 positions 16 bags of 32 can hold, every one with a stack, common branch.
     assert_eq!(full(512, Branch::Common), Ok(97_600));
     assert!(97_600 + discovery() <= MAX_BYTES);
-    // A stack of a conditional class costs 80 bytes more. 460 of them fit beside the largest
+    // A stack of a conditional class costs 254 bytes. 437 of them fit beside the largest
     // discovery and 482 beside none; from 483 on the pass asks for more than the budget and
     // gives no sample rather than a part of one.
-    assert_eq!(full(460, Branch::Conditional), Ok(125_368));
-    assert!(125_368 + discovery() <= MAX_BYTES, "the worst cycle no longer fits: 460 stacks are not 460");
-    // And it is the most: one more stack, 80 bytes, would not fit beside it.
-    assert!(125_368 + 80 + discovery() > MAX_BYTES);
+    assert_eq!(full(437, Branch::Conditional), Ok(119_526));
+    assert!(119_526 + discovery() <= MAX_BYTES, "the worst cycle no longer fits: 437 stacks are not 437");
+    // And it is the most: one more stack, 254 bytes, would not fit beside it.
+    assert!(119_526 + 254 + discovery() > MAX_BYTES);
     assert_eq!(full(482, Branch::Conditional), Ok(130_956));
     assert_eq!(full(483, Branch::Conditional), Err(ReadError::Bounds));
     assert_eq!(full(512, Branch::Conditional), Err(ReadError::Bounds));

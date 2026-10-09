@@ -18,6 +18,20 @@ pub const TLS_INDEX_RVA: u64 = 0x28145c0;
 pub const MAX_POSITIONS: u32 = 640;
 pub const MAX_BYTES: usize = 131_072;
 pub const MAX_READS: usize = 32_768;
+/// The most threads of the game's own process the full search will walk. A `Gw2-64.exe` measured
+/// on 8 October 2026 had 133, so 128 was already short of it; 256 is about twice that. The
+/// number is also a budget, not just a guard: each thread costs the walk 44 bytes of the cycle's
+/// [`MAX_BYTES`] (the TEB's self pointer and the TLS route), so 256 threads are 11264 bytes and
+/// cannot grow the cycle past the reader's own limit, which refuses the copy that would.
+pub const MAX_OWN_THREADS: usize = 256;
+/// The most thread entries of the whole system the snapshot may be walked through before the
+/// walk gives up. The snapshot lists every thread of the machine on native Windows (under Proton
+/// only the prefix's), and a desktop with a browser and a chat client passes 4096 easily. The
+/// entries of other processes are only skipped by their process id, none is opened, stored or
+/// read, so this number reserves no memory: it bounds the iteration, which the cycle's 750 ms
+/// deadline bounds as well. 65536 is the most threads Windows hands out in practice (a machine
+/// with more is not one this reader would run on) and leaves ten times the largest desktop seen.
+pub const MAX_SYSTEM_THREAD_ENTRIES: usize = 65_536;
 pub(crate) const MAX_POINTER: u64 = 0x0000_7fff_ffff_ffff;
 
 /// Closed diagnostics; no address, character identity or OS error reaches the wire.

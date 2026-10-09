@@ -36,7 +36,7 @@ use tyrian_companion_nexus_core::client::Readiness;
 use tyrian_companion_nexus_core::executable::{self, Build, HashedFile, Hashing, Stamp, Step};
 use tyrian_companion_nexus_core::inventory::{
     self, BuildProfile, ContextSearch, Diagnostics, InventorySnapshot, Located, Memory, ReadError,
-    Reader,
+    Reader, MAX_OWN_THREADS, MAX_SYSTEM_THREAD_ENTRIES,
 };
 use tyrian_companion_nexus_core::magic_find::{
     self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile,
@@ -48,7 +48,7 @@ use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
 };
 use windows::core::{s, w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, HMODULE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE, HMODULE};
 use windows::Win32::Security::Cryptography::*;
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -59,8 +59,6 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenThread, THREAD_QUERY_INFORMATION,
 };
 
-const MAX_THREADS: usize = 128;
-const MAX_SYSTEM_ENTRIES: usize = 4096;
 /// How long the bag slots and the Magic Find may take together, after the wallet. It bounds
 /// what they add to the wait before the client seals the inventory sample. Not measured in a
 /// running game: if `Uncovered::Deadline` shows up in the diagnostics, this is the number to
@@ -538,6 +536,33 @@ impl NativeReader {
         }
         Ok(teb)
     }
+    /// The context the TLS route of thread `id` leads to, with that thread's TEB.
+    fn context_of_thread(
+        &self,
+        reader: &mut Reader<ProcessMemory<'_>>,
+        pid: u32,
+        id: u32,
+    ) -> Result<Option<(u64, u64)>, ReadError> {
+        let teb = self.teb_of_thread(pid, id)?;
+        if reader.pointer(teb + 0x30)? != teb {
+            return Err(ReadError::ReadFailed);
+        }
+        Ok(inventory::context_from_teb(reader, self.profile, teb)?.map(|context| (context, teb)))
+    }
+    /// Whether the system no longer has thread `id`: `OpenThread` says the id is not valid
+    /// (`ERROR_INVALID_PARAMETER`). A thread that is there but cannot be opened (access denied)
+    /// is not gone. The handle of a successful open is closed on return.
+    fn thread_is_gone(id: u32) -> bool {
+        match unsafe { OpenThread(THREAD_QUERY_INFORMATION, false, id) } {
+            Ok(handle) => {
+                drop(OwnedHandle(handle));
+                false
+            }
+            Err(error) => {
+                error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0)
+            }
+        }
+    }
     /// Whether the thread and the context a full search found are still there: the system
     /// still has that thread, in this process, with that TEB, and the TEB and its TLS route
     /// are what they were (`inventory::verify_located`). Anything else, including a copy or a
@@ -578,20 +603,27 @@ impl NativeReader {
                 return Err(ReadError::ReadFailed);
             }
             total += 1;
-            if total > MAX_SYSTEM_ENTRIES {
+            if total > MAX_SYSTEM_THREAD_ENTRIES {
                 return Err(ReadError::Bounds);
             }
             if entry.th32OwnerProcessID == pid {
                 *own += 1;
-                if *own > MAX_THREADS {
+                if *own > MAX_OWN_THREADS {
                     return Err(ReadError::Bounds);
                 }
-                let teb = self.teb_of_thread(pid, entry.th32ThreadID)?;
-                if reader.pointer(teb + 0x30)? != teb {
-                    return Err(ReadError::ReadFailed);
-                }
-                if let Some(context) = inventory::context_from_teb(reader, self.profile, teb)? {
-                    contexts.entry(context).or_insert((entry.th32ThreadID, teb));
+                match self.context_of_thread(reader, pid, entry.th32ThreadID) {
+                    Ok(Some(context)) => {
+                        let teb = context.1;
+                        contexts.entry(context.0).or_insert((entry.th32ThreadID, teb));
+                    }
+                    Ok(None) => {}
+                    // A thread that ended after the snapshot was taken is not a failed
+                    // capture: it holds no context any more. Only that is skipped, and only
+                    // when the system confirms the thread is gone; any other failure still is.
+                    Err(ReadError::ReadFailed) if Self::thread_is_gone(entry.th32ThreadID) => {
+                        *own -= 1;
+                    }
+                    Err(error) => return Err(error),
                 }
                 if contexts.len() > 1 {
                     return Err(ReadError::RootUnavailable);

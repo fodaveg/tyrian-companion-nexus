@@ -219,14 +219,14 @@ pub fn options_render(ui: &Ui) {
         ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
         ui.text_wrapped(format!("Supported build SHA-256: {}", tyrian_companion_nexus_core::inventory::BUILD_SHA256));
         ui.text_wrapped(if diagnostics.owner_verified { "Inventory owner: verified" } else { "Inventory owner: not verified" });
-        ui.text_wrapped(format!("Own threads: {} / 128; positions: {} / 640", diagnostics.threads, diagnostics.positions));
+        ui.text_wrapped(format!("Own threads: {} / {}; positions: {} / 640", diagnostics.threads, tyrian_companion_nexus_core::inventory::MAX_OWN_THREADS, diagnostics.positions));
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
         ui.text_wrapped(format!("Wallet requested bytes: {} / {}; reads: {}", diagnostics.wallet_bytes,
             tyrian_companion_nexus_core::wallet::MAX_BYTES, diagnostics.wallet_reads));
         // What the cycles and the panel's frame take, and how the captures end, since the addon
         // loaded: the numbers that say whether the reader fits its deadlines in this game.
-        // They are shown here and nowhere else. 128 is the adapter's cap on own threads.
-        for line in crate::inventory::counters().lines(shared.live_epochs_opened(), 128) {
+        // They are shown here and nowhere else. The cap is the adapter's on own threads.
+        for line in crate::inventory::counters().lines(shared.live_epochs_opened(), tyrian_companion_nexus_core::inventory::MAX_OWN_THREADS as u32) {
             ui.text_wrapped(line);
         }
         let computed = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cache.computed();

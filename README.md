@@ -239,8 +239,12 @@ unchanged.
 
 Each cycle is capped at 640 positions, 131072 requested bytes and 32768 exact reads,
 including coherence rechecks and TEB discovery. The Windows adapter also checks a
-750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 128 own threads
-and 4096 system thread entries. Quantity is limited to 0..250 **per stack** by this
+750ms deadline between exact reads; this cannot preempt an OS call already in progress. Discovery is capped at 256 own threads
+and 65536 system thread entries (`MAX_OWN_THREADS`, `MAX_SYSTEM_THREAD_ENTRIES`: the first is a
+budget, 44 bytes of the cycle's for each thread; the second only bounds an iteration that
+skips other processes' entries and reserves nothing). A thread that ends between the snapshot
+and its `OpenThread` is skipped, when the system confirms it is gone, instead of failing the
+capture. Quantity is limited to 0..250 **per stack** by this
 profile; aggregation by ID may exceed 250. A cycle that exceeds a budget or changes during
 reread is rejected completely. Excluded entries also recheck their identity and location;
 a location change during copying invalidates the capture. Unsupported quantity profiles preserve unknown coverage:
@@ -264,7 +268,7 @@ on a conditional one, the route 224 and each item class about a hundred. Over 51
 all of them with a stack,
 a pass asks for 97600 bytes and 11823 reads on the common branch. On a conditional branch
 482 stacks fit and the 483rd makes the pass ask for more than its budget, so it gives no
-sample; beside the largest discovery (a check that fails at its last step, 68 bytes, and then 128 threads, 5632 bytes: 5700 in all) the figure is 460, by 4 bytes.
+sample; beside the largest discovery (a check that fails at its last step, 68 bytes, and then 256 threads, 11264 bytes: 11332 in all) the figure is 437 (the 438th would exceed the budget by 40 bytes).
 `core/tests/inventory.rs` pins these figures to the byte.
 
 Free slots are `null`: sparse empty entries do not prove usable bag capacity. Magic Find has
@@ -962,7 +966,7 @@ Panel frame in µs: mean 0.4, max 41.3, over 123456 frames (2345 computed)
   750 ms had run out, `Bounds` a count, a pointer or a budget out of bounds, and "other" no
   character to read, a profile that does not match or another build. "Epochs opened" is how
   many times the source has started an epoch (a `live_open`), over all its connections.
-- **Most own threads**: against the 128 the reader stops at.
+- **Most own threads**: against the 256 the reader stops at.
 - **Panel frame**: what the panel's render callback takes, mean and longest, and how many of
   those frames had to compute the panel (see "What a frame of the panel costs").
 
