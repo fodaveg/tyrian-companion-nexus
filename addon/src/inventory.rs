@@ -4,6 +4,13 @@
 //! game function, input, write or thread suspension is used. Called only by the background
 //! bridge worker after live1 negotiation, at most once per second; render does no memory reads.
 //!
+//! The game's context is found by walking the process's own threads (a handle, a query and a few
+//! copies for each, about 115 in a running game), and that walk is made once every 30 seconds,
+//! or at once when the check below fails, or after a cycle the client discarded. The cycles in
+//! between check the thread the walk found: the system still has it, in this process, with the
+//! same TEB, whose self pointer and client id are the same, and whose TLS route still ends at
+//! the same context. That the context is the only one is checked by the walk, not on every cycle.
+//!
 //! One cycle reads the owned inventory, then the wallet, then the bag slots and last the Magic
 //! Find, from the same verified build and context and before the same deadline. Each of the
 //! last three has its own smaller read budget and can only fail on its own: the content of an
@@ -16,7 +23,7 @@
 //! past the cycle's. Magic Find goes last because it is the largest: a cut costs it, and only
 //! it, that cycle's coverage, reported as `Uncovered::Deadline` rather than `ReadFailed`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ffi::{c_void, OsString};
 use std::fs::File;
 use std::io::Read;
@@ -28,7 +35,8 @@ use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots}
 use tyrian_companion_nexus_core::client::Readiness;
 use tyrian_companion_nexus_core::executable::{self, Build, HashedFile, Hashing, Stamp, Step};
 use tyrian_companion_nexus_core::inventory::{
-    self, BuildProfile, Diagnostics, InventorySnapshot, Memory, ReadError, Reader,
+    self, BuildProfile, ContextSearch, Diagnostics, InventorySnapshot, Located, Memory, ReadError,
+    Reader,
 };
 use tyrian_companion_nexus_core::magic_find::{
     self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile,
@@ -259,12 +267,19 @@ static MAGIC_FIND: CachedMagicFind = CachedMagicFind::new();
 /// nothing the Magic Find reader kept from it is used again.
 pub fn discard_cycle() {
     MAGIC_FIND.discard();
+    SEARCH.lock().unwrap_or_else(|p| p.into_inner()).forget();
 }
+
+/// The thread and the context the last full search found, and when. The cycles in between
+/// verify them instead of walking every thread of the process; the search is made again after
+/// `inventory::CONTEXT_SEARCH_EVERY`, as soon as a check fails, when the client discards a
+/// cycle and at unload.
+static SEARCH: Mutex<ContextSearch> = Mutex::new(ContextSearch::new());
 
 /// Closes the executable's file and the hash object if a hash was left half done. For the
 /// unload, once the worker has ended: a static is not dropped when the DLL goes.
 pub fn release_executable() {
-    MAGIC_FIND.discard();
+    discard_cycle();
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
     if matches!(*check, Check::Hashing(_)) {
         *check = Check::Unstarted;
@@ -489,6 +504,108 @@ impl NativeReader {
         let profile = verified.as_ref().ok_or(WalletError::Guard)?;
         wallet::wallet_snapshot(reader, profile, context)
     }
+    /// Asks the system for the TEB of thread `id` of this process; an error if the thread is
+    /// gone, is not ours or its TEB is not one. One handle, closed on return.
+    fn teb_of_thread(&self, pid: u32, id: u32) -> Result<u64, ReadError> {
+        let thread = OwnedHandle(
+            unsafe { OpenThread(THREAD_QUERY_INFORMATION, false, id) }
+                .map_err(|_| ReadError::ReadFailed)?,
+        );
+        let mut basic = ThreadBasic::default();
+        let mut size = 0;
+        let status = unsafe {
+            (self.query)(
+                thread.0,
+                0,
+                &mut basic,
+                std::mem::size_of::<ThreadBasic>() as u32,
+                &mut size,
+            )
+        };
+        if status < 0
+            || size as usize != std::mem::size_of::<ThreadBasic>()
+            || basic.process as usize != pid as usize
+            || basic.thread as usize != id as usize
+        {
+            return Err(ReadError::ReadFailed);
+        }
+        let teb = basic.teb as u64;
+        if teb < 0x10000 || teb > 0x0000_7fff_ffff_ff00 {
+            return Err(ReadError::ReadFailed);
+        }
+        Ok(teb)
+    }
+    /// Whether the thread and the context a full search found are still there: the system
+    /// still has that thread, in this process, with that TEB, and the TEB and its TLS route
+    /// are what they were (`inventory::verify_located`). Anything else, including a copy or a
+    /// call that fails, is `false`, and the caller searches all the threads in this same
+    /// cycle; nothing is read with a thread that was not just checked.
+    fn still_there(&self, reader: &mut Reader<ProcessMemory<'_>>, pid: u32, located: &Located) -> bool {
+        self.teb_of_thread(pid, located.thread).is_ok_and(|teb| teb == located.teb)
+            && inventory::verify_located(reader, self.profile, pid, located) == Ok(true)
+    }
+    /// The full search: every thread of the process, its TEB asked of the system and checked,
+    /// its TLS route followed. A single context among them, as it was on every cycle before
+    /// the thread was kept; that it is single is now checked here, once per
+    /// [`inventory::CONTEXT_SEARCH_EVERY`] and not every cycle (accepted by the owner on 8
+    /// October 2026). Counts the process's own threads in `own`.
+    fn search_threads(
+        &self,
+        reader: &mut Reader<ProcessMemory<'_>>,
+        stop: &AtomicBool,
+        deadline: Instant,
+        pid: u32,
+        own: &mut usize,
+    ) -> Result<Located, ReadError> {
+        let snapshot = OwnedHandle(
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+                .map_err(|_| ReadError::ReadFailed)?,
+        );
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        unsafe { Thread32First(snapshot.0, &mut entry) }.map_err(|_| ReadError::ReadFailed)?;
+        let mut total = 0;
+        // Context -> the first thread whose route led to it, and that thread's TEB.
+        let mut contexts: BTreeMap<u64, (u32, u64)> = BTreeMap::new();
+        loop {
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Err(ReadError::ReadFailed);
+            }
+            total += 1;
+            if total > MAX_SYSTEM_ENTRIES {
+                return Err(ReadError::Bounds);
+            }
+            if entry.th32OwnerProcessID == pid {
+                *own += 1;
+                if *own > MAX_THREADS {
+                    return Err(ReadError::Bounds);
+                }
+                let teb = self.teb_of_thread(pid, entry.th32ThreadID)?;
+                if reader.pointer(teb + 0x30)? != teb {
+                    return Err(ReadError::ReadFailed);
+                }
+                if let Some(context) = inventory::context_from_teb(reader, self.profile, teb)? {
+                    contexts.entry(context).or_insert((entry.th32ThreadID, teb));
+                }
+                if contexts.len() > 1 {
+                    return Err(ReadError::RootUnavailable);
+                }
+            }
+            if let Err(error) = unsafe { Thread32Next(snapshot.0, &mut entry) } {
+                if error.code() != windows::core::HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
+                    return Err(ReadError::ReadFailed);
+                }
+                break;
+            }
+        }
+        let (context, (thread, teb)) = contexts
+            .into_iter()
+            .next()
+            .ok_or(ReadError::RootUnavailable)?;
+        Ok(Located { thread, teb, context, threads: *own as u32 })
+    }
     fn sample(&self, stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
         // The cycle's start, read once: its deadline counts from it, and so do the times taken
         // below for the reader diagnostics. Those are the clock read around the passes this
@@ -509,81 +626,30 @@ impl NativeReader {
         let mut own = 0;
         let result = (|| {
             let pid = unsafe { GetCurrentProcessId() };
-            let snapshot = OwnedHandle(
-                unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
-                    .map_err(|_| ReadError::ReadFailed)?,
-            );
-            let mut entry = THREADENTRY32 {
-                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-                ..Default::default()
+            // The thread and the context the last full search found stand for 30 seconds, and
+            // the cycles in between check them: the system still has that thread with that
+            // TEB, and the TEB and the TLS route are what they were. A check that fails, or a
+            // copy or call that fails in it, is a full search in this same cycle.
+            let stored = SEARCH
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .stored(started);
+            let located = match stored.filter(|located| self.still_there(&mut reader, pid, located)) {
+                Some(located) => {
+                    own = located.threads as usize;
+                    located
+                }
+                None => {
+                    let mut search = SEARCH.lock().unwrap_or_else(|p| p.into_inner());
+                    search.forget();
+                    let located = self.search_threads(&mut reader, stop, deadline, pid, &mut own)?;
+                    search.found(located, Instant::now());
+                    located
+                }
             };
-            unsafe { Thread32First(snapshot.0, &mut entry) }.map_err(|_| ReadError::ReadFailed)?;
-            let mut total = 0;
-            let mut contexts = BTreeSet::new();
-            loop {
-                if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
-                    return Err(ReadError::ReadFailed);
-                }
-                total += 1;
-                if total > MAX_SYSTEM_ENTRIES {
-                    return Err(ReadError::Bounds);
-                }
-                if entry.th32OwnerProcessID == pid {
-                    own += 1;
-                    if own > MAX_THREADS {
-                        return Err(ReadError::Bounds);
-                    }
-                    let thread = OwnedHandle(
-                        unsafe { OpenThread(THREAD_QUERY_INFORMATION, false, entry.th32ThreadID) }
-                            .map_err(|_| ReadError::ReadFailed)?,
-                    );
-                    let mut basic = ThreadBasic::default();
-                    let mut size = 0;
-                    let status = unsafe {
-                        (self.query)(
-                            thread.0,
-                            0,
-                            &mut basic,
-                            std::mem::size_of::<ThreadBasic>() as u32,
-                            &mut size,
-                        )
-                    };
-                    if status < 0
-                        || size as usize != std::mem::size_of::<ThreadBasic>()
-                        || basic.process as usize != pid as usize
-                        || basic.thread as usize != entry.th32ThreadID as usize
-                    {
-                        return Err(ReadError::ReadFailed);
-                    }
-                    let teb = basic.teb as u64;
-                    if teb < 0x10000
-                        || teb > 0x0000_7fff_ffff_ff00
-                        || reader.pointer(teb + 0x30)? != teb
-                    {
-                        return Err(ReadError::ReadFailed);
-                    }
-                    if let Some(context) =
-                        inventory::context_from_teb(&mut reader, self.profile, teb)?
-                    {
-                        contexts.insert(context);
-                    }
-                    if contexts.len() > 1 {
-                        return Err(ReadError::RootUnavailable);
-                    }
-                }
-                if let Err(error) = unsafe { Thread32Next(snapshot.0, &mut entry) } {
-                    if error.code() != windows::core::HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
-                        return Err(ReadError::ReadFailed);
-                    }
-                    break;
-                }
-            }
             let found = Instant::now();
             took.threads = Some(found.saturating_duration_since(started));
-            let context = contexts
-                .into_iter()
-                .next()
-                .ok_or(ReadError::RootUnavailable)?;
+            let context = located.context;
             let read = inventory::inventory_snapshot(&mut reader, self.profile, context);
             let after_inventory = Instant::now();
             took.inventory = Some(after_inventory.saturating_duration_since(found));

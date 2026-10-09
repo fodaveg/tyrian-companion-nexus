@@ -103,8 +103,16 @@ a pass verifies it by the headers (164 reads and 19556 bytes over the live shape
 349 and 29328 for a whole pass). Every pass still reads the route, the slots, both table
 headers, the buckets, every node and the first 48 bytes of each definition in use, and a
 buff applied or removed, another build, context, character or definition makes that same
-pass read everything. The cache is also emptied when the client discards a cycle because the
-context changed under it, and by any pass that ends without a value. What a verifying pass
+pass read everything. The game's context is found the same way: the walk over the process's
+own threads (about 115 in a running game, each with its handle, a query and a few copies) is
+made every 30 seconds, and the cycles in between only check the thread it found: the system
+still has it with the same TEB, the TEB's self pointer, process and thread ids are the same,
+and its TLS route ends at the same context (6 copies, 68 bytes). A check that fails, or a
+copy or call in it that fails, is a full walk in that same cycle, so nothing is read through a
+thread that was not just checked. That there is only one context is checked by the walk, once
+every 30 seconds, no longer on every cycle; accepted by the owner on 8 October 2026. The
+cache is also emptied, and the thread found forgotten, when the client discards a cycle
+because the context changed under it; the cache is emptied as well by any pass that ends without a value. What a verifying pass
 does not see, for at most 30 seconds, is in the header of `core/src/magic_find.rs`.
 
 ## What it does, and does not do

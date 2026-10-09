@@ -815,3 +815,83 @@ fn invalid_teb_tls_index_and_read_count_reject_before_memory_request() {
     );
     assert_eq!(r.reads, 1);
 }
+
+const PID: u32 = 4242;
+const THREAD: u32 = 77;
+const TEB: u64 = 0x110000;
+/// A process whose thread `THREAD` has its TEB at `TEB`, TLS route to `CTX` included.
+fn located_fixture() -> (Fixture, Located) {
+    let mut m = fixture(0);
+    for (a, v, z) in [
+        (TEB + 0x30, TEB, 8),
+        (TEB + 0x40, PID as u64, 8),
+        (TEB + 0x48, THREAD as u64, 8),
+        (BASE + TLS_INDEX_RVA, 3, 4),
+        (TEB + 0x58, 0x111000, 8),
+        (0x111000 + 24, 0x112000, 8),
+        (0x112000 + 0x10, CTX, 8),
+        (CTX + 0x198, 0x113000, 8),
+    ] {
+        m.put(a, v, z);
+    }
+    (m, Located { thread: THREAD, teb: TEB, context: CTX, threads: 115 })
+}
+fn verify(m: Fixture, located: &Located) -> (Result<bool, ReadError>, usize, usize) {
+    let mut r = Reader::new(m);
+    let outcome = verify_located(&mut r, profile(), PID, located);
+    (outcome, r.reads, r.bytes)
+}
+
+/// A cycle that verifies costs six copies and 68 bytes, where finding the thread again costs
+/// one OpenThread, one query and the same six copies for each of the process's own threads
+/// (about 115 in a running game: some 800 copies).
+#[test]
+fn a_stored_thread_is_verified_with_six_copies() {
+    let (m, located) = located_fixture();
+    assert_eq!(verify(m, &located), (Ok(true), 6, 32 + 4 + 8 + 8 + 8 + 8));
+}
+
+/// Anything that is not the thread and the route a full search found fails the check, and a
+/// copy that cannot be made is an error: the caller searches the threads either way.
+#[test]
+fn a_stored_thread_that_is_not_what_was_found_fails_the_verification() {
+    let (m, located) = located_fixture();
+    for (what, address, value, size) in [
+        ("a TEB that does not point to itself", TEB + 0x30, TEB + 8, 8),
+        ("another process", TEB + 0x40, PID as u64 + 4, 8),
+        ("the TEB reused by another thread", TEB + 0x48, THREAD as u64 + 1, 8),
+        ("another TLS block", 0x111000 + 24, 0x114000, 8),
+        ("a context that is another", 0x112000 + 0x10, CTX + 0x1000, 8),
+        ("a context with no character context", CTX + 0x198, 0, 8),
+        ("no TLS block", 0x111000 + 24, 0, 8),
+        ("no TLS array", TEB + 0x58, 0, 8),
+    ] {
+        let mut changed = m.clone();
+        changed.put(address, value, size);
+        let (outcome, _, _) = verify(changed, &located);
+        assert_eq!(outcome, Ok(false), "{what}");
+    }
+    // The thread's memory is gone: not a mismatch to shrug off, an error.
+    let gone = Located { teb: 0x900000, ..located };
+    assert_eq!(verify(m.clone(), &gone).0, Err(ReadError::ReadFailed));
+    // A TEB that cannot be one is refused before it is read.
+    let bad = Located { teb: 0x110004, ..located };
+    assert_eq!(verify(m, &bad), (Err(ReadError::Bounds), 0, 0));
+}
+
+/// The full search stands for 30 seconds and is forgotten on request.
+#[test]
+fn a_full_search_stands_for_thirty_seconds_and_is_forgotten_on_request() {
+    let (_, located) = located_fixture();
+    let start = std::time::Instant::now();
+    let mut search = ContextSearch::new();
+    assert_eq!(search.stored(start), None, "nothing found yet");
+    search.found(located, start);
+    assert_eq!(search.stored(start), Some(located));
+    assert_eq!(search.stored(start + CONTEXT_SEARCH_EVERY - std::time::Duration::from_millis(1)), Some(located));
+    assert_eq!(search.stored(start + CONTEXT_SEARCH_EVERY), None, "30 s old: search again");
+    // A clock that went back is no age at all.
+    assert_eq!(search.stored(start - std::time::Duration::from_secs(1)), None);
+    search.forget();
+    assert_eq!(search.stored(start), None);
+}

@@ -6,6 +6,7 @@
 
 use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 pub const BUILD_SHA256: &str = "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c";
 pub const PROFILE: &str = "owned-bags-v3";
@@ -146,6 +147,82 @@ pub fn context_from_teb<M: Memory>(
         return Ok(None);
     }
     Ok(Some(context))
+}
+
+/// How long the thread and the context a full search found stand for the cycles that only
+/// verify them. After this long, or as soon as the verification fails, the next cycle searches
+/// all the threads again. Accepted by the owner on 8 October 2026.
+pub const CONTEXT_SEARCH_EVERY: Duration = Duration::from_secs(30);
+
+/// Where a full search found the game's context: the thread whose TLS route leads to it, that
+/// thread's TEB, and the context. Only what a cycle needs to check it again; the thread is
+/// named by its id and not held open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Located {
+    pub thread: u32,
+    pub teb: u64,
+    pub context: u64,
+    /// How many threads of its own the process had when this was found, for the diagnostics.
+    pub threads: u32,
+}
+
+/// What a cycle keeps of its search for the game's context: the thread found and when. One per
+/// load, behind the caller's lock; it holds no handle and no address that is read without
+/// being checked first.
+#[derive(Debug, Default)]
+pub struct ContextSearch {
+    kept: Option<(Located, Instant)>,
+}
+impl ContextSearch {
+    pub const fn new() -> Self {
+        Self { kept: None }
+    }
+    /// What the last full search found, while it is younger than [`CONTEXT_SEARCH_EVERY`] at
+    /// `now` (and `now` is not earlier than it). `None` is a cycle that has to search all the
+    /// threads: nothing found yet, or too old, or forgotten.
+    pub fn stored(&self, now: Instant) -> Option<Located> {
+        let (located, at) = self.kept?;
+        now.checked_duration_since(at)
+            .filter(|age| *age < CONTEXT_SEARCH_EVERY)
+            .map(|_| located)
+    }
+    /// A full search ended in a single context found on this thread.
+    pub fn found(&mut self, located: Located, now: Instant) {
+        self.kept = Some((located, now));
+    }
+    /// Forget it: the next cycle searches. For a failed verification, a cycle the client
+    /// discarded, and the unload.
+    pub fn forget(&mut self) {
+        self.kept = None;
+    }
+}
+
+/// Checks, with the reader, that `located` is still what a full search found: the TEB at
+/// `teb+0x30` points to itself and carries this process and this thread in its client id
+/// (`teb+0x40` and `teb+0x48`), and its TLS route still ends at the same context, past the same
+/// checks as [`context_from_teb`]. `pid` is the process's own.
+///
+/// This is half of the check; the other half is the system's, that the thread still exists with
+/// that TEB (the adapter asks for it by id). A TEB that was freed and reused by another thread
+/// fails here by its client id. Anything but a perfect match is `false`, and a copy that fails
+/// is an error: either way the caller searches all the threads, and reads nothing with what it
+/// had.
+pub fn verify_located<M: Memory>(
+    reader: &mut Reader<M>,
+    profile: BuildProfile,
+    pid: u32,
+    located: &Located,
+) -> Result<bool, ReadError> {
+    let Located { thread, teb, context, .. } = *located;
+    if !(0x10000..=MAX_POINTER - 0x58).contains(&teb) || teb & 7 != 0 {
+        return Err(ReadError::Bounds);
+    }
+    let head: [u8; 32] = reader.read(teb + 0x30)?;
+    let word = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    if word(0) != teb || word(0x10) != u64::from(pid) || word(0x18) != u64::from(thread) {
+        return Ok(false);
+    }
+    Ok(context_from_teb(reader, profile, teb)? == Some(context))
 }
 
 /// Only aggregated supported IDs are exposed. An unknown instance suppresses its entire ID.

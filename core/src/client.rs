@@ -122,7 +122,7 @@ pub trait Host: Send + 'static {
     fn inventory_diagnostics(&self) -> crate::inventory::Diagnostics { crate::inventory::Diagnostics::default() }
     /// The loop threw away the cycle [`Host::read_inventory`] just ran, because the game
     /// context changed while it was copying. Whatever the source keeps from one cycle to the
-    /// next (the Magic Find content) belongs to a cycle that is gone and
+    /// next (the Magic Find content, the thread the game's context was found on) belongs to a cycle that is gone and
     /// is forgotten here, so the next cycle reads and finds everything again. A host that
     /// keeps nothing has nothing to do.
     fn discard_cycle(&self) {}
