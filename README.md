@@ -132,6 +132,25 @@ the context probe does not see because the state, the map and the character are 
 after it. Neither is detected, and nothing here claims to detect them. The known limit
 stays too: a context that names one character while the memory belongs to another.
 
+Version 0.8.4 raises the bounds of the walk over threads and changes two icons. Discovery
+is now capped at 256 own threads (it was 128) and 65536 system thread entries (it was
+4096): on native Windows the snapshot lists the threads of the whole system, and the old
+bound could keep the addon from reading; the game measured had 133 threads. A thread that
+no longer exists when it is about to be opened is skipped, and only that case: the read
+failed and the system confirms, on a second open, that the thread does not exist. Access
+denied and any other failure still abort the capture. The decision to skip lives in `core`,
+with its table test. The cost is that in a full search cycle with the thread bound 437
+conditional stacks fit instead of 460. In the quick access bar, the options monster is a
+new cut-out made from the original watercolour, with a 1 px black border and the gaps
+between the legs open; no hover has a halo, and both react with lighter paint (the owner's
+decisions of 9 October 2026). The protocol with the plugin does not change, and neither
+does the DLL's import table (257).
+
+Nothing of 0.8.4 has been seen inside the game, and nothing of it has run on native
+Windows. The real error code of `OpenThread` for a terminated thread, on Windows and under
+Proton, is not verified. A terminated thread whose object is still referenced is not
+covered. The cases of 0.8.3 stay uncovered, and so does its known limit.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
