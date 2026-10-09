@@ -1209,6 +1209,14 @@ pumpkin for the panel, the monster for the options; the hover is the same drawin
 halo). They are David's drawings, loaded as they are with no tint or conversion. Replacing them is
 changing those four files and rebuilding.
 
+The monster is a new cut-out made from the original watercolour, with a 1 px black border and the
+gaps between the legs left open (before, they were filled with black). The hover variant carries
+the same 1 px white halo on the outside, which on the monster stays open at the bottom, between
+the middle legs, because closing it would cover the gaps. The script that generates them is
+`13-addon.py`, in `~/Descargas/imagenes-tyrian/icono-hebra-patas-20261009/` (outside this
+repository). **Not verified**: the new monster icons have not been seen in the game, in Nexus's
+quick access bar, at its real size.
+
 ## Reconnecting
 
 The addon does not need the plugin, or the game, to start first. If there is no server
