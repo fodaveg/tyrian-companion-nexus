@@ -1205,16 +1205,18 @@ shows and hides this addon's windows. All of it is removed when the addon unload
 
 The icons are four PNG files embedded in the DLL: `addon/assets/qa-panel.png`,
 `qa-panel-hover.png`, `qa-options.png` and `qa-options-hover.png`, 32x32 RGBA, full colour (the
-pumpkin for the panel, the monster for the options; the hover is the same drawing with a 1 px white
-halo). They are David's drawings, loaded as they are with no tint or conversion. Replacing them is
+pumpkin for the panel, the monster for the options; the pumpkin's hover is the same drawing with a
+1 px white halo, the monster's is described below). They are David's drawings, loaded as they are with no tint or conversion. Replacing them is
 changing those four files and rebuilding.
 
 The monster is a new cut-out made from the original watercolour, with a 1 px black border and the
-gaps between the legs left open (before, they were filled with black). The hover variant carries
-the same 1 px white halo on the outside, which on the monster stays open at the bottom, between
-the middle legs, because closing it would cover the gaps. The script that generates them is
+gaps between the legs left open (before, they were filled with black). The monster's hover is
+the same drawing with the same black border and the colour multiplied by 1.077, with no halo (the
+owner's decision of 9 October 2026), while the pumpkin keeps its 1 px white halo, so the two
+hovers no longer match in that. Without the halo, the monster's hover is told apart only by a rise
+in lightness from 53.0 to 56.3 (L*), hardly visible at real size. The script that generates them is
 `13-addon.py`, in `~/Descargas/imagenes-tyrian/icono-hebra-patas-20261009/` (outside this
-repository). **Not verified**: the new monster icons have not been seen in the game, in Nexus's
+repository). **Not verified**: the new monster icons (the hover without halo included) have not been seen in the game, in Nexus's
 quick access bar, at its real size.
 
 ## Reconnecting
