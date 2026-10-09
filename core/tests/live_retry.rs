@@ -50,7 +50,7 @@ fn reply(c: &mut Channel, open: &Value, status: &str, now: Instant) {
 }
 /// Opens an epoch at `now` and answers it with `status` at the same instant.
 fn open_and_answer(c: &mut Channel, status: &str, now: Instant) -> Value {
-    let open = c.capture(Ok(sample(0)), 0, now).remove(0);
+    let open = c.capture(Ok(sample(0)), 0, now).remove(0).to_value();
     assert_eq!(open["type"], "live_open");
     reply(c, &open, status, now);
     open
@@ -72,7 +72,7 @@ fn source_conflict_waits_the_interval_then_opens_again_with_a_new_epoch() {
     assert!(!c.wants_sample(now + WAIT - Duration::from_millis(1)));
     assert!(c.wants_sample(now + WAIT));
     let retry = now + WAIT;
-    let second = c.capture(Ok(sample(5)), 0, retry).remove(0);
+    let second = c.capture(Ok(sample(5)), 0, retry).remove(0).to_value();
     assert_eq!(second["type"], "live_open");
     assert_ne!(second["epoch"], first["epoch"]);
 }
@@ -85,10 +85,10 @@ fn a_retry_answered_ready_measures_normally_from_a_fresh_baseline() {
     let retry = now + WAIT;
     let open = open_and_answer(&mut c, "ready", retry);
     let frames = c.pending_frames(0, retry).unwrap();
-    assert_eq!(frames[0]["mode"], "baseline");
-    assert_eq!(frames[0]["cursor"], 0);
-    assert_eq!(frames[0]["ms"], 0);
-    assert_eq!(frames[0]["epoch"], open["epoch"]);
+    assert_eq!(frames[0].to_value()["mode"], "baseline");
+    assert_eq!(frames[0].to_value()["cursor"], 0);
+    assert_eq!(frames[0].to_value()["ms"], 0);
+    assert_eq!(frames[0].to_value()["epoch"], open["epoch"]);
     assert!(c.accept(
         Reply::Ack {
             nonce: NONCE.into(),
@@ -104,8 +104,8 @@ fn a_retry_answered_ready_measures_normally_from_a_fresh_baseline() {
     assert!(!c.wants_sample(retry));
     assert!(c.wants_sample(retry + CAPTURE_INTERVAL));
     let next = c.capture(Ok(sample(3)), 0, retry + CAPTURE_INTERVAL);
-    assert_eq!(next[0]["mode"], "sample");
-    assert_eq!(next[0]["cursor"], 1);
+    assert_eq!(next[0].to_value()["mode"], "sample");
+    assert_eq!(next[0].to_value()["cursor"], 1);
 }
 
 #[test]

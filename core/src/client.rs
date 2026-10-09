@@ -243,7 +243,7 @@ impl Session {
 
     /// Serialize an entire bounded batch before advancing the shared TCP sequence.
     /// A framing/numbering failure sends none of the batch.
-    fn live_lines(&mut self, frames: Vec<serde_json::Value>, now: Instant) -> Option<Vec<String>> {
+    fn live_lines(&mut self, frames: Vec<crate::live::Frame>, now: Instant) -> Option<Vec<String>> {
         if frames.len() > 82 { return None; }
         let mut lines = Vec::with_capacity(frames.len());
         let mut bytes = 0;

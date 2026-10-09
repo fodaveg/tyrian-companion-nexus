@@ -4,8 +4,10 @@
 use crate::inventory::{InventorySnapshot, ReadError, BUILD_SHA256, PROFILE};
 use crate::protocol::{is_canonical_instance, GameContext, GameState, MAX_LINE_BYTES};
 use crate::wallet::WalletSnapshot;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const MAX_SAFE: u64 = 9_007_199_254_740_991;
@@ -296,7 +298,7 @@ impl Channel {
                 .is_none_or(|e| e.ready && !e.waiting_ack && e.pending.is_none())
     }
     /// Consume the last capture only after ready, without asking for a second baseline.
-    pub fn pending_frames(&mut self, ctx: u64, now: Instant) -> Option<Vec<Value>> {
+    pub fn pending_frames(&mut self, ctx: u64, now: Instant) -> Option<Vec<Frame>> {
         let e = self.epoch.as_mut()?;
         if !e.ready || e.waiting_ack {
             return None;
@@ -317,7 +319,7 @@ impl Channel {
         result: Result<InventorySnapshot, ReadError>,
         ctx: u64,
         now: Instant,
-    ) -> Vec<Value> {
+    ) -> Vec<Frame> {
         self.next_capture = Some(now + CAPTURE_INTERVAL);
         let mut snapshot = match result {
             Ok(snapshot) => snapshot,
@@ -335,8 +337,9 @@ impl Channel {
             let id = crate::instance::new_instance_id();
             self.last_declared_epoch = Some(id.clone());
             self.opened = self.opened.saturating_add(1);
-            let frame =
-                json!({"type":"live_open","epoch":id,"build":BUILD_SHA256,"profile":PROFILE});
+            let frame = Frame::Open {
+                epoch: Arc::from(id.as_str()),
+            };
             self.epoch = Some(Epoch {
                 id,
                 owner: snapshot.owner,
@@ -384,19 +387,19 @@ impl Channel {
     /// Unlike [`Channel::capture`] it does not put the next sample off. The source is asked
     /// again on the next pass, so what it is getting ready goes on at the pace it had, and the
     /// first sample it gives opens an epoch as on any other load.
-    pub fn overdue(&mut self) -> Vec<Value> {
+    pub fn overdue(&mut self) -> Vec<Frame> {
         self.unavailable(ReadError::ReadFailed)
     }
     /// No sample, and why: the epoch is cut and the reason is said once, until a sample or a
     /// change of context makes it worth saying again.
-    fn unavailable(&mut self, error: ReadError) -> Vec<Value> {
+    fn unavailable(&mut self, error: ReadError) -> Vec<Frame> {
         let reason = match error {
             ReadError::UnsupportedBuild => "unsupported_build",
             ReadError::RootUnavailable => "root_unavailable",
             _ => "read_failed",
         };
         self.epoch = None;
-        let epoch = self.last_declared_epoch.clone();
+        let epoch = self.last_declared_epoch.as_deref().map(Arc::from);
         self.status = if error == ReadError::UnsupportedBuild {
             self.blocked = true;
             LiveStatus::UnsupportedBuild
@@ -407,10 +410,10 @@ impl Channel {
             return vec![];
         }
         self.reason = Some(reason);
-        vec![json!({"type":"live_status","epoch":epoch,"status":"unavailable","reason":reason})]
+        vec![Frame::Status { epoch, reason }]
     }
     /// Non-gameplay status is emitted once per discontinuity, never every poll.
-    pub fn gameplay_status(&mut self) -> Vec<Value> {
+    pub fn gameplay_status(&mut self) -> Vec<Frame> {
         if !self.enabled
             || self
                 .context
@@ -422,9 +425,10 @@ impl Channel {
         }
         self.reason = Some("not_gameplay");
         self.status = LiveStatus::Unavailable;
-        vec![
-            json!({"type":"live_status","epoch":self.last_declared_epoch,"status":"unavailable","reason":"not_gameplay"}),
-        ]
+        vec![Frame::Status {
+            epoch: self.last_declared_epoch.as_deref().map(Arc::from),
+            reason: "not_gameplay",
+        }]
     }
 }
 
@@ -439,7 +443,7 @@ pub fn snapshot_frames(
     ctx: u64,
     ms: u64,
     s: &InventorySnapshot,
-) -> Option<Vec<Value>> {
+) -> Option<Vec<Frame>> {
     let balances = s.wallet.as_ref().map(WalletSnapshot::balances);
     let total = s.quantities.len() + balances.map_or(0, |balances| balances.len());
     if !is_canonical_instance(epoch)
@@ -458,13 +462,8 @@ pub fn snapshot_frames(
     {
         return None;
     }
-    let mut frames = vec![
-        json!({"type":"live_begin","epoch":epoch,"cursor":cursor,"ctx":ctx,"ms":ms,
-        "mode":if cursor==0 {"baseline"}else{"sample"},"items":if s.unknown==0 {"complete"}else{"partial"},
-        "currencies":if balances.is_some() {"listed"}else{"none"},
-        "unknown":s.unknown,"slots":s.free_slots,"rows":total}),
-    ];
-    let rows: Vec<_> = s
+    let epoch: Arc<str> = Arc::from(epoch);
+    let rows: Arc<[[u32; 3]]> = s
         .quantities
         .iter()
         .map(|(id, n)| [0, *id, *n])
@@ -475,29 +474,271 @@ pub fn snapshot_frames(
                 .map(|(id, balance)| [1, *id, *balance]),
         )
         .collect();
-    for (part, rows) in rows.chunks(8).enumerate() {
-        frames.push(
-            json!({"type":"live_rows","epoch":epoch,"cursor":cursor,"part":part,"rows":rows}),
-        );
+    let parts = total.div_ceil(PART_ROWS);
+    let mut frames = Vec::with_capacity(parts + 2);
+    frames.push(Frame::Begin(Begin {
+        epoch: epoch.clone(),
+        cursor,
+        ctx,
+        ms,
+        baseline: cursor == 0,
+        complete: s.unknown == 0,
+        listed: s.wallet.is_some(),
+        unknown: s.unknown,
+        slots: s.free_slots,
+        rows: total,
+    }));
+    for part in 0..parts {
+        let start = part * PART_ROWS;
+        frames.push(Frame::Rows(Rows {
+            epoch: epoch.clone(),
+            cursor,
+            part,
+            all: rows.clone(),
+            range: start..(start + PART_ROWS).min(total),
+        }));
     }
-    frames.push(json!({"type":"live_end","epoch":epoch,"cursor":cursor}));
+    frames.push(Frame::End { epoch, cursor });
     Some(frames)
 }
 
+/// How many rows one `live_rows` frame holds at most.
+const PART_ROWS: usize = 8;
+
+/// One `live1` frame before the transport stamps it with `v`, `tag`, `nonce` and `seq`.
+///
+/// The frames are plain data and [`frame_line`] writes them straight to the line; no
+/// `serde_json::Value` tree is built on the way. The keys of every line come out in
+/// alphabetical order, which is what the plugin's fixtures (`fixtures/live1.json`) and the first
+/// producer, that built `json!` objects, always had; `tests/live_wire_bytes.rs` pins the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+    /// `live_open`: declares a new epoch for this build and profile.
+    Open { epoch: Arc<str> },
+    /// `live_begin`: how the sample that follows is made.
+    Begin(Begin),
+    /// `live_rows`: up to eight rows of the sample.
+    Rows(Rows),
+    /// `live_end`: the sample is complete.
+    End { epoch: Arc<str>, cursor: u64 },
+    /// `live_status`: why there is no sample. `epoch` is the last one declared, if any.
+    Status {
+        epoch: Option<Arc<str>>,
+        reason: &'static str,
+    },
+}
+/// The `live_begin` frame of a sample.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Begin {
+    pub epoch: Arc<str>,
+    pub cursor: u64,
+    pub ctx: u64,
+    pub ms: u64,
+    /// Cursor 0: the sample is the epoch's baseline.
+    pub baseline: bool,
+    /// No quantity was left unknown.
+    pub complete: bool,
+    /// The wallet is listed in this sample.
+    pub listed: bool,
+    pub unknown: u32,
+    pub slots: Option<u32>,
+    /// Item and currency rows of the whole sample.
+    pub rows: usize,
+}
+/// A `live_rows` frame: a window onto the rows of the sample, which all its parts share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rows {
+    pub epoch: Arc<str>,
+    pub cursor: u64,
+    pub part: usize,
+    all: Arc<[[u32; 3]]>,
+    range: Range<usize>,
+}
+impl Rows {
+    /// The rows of this part: `[0,id,quantity]` for an item, `[1,id,balance]` for a currency.
+    pub fn rows(&self) -> &[[u32; 3]] {
+        &self.all[self.range.clone()]
+    }
+}
+
+// The wire shapes. Each struct lists its fields in the alphabetical order of their JSON keys,
+// the envelope's `nonce`, `seq`, `tag` and `v` among them.
+#[derive(Serialize)]
+struct OpenLine<'a> {
+    build: &'a str,
+    epoch: &'a str,
+    nonce: &'a str,
+    profile: &'a str,
+    seq: u64,
+    tag: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    v: u8,
+}
+#[derive(Serialize)]
+struct BeginLine<'a> {
+    ctx: u64,
+    currencies: &'static str,
+    cursor: u64,
+    epoch: &'a str,
+    items: &'static str,
+    mode: &'static str,
+    ms: u64,
+    nonce: &'a str,
+    rows: usize,
+    seq: u64,
+    slots: Option<u32>,
+    tag: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    unknown: u32,
+    v: u8,
+}
+#[derive(Serialize)]
+struct RowsLine<'a> {
+    cursor: u64,
+    epoch: &'a str,
+    nonce: &'a str,
+    part: usize,
+    rows: &'a [[u32; 3]],
+    seq: u64,
+    tag: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    v: u8,
+}
+#[derive(Serialize)]
+struct EndLine<'a> {
+    cursor: u64,
+    epoch: &'a str,
+    nonce: &'a str,
+    seq: u64,
+    tag: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    v: u8,
+}
+#[derive(Serialize)]
+struct StatusLine<'a> {
+    epoch: Option<&'a str>,
+    nonce: &'a str,
+    reason: &'static str,
+    seq: u64,
+    status: &'static str,
+    tag: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    v: u8,
+}
+const TAG: &str = "live1";
+const WIRE_VERSION: u8 = 3;
+
+impl Frame {
+    /// Writes the frame, stamped, as JSON.
+    fn write<W: std::io::Write>(&self, out: W, nonce: &str, seq: u64) -> serde_json::Result<()> {
+        let (tag, v) = (TAG, WIRE_VERSION);
+        match self {
+            Frame::Open { epoch } => serde_json::to_writer(
+                out,
+                &OpenLine {
+                    build: BUILD_SHA256,
+                    epoch,
+                    nonce,
+                    profile: PROFILE,
+                    seq,
+                    tag,
+                    kind: "live_open",
+                    v,
+                },
+            ),
+            Frame::Begin(b) => serde_json::to_writer(
+                out,
+                &BeginLine {
+                    ctx: b.ctx,
+                    currencies: if b.listed { "listed" } else { "none" },
+                    cursor: b.cursor,
+                    epoch: &b.epoch,
+                    items: if b.complete { "complete" } else { "partial" },
+                    mode: if b.baseline { "baseline" } else { "sample" },
+                    ms: b.ms,
+                    nonce,
+                    rows: b.rows,
+                    seq,
+                    slots: b.slots,
+                    tag,
+                    kind: "live_begin",
+                    unknown: b.unknown,
+                    v,
+                },
+            ),
+            Frame::Rows(r) => serde_json::to_writer(
+                out,
+                &RowsLine {
+                    cursor: r.cursor,
+                    epoch: &r.epoch,
+                    nonce,
+                    part: r.part,
+                    rows: r.rows(),
+                    seq,
+                    tag,
+                    kind: "live_rows",
+                    v,
+                },
+            ),
+            Frame::End { epoch, cursor } => serde_json::to_writer(
+                out,
+                &EndLine {
+                    cursor: *cursor,
+                    epoch,
+                    nonce,
+                    seq,
+                    tag,
+                    kind: "live_end",
+                    v,
+                },
+            ),
+            Frame::Status { epoch, reason } => serde_json::to_writer(
+                out,
+                &StatusLine {
+                    epoch: epoch.as_deref(),
+                    nonce,
+                    reason,
+                    seq,
+                    status: "unavailable",
+                    tag,
+                    kind: "live_status",
+                    v,
+                },
+            ),
+        }
+    }
+    /// The frame as a JSON value, without the `v`, `tag`, `nonce` and `seq` the transport adds.
+    /// For tests and diagnostics; the wire never goes through it.
+    pub fn to_value(&self) -> Value {
+        let mut bytes = Vec::new();
+        self.write(&mut bytes, "", 0)
+            .expect("a frame is always serializable");
+        let mut value: Value = serde_json::from_slice(&bytes).expect("a frame is valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            for key in ["v", "tag", "nonce", "seq"] {
+                object.remove(key);
+            }
+        }
+        value
+    }
+}
+
 /// Check the final serialization, including the shared sequence number, before any socket write.
-pub fn frame_line(mut frame: Value, nonce: &str, seq: u64) -> Option<String> {
+pub fn frame_line(frame: Frame, nonce: &str, seq: u64) -> Option<String> {
     if !is_canonical_instance(nonce) || seq > MAX_SAFE {
         return None;
     }
-    let object = frame.as_object_mut()?;
-    object.insert("v".into(), json!(3));
-    object.insert("tag".into(), json!("live1"));
-    object.insert("nonce".into(), json!(nonce));
-    object.insert("seq".into(), json!(seq));
-    let mut line = serde_json::to_string(&frame).ok()?;
+    // Room for a part of eight rows, so the line is written without growing.
+    let mut line = Vec::with_capacity(384);
+    frame.write(&mut line, nonce, seq).ok()?;
     if line.len() > MAX_LINE_BYTES {
         return None;
     }
-    line.push('\n');
-    Some(line)
+    line.push(b'\n');
+    String::from_utf8(line).ok()
 }
