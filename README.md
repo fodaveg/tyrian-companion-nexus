@@ -166,11 +166,12 @@ covered. The cases of 0.8.3 stay uncovered, and so does its known limit.
 Version 0.8.5 lets Nexus update the addon from this repository's GitHub releases (see
 "Updating the addon" below). Nothing else changes: the protocol with the plugin and the DLL's
 import table stay as they were. Whoever has 0.8.4 or earlier has to put 0.8.5 by hand once;
-from there on Nexus updates it. That Nexus finds and applies a release has not been seen on a
-real Nexus yet.
+from there on Nexus updates it.
 
 Version 0.8.6 changes nothing in the addon. It exists so that an installed 0.8.5 has a newer
-release to find, which is the first time the update from GitHub can be seen on a real Nexus.
+release to find. Seen on October 10, 2026 on a real Nexus under Proton: with 0.8.5 loaded, Nexus
+found 0.8.6, replaced the DLL, unloaded the addon and loaded 0.8.6 in the same game session, and
+the addon connected to the plugin again. Not seen on native Windows.
 
 ## Updating the addon
 
@@ -184,8 +185,9 @@ Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub release
 - **What Nexus does.** It lists the repository's releases, reads each tag as a version, and takes
   the newest one with a higher number than the DLL's own, from the first attached file whose name
   ends in `.dll`. The `.dll.sha256` file is ignored, as it does not end in `.dll`. It downloads
-  that file and swaps it for the one in `addons/`; the new version runs the next time the game
-  starts. By default Nexus checks and applies updates by itself, but each user can change that
+  that file, swaps it for the one in `addons/` and reloads the addon without restarting the game
+  (seen under Proton; Nexus keeps its answer from GitHub for 30 minutes, so a release can take
+  that long to be noticed). By default Nexus checks and applies updates by itself, but each user can change that
   per addon in Nexus, and prereleases are ignored unless the user allows them.
 - **What a release needs.** The tag is the version of `addon/Cargo.toml` with nothing else (`0.8.5`,
   no `v`, three numbers; a suffix such as `-beta` is not a version for Nexus), the release is not
