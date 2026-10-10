@@ -6,6 +6,18 @@ Obsidian or Hebra plugin emits, and reports game context and negotiated passive 
 observations for automatic sessions. It implements protocol **v3** of `docs/SPEC-puente-ingame.md` in that
 repo, which is the contract and the source of truth if the two disagree.
 
+## Disclaimer
+
+This addon reads the memory of the running Guild Wars 2 process to see the inventory and the
+wallet. It only reads: it does not write game memory, hook game code or send input.
+
+It is an unofficial, personal project. ArenaNet and NCSOFT did not make it and have not
+approved it, and whether using it fits the game's rules is for you to check.
+
+Use it at your own risk. It is provided as it is, with no warranty of any kind, and the author
+takes no responsibility for anything that happens to your account, your game or your computer
+from using it.
+
 Version 0.2.0 speaks v2 only. The plugin answers a v1 addon (0.1.x) with
 `version_unsupported`, and this addon answers a v1 plugin the same way in reverse, so both
 sides have to be updated together.
