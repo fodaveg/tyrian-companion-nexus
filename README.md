@@ -169,6 +169,9 @@ import table stay as they were. Whoever has 0.8.4 or earlier has to put 0.8.5 by
 from there on Nexus updates it. That Nexus finds and applies a release has not been seen on a
 real Nexus yet.
 
+Version 0.8.6 changes nothing in the addon. It exists so that an installed 0.8.5 has a newer
+release to find, which is the first time the update from GitHub can be seen on a real Nexus.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
