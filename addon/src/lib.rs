@@ -81,7 +81,8 @@ nexus::export! {
     load,
     unload,
     flags: AddonFlags::None,
-    provider: nexus::UpdateProvider::None,
+    provider: nexus::UpdateProvider::GitHub,
+    update_link: "https://github.com/fodaveg/tyrian-companion-nexus",
     log_filter: "info",
 }
 

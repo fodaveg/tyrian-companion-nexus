@@ -151,6 +151,32 @@ Windows. The real error code of `OpenThread` for a terminated thread, on Windows
 Proton, is not verified. A terminated thread whose object is still referenced is not
 covered. The cases of 0.8.3 stay uncovered, and so does its known limit.
 
+Version 0.8.5 lets Nexus update the addon from this repository's GitHub releases (see
+"Updating the addon" below). Nothing else changes: the protocol with the plugin and the DLL's
+import table stay as they were. Whoever has 0.8.4 or earlier has to put 0.8.5 by hand once;
+from there on Nexus updates it. That Nexus finds and applies a release has not been seen on a
+real Nexus yet.
+
+## Updating the addon
+
+Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
+`https://github.com/fodaveg/tyrian-companion-nexus` (`provider` and `update_link` in the
+`nexus::export!` block of `addon/src/lib.rs`).
+
+- **Once, by hand.** 0.8.4 and earlier declare no update source, so Nexus does not look for
+  anything for them. Download `tyrian_companion_nexus.dll` from the 0.8.5 release and replace the
+  old one in `<Guild Wars 2 install>/addons/`, with the game closed. From then on Nexus does it.
+- **What Nexus does.** It lists the repository's releases, reads each tag as a version, and takes
+  the newest one with a higher number than the DLL's own, from the first attached file whose name
+  ends in `.dll`. The `.dll.sha256` file is ignored, as it does not end in `.dll`. It downloads
+  that file and swaps it for the one in `addons/`; the new version runs the next time the game
+  starts. By default Nexus checks and applies updates by itself, but each user can change that
+  per addon in Nexus, and prereleases are ignored unless the user allows them.
+- **What a release needs.** The tag is the version of `addon/Cargo.toml` with nothing else (`0.8.5`,
+  no `v`, three numbers; a suffix such as `-beta` is not a version for Nexus), the release is not
+  marked as a prerelease, and the `.dll` is attached. `core/tests/update_source.rs` pins the
+  provider, the link and the shape of the version.
+
 ## What it does, and does not do
 
 It connects to a loopback TCP server the plugin opens (`127.0.0.1`, port 47823 by default,
