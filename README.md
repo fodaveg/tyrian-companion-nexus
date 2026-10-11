@@ -177,6 +177,10 @@ Version 0.8.7: if the game's close is cancelled (a WM_CLOSE with no WM_DESTROY a
 Mumble Link tick still moving 5 s later), the addon connects again instead of staying silent until
 reload.
 
+Version 0.8.8: after the plugin answers `source_conflict` (for example while a session stopped by
+hand is followed by one started by hand), the addon asks again with `live_open` after 5 s instead
+of 30 s. The protocol with the plugin does not change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
