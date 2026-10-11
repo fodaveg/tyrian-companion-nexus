@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 pub const MAX_SAFE: u64 = 9_007_199_254_740_991;
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Wait before `live_open` is sent again after the plugin answered `source_conflict`. The plugin
+/// Wait before `live_open` is sent again after the plugin answered `source_conflict`. It is also how
+/// long a player waits when the plugin refuses while a session is stopped by hand and then starts
+/// another (the plugin has no way to say the conflict ended), so it is kept short: one capture per
+/// wait is cheaper than the 1 s sampling cadence. The plugin
 /// gives that answer while another producer owns the session and also while its local store is
 /// down, so the conflict can end without any change of game context.
-pub const CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+pub const CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// live1's own cap on the rows of one sample, items and currencies together.
 pub const MAX_ROWS: usize = 4096;
 

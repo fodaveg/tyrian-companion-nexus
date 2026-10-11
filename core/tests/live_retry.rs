@@ -62,7 +62,7 @@ fn source_conflict_waits_the_interval_then_opens_again_with_a_new_epoch() {
     let mut c = channel(now);
     let first = open_and_answer(&mut c, "source_conflict", now);
     assert_eq!(c.status, LiveStatus::Conflict);
-    for secs in [1, 2, 15, 29] {
+    for secs in [1, 2, 3, 4] {
         assert!(
             !c.wants_sample(now + Duration::from_secs(secs)),
             "no sample {secs} s into the wait"
@@ -106,6 +106,18 @@ fn a_retry_answered_ready_measures_normally_from_a_fresh_baseline() {
     let next = c.capture(Ok(sample(3)), 0, retry + CAPTURE_INTERVAL);
     assert_eq!(next[0].to_value()["mode"], "sample");
     assert_eq!(next[0].to_value()["cursor"], 1);
+}
+
+/// A player who stops a session by hand and starts another gets `source_conflict` in between; the
+/// plugin cannot tell the addon that the conflict ended, so how soon it asks again is what the
+/// player waits (measured by David at 30-60 s with a 30 s wait).
+#[test]
+fn a_conflict_that_ends_is_noticed_within_five_seconds() {
+    assert!(CONFLICT_RETRY_INTERVAL <= Duration::from_secs(5));
+    let now = Instant::now();
+    let mut c = channel(now);
+    open_and_answer(&mut c, "source_conflict", now);
+    assert!(c.wants_sample(now + Duration::from_secs(5)));
 }
 
 #[test]
