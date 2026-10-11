@@ -173,6 +173,10 @@ release to find. Seen on October 10, 2026 on a real Nexus under Proton: with 0.8
 found 0.8.6, replaced the DLL, unloaded the addon and loaded 0.8.6 in the same game session, and
 the addon connected to the plugin again. Not seen on native Windows.
 
+Version 0.8.7: if the game's close is cancelled (a WM_CLOSE with no WM_DESTROY after it, and the
+Mumble Link tick still moving 5 s later), the addon connects again instead of staying silent until
+reload.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
