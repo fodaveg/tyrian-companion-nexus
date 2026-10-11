@@ -82,7 +82,17 @@ impl Host for NexusHost {
     fn game_exiting(&self) -> bool {
         // The Mumble Link is read here only while a `WM_CLOSE` is pending, to see whether the
         // game goes on ticking after it.
-        watch().exiting(Instant::now(), || self.read_game().mumble.map(|mumble| mumble.ui_tick))
+        //
+        // The lock is not held across that read: the `WndProc` takes it on the game's window
+        // thread, which must never wait for the worker to finish copying the link.
+        let watching = watch().watching_ticks();
+        let tick = if watching { self.read_game().mumble.map(|mumble| mumble.ui_tick) } else { None };
+        let mut watch = watch();
+        if watching {
+            // A `WM_DESTROY` that arrived during the read is not undone: `observe` ignores it.
+            watch.observe(Instant::now(), tick);
+        }
+        watch.is_exiting()
     }
 
     fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome {

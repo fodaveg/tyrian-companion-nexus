@@ -178,6 +178,18 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_observed_after_destroy_does_not_undo_it() {
+        let base = Instant::now();
+        let mut watch = ExitWatch::with_grace(GRACE);
+        watch.close_requested(base);
+        watch.observe(at(base, 0), Some(1));
+        // The read was in flight when `WM_DESTROY` arrived; its result is fed afterwards.
+        watch.destroyed();
+        watch.observe(at(base, 9), Some(500));
+        assert!(watch.is_exiting());
+    }
+
+    #[test]
     fn destroy_without_a_close_counts() {
         let mut watch = ExitWatch::default();
         watch.destroyed();
