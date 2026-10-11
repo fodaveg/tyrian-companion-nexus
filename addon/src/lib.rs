@@ -155,15 +155,17 @@ fn unload() {
 }
 
 /// Watches the game window's messages for the one thing this addon needs from them: that the
-/// game is closing, which is what turns the `bye` into `game_exit` instead of `addon_unload`.
+/// game is closing (`WM_CLOSE` provisionally, `WM_DESTROY` for good), which is what turns the `bye` into `game_exit` instead of `addon_unload`.
 ///
 /// It only observes. The return value follows Nexus's convention, as its official addon
 /// template does (`return uMsg;`): zero would mean "handled, do not pass on", so returning the
 /// message itself hands every message on to the game untouched.
 #[cfg(windows)]
 extern "C-unwind" fn game_wnd_proc(_window: HWND, message: u32, _w_param: WPARAM, _l_param: LPARAM) -> u32 {
-    if message == WM_CLOSE || message == WM_DESTROY {
-        client::mark_game_exiting();
+    if message == WM_CLOSE {
+        client::mark_close_requested();
+    } else if message == WM_DESTROY {
+        client::mark_destroyed();
     }
     message
 }

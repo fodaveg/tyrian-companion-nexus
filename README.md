@@ -207,7 +207,10 @@ from the plugin (see "Settings"). Once the plugin accepts it:
   `character_select`), the map id (866 is Mad King's Labyrinth) and the character's name;
 - it sends a heartbeat whenever it has been silent for the interval the plugin asks for
   (5 s), and a `bye` when it leaves: `game_exit` only when the game window receives
-  `WM_CLOSE` or `WM_DESTROY`, `addon_unload` otherwise.
+  `WM_DESTROY`, or `WM_CLOSE` (sent at once, since a real close can end the process within
+  milliseconds), `addon_unload` otherwise. A `WM_CLOSE` is provisional: if the Mumble Link's
+  `uiTick` is still advancing more than 5 s after it, the close was cancelled and the addon
+  connects again instead of staying mute until it is reloaded; `WM_DESTROY` is final.
 
 The Options window gets a small panel with the connection status, the port and token
 settings, and the last few alerts (for context; the native alert is what actually notifies

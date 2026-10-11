@@ -138,8 +138,10 @@ pub trait Host: Send + 'static {
     /// was told to stop, or the game is closing and its `bye` is owed. The loop decides that,
     /// not the host; `stop` is the worker's own flag, as [`Host::read_inventory`] gets it.
     fn prepare_inventory(&self, _stop: &AtomicBool, _interrupted: &dyn Fn() -> bool) -> Readiness { Readiness::Ready }
-    /// `true` once the game window has received `WM_CLOSE` or `WM_DESTROY`: the only evidence
-    /// that allows a `bye` with `game_exit`.
+    /// `true` while the game window counts as closing: it received `WM_DESTROY`, or a `WM_CLOSE`
+    /// the game has not since shown it survived ([`crate::exit_watch::ExitWatch`]). The only
+    /// evidence that allows a `bye` with `game_exit`; it can go back to `false` after a cancelled
+    /// close, and the loop then connects again.
     fn game_exiting(&self) -> bool;
     /// Tries to open or focus `app` (the player's choice, Obsidian or Hebra). Called at most
     /// once per load, only when

@@ -7,14 +7,18 @@
 //! - reading the game: `NexusLink::is_gameplay` and the Mumble Link Nexus shares with addons
 //!   (`DL_MUMBLE_LINK`), plus the negotiated passive owned-inventory and wallet reader; no GW2
 //!   API;
-//! - knowing the game is closing: the `WndProc` callback in `lib.rs` sets [`GAME_EXITING`] on
-//!   `WM_CLOSE`/`WM_DESTROY`, the only evidence the SPEC accepts for a `bye` with `game_exit`.
+//! - knowing the game is closing: the `WndProc` callback in `lib.rs` reports `WM_CLOSE` (provisional)
+//!   and `WM_DESTROY` (final) to [`EXIT_WATCH`], the only evidence the SPEC accepts for a `bye`
+//!   with `game_exit`; the rule that takes a cancelled `WM_CLOSE` back is the core's `ExitWatch`.
 //!
 //! Nothing here sends an input to the game.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use nexus::data_link::{read_nexus_link, read_resource};
+use tyrian_companion_nexus_core::exit_watch::ExitWatch;
 use tyrian_companion_nexus_core::client::{GameReading, Host, Readiness};
 use tyrian_companion_nexus_core::game_context::{MumbleSnapshot, MUMBLE_LINK_BYTES};
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
@@ -25,13 +29,21 @@ use crate::obsidian_launch;
 /// which is behind the `mumble` feature this addon does not enable; see `game_context.rs`).
 const MUMBLE_LINK: &str = "DL_MUMBLE_LINK";
 
-/// Set by the `WndProc` callback when the game window is closing. Never cleared: the game does
-/// not come back from `WM_DESTROY`.
-static GAME_EXITING: AtomicBool = AtomicBool::new(false);
+/// What the `WndProc` callback saw of the game window closing; see `ExitWatch` for the rule.
+static EXIT_WATCH: Mutex<ExitWatch> = Mutex::new(ExitWatch::new());
 
-/// Records positive evidence that the game is closing.
-pub fn mark_game_exiting() {
-    GAME_EXITING.store(true, Ordering::Relaxed);
+fn watch() -> std::sync::MutexGuard<'static, ExitWatch> {
+    EXIT_WATCH.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The window received `WM_CLOSE`: provisional evidence, taken back if the game keeps running.
+pub fn mark_close_requested() {
+    watch().close_requested(Instant::now());
+}
+
+/// The window received `WM_DESTROY`: the game is closing, for good.
+pub fn mark_destroyed() {
+    watch().destroyed();
 }
 
 /// The host as Nexus provides it. Stateless: everything it reads lives in Nexus.
@@ -68,7 +80,9 @@ impl Host for NexusHost {
     }
 
     fn game_exiting(&self) -> bool {
-        GAME_EXITING.load(Ordering::Relaxed)
+        // The Mumble Link is read here only while a `WM_CLOSE` is pending, to see whether the
+        // game goes on ticking after it.
+        watch().exiting(Instant::now(), || self.read_game().mumble.map(|mumble| mumble.ui_tick))
     }
 
     fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome {

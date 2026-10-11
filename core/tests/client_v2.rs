@@ -17,6 +17,7 @@ use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
 
 use tyrian_companion_nexus_core::client::{spawn, ClientConfig, ClientHandle, GameReading, Host};
+use tyrian_companion_nexus_core::exit_watch::ExitWatch;
 use tyrian_companion_nexus_core::game_context::MumbleSnapshot;
 use tyrian_companion_nexus_core::instance::new_instance_id;
 use tyrian_companion_nexus_core::obsidian_launch::{LaunchApp, ObsidianLaunchOutcome};
@@ -280,6 +281,9 @@ struct TestHost {
     alerts: Arc<Mutex<Vec<String>>>,
     reading: Arc<Mutex<GameReading>>,
     exiting: Arc<AtomicBool>,
+    /// The rule the addon applies to the window's `WM_CLOSE` / `WM_DESTROY`, fed the `uiTick` of
+    /// `reading`; `exiting` above is the plain flag the older tests set.
+    watch: Arc<Mutex<ExitWatch>>,
     /// Which app each `open_app` call asked for, in order; this fake host answers `Launched`.
     launched_apps: Arc<Mutex<Vec<LaunchApp>>>,
 }
@@ -292,7 +296,8 @@ impl Host for TestHost {
         self.reading.lock().unwrap().clone()
     }
     fn game_exiting(&self) -> bool {
-        self.exiting.load(Ordering::Relaxed)
+        let tick = || self.reading.lock().unwrap().mumble.as_ref().map(|mumble| mumble.ui_tick);
+        self.exiting.load(Ordering::Relaxed) || self.watch.lock().unwrap().exiting(Instant::now(), tick)
     }
     fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome {
         self.launched_apps.lock().unwrap().push(app);
@@ -723,6 +728,81 @@ fn a_closing_game_says_game_exit_and_does_not_reconnect() {
     wait_until(|| state.status() == Status::GameExiting);
     assert!(plugin.try_accept(Duration::from_millis(1000)).is_none(), "no reconnection while the game closes");
     handle.stop();
+}
+
+/// A `WM_CLOSE` the game refuses (the player cancels the dialog): `bye game_exit` goes out as
+/// soon as the close is seen, and once the game is seen alive past the grace the addon connects
+/// again instead of staying mute until it is reloaded (audit AF10).
+#[test]
+fn a_cancelled_close_lets_the_client_talk_again() {
+    let plugin = FakePlugin::start();
+    let (state, host, handle) = start_client(&plugin, TOKEN);
+    *host.watch.lock().unwrap() = ExitWatch::with_grace(Duration::from_millis(400));
+    set_tick(&host, 100);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 5000);
+    connection.expect_sequenced();
+
+    host.watch.lock().unwrap().close_requested(Instant::now());
+    let bye = connection.expect_sequenced();
+    assert_eq!((&bye["type"], &bye["reason"]), (&Value::from("bye"), &Value::from("game_exit")));
+    connection.assert_closed();
+    wait_until(|| state.status() == Status::GameExiting);
+
+    // The game carries on: its tick keeps advancing past the grace.
+    let ticking = Arc::new(AtomicBool::new(true));
+    let ticker = {
+        let (host, ticking) = (host.clone(), Arc::clone(&ticking));
+        std::thread::spawn(move || {
+            let mut tick = 100;
+            while ticking.load(Ordering::Relaxed) {
+                tick += 1;
+                set_tick(&host, tick);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let mut again = plugin.try_accept(Duration::from_secs(4)).expect("the client reconnects once the game is seen alive");
+    ticking.store(false, Ordering::Relaxed);
+    ticker.join().unwrap();
+    again.authenticate(SERVER_A, NONCE_2, 5000);
+    wait_until(|| state.status() == Status::Connected);
+    handle.stop();
+}
+
+/// The same `WM_CLOSE` with a game that really goes away: no tick after it, so it stays
+/// `game_exit`, and a `WM_DESTROY` is final even if the link keeps moving.
+#[test]
+fn a_close_that_goes_through_keeps_saying_game_exit() {
+    let plugin = FakePlugin::start();
+    let (state, host, handle) = start_client(&plugin, TOKEN);
+    *host.watch.lock().unwrap() = ExitWatch::with_grace(Duration::from_millis(200));
+    set_tick(&host, 100);
+    let mut connection = plugin.accept();
+    connection.authenticate(SERVER_A, NONCE_1, 5000);
+    connection.expect_sequenced();
+
+    host.watch.lock().unwrap().close_requested(Instant::now());
+    let bye = connection.expect_sequenced();
+    assert_eq!((&bye["type"], &bye["reason"]), (&Value::from("bye"), &Value::from("game_exit")));
+    connection.assert_closed();
+    // Frozen tick, well past the grace: still no reconnection.
+    assert!(plugin.try_accept(Duration::from_millis(1200)).is_none());
+    assert_eq!(state.status(), Status::GameExiting);
+
+    host.watch.lock().unwrap().destroyed();
+    for tick in 101..120 {
+        set_tick(&host, tick);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(plugin.try_accept(Duration::from_millis(600)).is_none(), "WM_DESTROY is final");
+    assert_eq!(state.status(), Status::GameExiting);
+    handle.stop();
+}
+
+fn set_tick(host: &TestHost, ui_tick: u32) {
+    let mumble = MumbleSnapshot { ui_tick, written_by_game: true, map_id: 866, character: Some("Astra Uno".into()) };
+    host.reading.lock().unwrap().mumble = Some(mumble);
 }
 
 // --- Opening Obsidian on the first connection attempt (docs/SPEC-puente-ingame.md, H18.27) ---
