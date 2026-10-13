@@ -514,9 +514,9 @@ fn largest_listable_wallet_fits_the_wallet_budget_and_a_smaller_budget_fails_clo
         Err(WalletError::Bounds)
     );
     assert_eq!(r.bytes, GUARD_BYTES + ROUTE_BYTES + 4092);
-    // The wallet budget is a share of its own, never a way around the inventory's ceiling.
+    // The wallet budget is a share of its own, never a way around the ceiling every reader has.
     let mut r = Reader::bounded(fixture(64, &[(45, 100)]), usize::MAX);
-    r.bytes = tyrian_companion_nexus_core::inventory::MAX_BYTES;
+    r.bytes = tyrian_companion_nexus_core::inventory::MAX_READER_BYTES;
     assert_eq!(
         WalletProfile::verified(&mut r, profile()).err(),
         Some(WalletError::Bounds)

@@ -496,57 +496,67 @@ pointers into game content sit 4 past a multiple of 8. The second one is an obse
 one game session, not something derived from code; if it stops holding, the reason shown is
 alignment and there is no value.
 
-Budgets are hard and separate: 16384 requested bytes per cycle for the bags and 65536 for
+Budgets are hard and separate: 16384 requested bytes per cycle for the bags and 262144 for
 Magic Find, guards included on the first cycle of a build. A pass that does not fit is no
 coverage. The largest bag pass the profile allows, 16 bags and 640 positions copied twice,
 asks for 12195. The external probe's whole passes on 8 October asked for about 1.9 KiB (bags,
 without the position array, which adds 4 KiB per copy for 512 positions) and 29 to 33 KiB
 (Magic Find, with 81 and 92 buffs).
 
-How many buffs a Magic Find pass fits, which is fewer than at 0.8.1. A pass copies the route
-twice and the twelve slots (2368 bytes in all), the buckets twice whatever they hold (48 bytes a
-bucket: 12288 for a table of 256, 24576 for one of 512, the largest accepted), and then, for
-each buff, its node and its instance, and once for each definition in use its head, its group
-and its records (132 bytes with one record, 2364 with 32, and 18492 with the 256 that are
-the most accepted).
-Copying an object as one block took the node and the instance from 40 bytes to 92: fewer
-copies, 349 against 557 over the live shape, and more bytes. The most buffs that fit, on any
-cycle but the first of a build, whose 6054 bytes of guards come out of the same budget:
+How many buffs a Magic Find pass fits. A pass copies the route twice and the twelve slots
+(2368 bytes in all), the buckets twice whatever they hold (48 bytes a bucket: 12288 for a
+table of 256, 24576 for one of 512, 49152 for one of 1024, the largest accepted), and then,
+for each buff, its node and its instance, and once for each definition in use its head, its
+group and its records (132 bytes with one record, 2364 with 32, and 18492 with the 256 that
+are the most accepted). Copying an object as one block took the node and the instance from
+40 bytes to 92: fewer copies, 349 against 557 over the live shape, and more bytes. The most
+buffs that fit, on any cycle and on the first of a build, whose 6054 bytes of guards come out
+of the same budget; and what fitted at 0.8.1, which had 65536 bytes and accepted no table
+over 512:
 
 | Buckets | Definitions | Now | First cycle | At 0.8.1 | First cycle |
 | --- | --- | --- | --- | --- | --- |
-| 512 | one for all, one record | 418 | 352 | 512 | 512 |
-| 512 | one each, one record | 172 | 145 | 235 | 200 |
-| 512 | one each, 32 records | 15 | 13 | 16 | 14 |
+| 1024 | one for all, one record | 1024 | 1024 | none | none |
+| 1024 | one each, one record | 940 | 913 | none | none |
+| 1024 | one each, 32 records | 85 | 83 | none | none |
+| 512 | one for all, one record | 512 | 512 | 512 | 512 |
+| 512 | one each, one record | 512 | 512 | 235 | 200 |
+| 512 | one each, 32 records | 95 | 93 | 16 | 14 |
 | 256 | one for all, one record | 256 | 256 | 256 | 256 |
-| 256 | one each, one record | 227 | 200 | 256 | 256 |
-| 256 | one each, 32 records | 20 | 18 | 21 | 19 |
+| 256 | one each, one record | 256 | 256 | 256 | 256 |
+| 256 | one each, 32 records | 100 | 98 | 21 | 19 |
 
 One more than that is `Bounds`: no coverage for that cycle, never part of a total.
-`core/tests/magic_find.rs` pins every figure, with the reader of 0.8.1 kept there as it was.
-What is not known is which row a game session is on. The fixture of the live shape of 8
-October 2026 (91 buffs in 256 buckets, 47 definitions of one record each) asks for 29328 of
-the 65536 bytes.
+`core/tests/magic_find.rs` pins every figure, with the reader of 0.8.1 kept there as it was
+and given the budget it had. The fixture of the live shape of 8 October 2026 (91 buffs in 256
+buckets, 47 definitions of one record each) asks for 29328 bytes.
 
-**A definition may declare up to 256 records** (`magic_find::MAX_MODIFIERS`). It was 32 until
-13 October 2026, a guess made when every definition seen had one record. That day, in the
-first session after the game's update, the log of the reader said why the panel's Magic Find
-had no figure most of the time: 13 passes that read (623 = luck 300 + pushed 13 + buffs 310,
-64 buffs of 57 definitions in a table of 512 buckets, the longest definition of 9 records,
-46866 bytes with the guards of the first cycle), and then `Bounds` for as long as it was
-looked at, on a pass that had asked for 26048 of its 65536 bytes when it met a definition
-of **52 records**. One applied effect, and no figure while it lasted. The game has no
-maximum of its own: its sum walks the records up to the count the definition gives. So the
-bound is the reader's, on a count it copies from the game: one definition at 256 records is
-18492 bytes in seven copies, under a third of the budget, and the budget is still what
-bounds a pass, since all the definitions of one pass hold fewer than 911 records between
-them. A definition of 257 is `Bounds`, and so is a pass whose definitions do not fit its
-bytes, each within the bound or not. The rows of "32 records" above are the figures
-measured with the old bound, kept as a shape.
+**The three bounds of a Magic Find pass were raised on 13 October 2026**, the first day of
+play after the game's update, each for what the reader's own log showed that evening with
+the character in a crowd. None of them is a rule of the game; they are the reader's, on
+counts it copies from the game, and it still gives no value past any of them.
 
-That session also showed a table of 512 buckets, the largest the reader accepts, holding 64
-and then 84 buffs: the game doubles the table and does not shrink it. A table of 1024 would
-be `Bounds` on every pass, and has not been seen.
+- **Records in a definition: 256** (`MAX_MODIFIERS`; it was 32, a guess made when every
+  definition seen had one record). 13 passes read (623 = luck 300 + pushed 13 + buffs 310, 64
+  buffs of 57 definitions, the longest of 9 records) and then `Bounds`, on a pass that had
+  asked for 26048 bytes when it met a definition of **52 records**: one applied effect, and
+  no figure while it lasted. The game has no maximum of its own: its sum walks the records
+  up to the count the definition gives. A definition at the bound is 18492 bytes in seven
+  copies, a fourteenth of the budget; one of 257 is `Bounds`.
+- **Bytes in a pass: 262144** (`MAX_BYTES`; it was 65536, sized on passes of 29 to 33 KiB).
+  With that definition read, passes over 168 to 199 buffs of 87 to 93 definitions, in a table
+  of 512 buckets, asked for just under or just over 65536: 65284 and 65472 bytes read,
+  `Bounds` at 185 and at 199 buffs, back and forth 26 times in two and a half minutes. With
+  that session's mix (a definition for every two buffs, some 244 bytes each) a buff is about
+  214 bytes, and the budget holds over 900 of them in the largest table. Time is not what
+  it costs: those passes took 170 to 730 microseconds, so one that uses the whole budget
+  takes about 3 milliseconds of the 250 the two readers share.
+- **Buckets in the table: 1024** (`MAX_CAPACITY`; it was 512). The game doubles the table
+  and does not shrink it: 256 buckets held 91 buffs on 8 October, 512 held from 64 to 199 on
+  the 13th. The next doubling would have been `Bounds` on every pass until the game was
+  closed. A table of 1024 has not been seen; one of 2048 is `Bounds`.
+
+The rows of "32 records" in the table above keep 32 as a shape, from when that was the bound.
 
 Cadence is the cycle's: once per second, in this order — inventory, wallet, bags, Magic Find.
 The last two run **before** the cycle hands the inventory sample to the client, which then
@@ -1045,7 +1055,7 @@ when a figure is missing:
 
 ```
 Bags: read, 97 used of 160, 63 free (5 bags in 8 bag slots); bytes: 1480 / 16384; reads: 37
-Magic Find: no coverage, Deadline (the read ran out of time); bytes: 41200 / 65536; reads: 603
+Magic Find: no coverage, Deadline (the read ran out of time); bytes: 41200 / 262144; reads: 603
 Reader: last pass 1 s ago
 ```
 
@@ -1101,8 +1111,8 @@ to say why. So the two readers write to the Nexus log (`addons/Nexus/Nexus.log`,
 line per pass (`core/src/reader_log.rs`):
 
 ```
-reader: Magic Find: read, first pass; total 363 = luck 300 + pushed 13 + buffs 50, boon no; bytes 20112/65536, reads 201, pass 1432 us; table 91/256, pushed 4, buffs 91, definitions 47, most records 5
-reader: Magic Find: Unsupported, after read for 60 passes (60 s); bytes 20112/65536, reads 201, pass 1432 us; table 92/256, pushed 4, buffs 92, definitions 47, most records 5
+reader: Magic Find: read, first pass; total 363 = luck 300 + pushed 13 + buffs 50, boon no; bytes 20112/262144, reads 201, pass 1432 us; table 91/256, pushed 4, buffs 91, definitions 47, most records 5
+reader: Magic Find: Unsupported, after read for 60 passes (60 s); bytes 20112/262144, reads 201, pass 1432 us; table 92/256, pushed 4, buffs 92, definitions 47, most records 5
 reader: Magic Find record refused: effect 12345 record 2 kind 0x71 formula 6 value 100 (0x42c80000) mode 4 flags 0x0 words 0x0/0x7/0x0 trait+0x20 none trait+0x30 none effect+0x38 34567 not applied effect+0x40 none
 reader: Magic Find: read, after Unsupported for 1800 passes (1800 s); total 363 = …
 reader: Bags: not read, after read for 63 passes (60 s); capture Changed
@@ -1429,8 +1439,11 @@ covers what does not need a running game:
   valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported
   records, stacking, the boon rule, concurrent changes, failed copies and both budgets, and
   the most buffs a Magic Find pass fits in its budget, with the first that is `Bounds`, in
-  tables of 512 and 256 buckets and three ways of holding content, now and at 0.8.1; and the
-  trace a pass leaves for the log: the same value for the same copies as the pass without
+  tables of 1024, 512 and 256 buckets and three ways of holding content, now and at 0.8.1;
+  the shapes of the session of 13 October 2026, each a value now and `Bounds` with the bound
+  of before (a definition of 52 records; a crowd of 200 buffs of 95 definitions in a table
+  of 512, 68420 bytes), with what is still `Bounds`: 257 records, a pass over its bytes and
+  a table of 2048; and the trace a pass leaves for the log: the same value for the same copies as the pass without
   one, the refused record with its fields and what its conditions name, the 8 bytes that
   costs, a failed or misplaced copy of it, and the figure each bound is judged by;
 - the reader log (`reader_log`): a line when an outcome becomes another and none for a pass

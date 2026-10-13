@@ -564,22 +564,28 @@ fn most_buffs(capacity: u32, held: Held, most: u32, read: impl Fn(&mut Fixture) 
     (most, reads, bytes)
 }
 
+/// The byte budget of a Magic Find pass until 13 October 2026, and so that of the reader of
+/// 0.8.1. `MAX_BYTES` is 262144 since.
+const BYTES_BEFORE: usize = 65_536;
+
 /// Where the Magic Find pass stops fitting its budget. In blocks a buff costs 92 bytes, its
 /// node and its instance, where field by field it cost 40; a definition costs the same either
-/// way, and the buckets are copied twice whatever they hold. So the ceiling came down, and this
-/// pins where it is and where it was: in the largest table the reader accepts and in one of
-/// 256 buckets, which is the fixture of the live shape of 8 October 2026 with its 91 buffs,
-/// and with three ways of holding content.
+/// way, and the buckets are copied twice whatever they hold. This pins where the ceiling is,
+/// with the budget and the largest table there are now, and where it was at 0.8.1, with the
+/// 65536 bytes and the 512 buckets of then: in tables of 1024, 512 and 256 buckets (the last
+/// is the fixture of the live shape of 8 October 2026 with its 91 buffs), and with three ways
+/// of holding content.
 ///
 /// Nothing here changes the reader or its budget. A pass that does not fit is `Bounds`: no
 /// coverage for that cycle, never a part of a total.
 #[test]
 fn how_many_buffs_fit_the_budget_now_and_at_0_8_1() {
     let verified = verified();
-    // One pass over `m` through a reader with the whole budget. On the first cycle of a build
-    // the nineteen guards come out of that budget too; on every later one they do not.
-    let asked = |m: &mut Fixture, first: bool, blocks: bool| -> Asked {
-        let mut reader = Reader::bounded(m, MAX_BYTES);
+    // One pass over `m` through a reader with the whole of a budget: the reader's own, or the
+    // one the reader of 0.8.1 had. On the first cycle of a build the nineteen guards come out
+    // of that budget too; on every later one they do not.
+    let within = |m: &mut Fixture, first: bool, blocks: bool, budget: usize| -> Asked {
+        let mut reader = Reader::bounded(m, budget);
         let outcome = if first {
             MagicFindProfile::verified_against(&mut reader, profile(), &synthetic_guards())
         } else {
@@ -595,40 +601,52 @@ fn how_many_buffs_fit_the_budget_now_and_at_0_8_1() {
         });
         (outcome.map(|(value, _)| value.total), reader.reads, reader.bytes)
     };
+    let asked = |m: &mut Fixture, first: bool| within(m, first, true, MAX_BYTES);
+    let asked_at_0_8_1 = |m: &mut Fixture, first: bool| within(m, first, false, BYTES_BEFORE);
     // Buckets, content, first cycle or a later one; then the most buffs that fit, with the
-    // copies and the bytes of that pass, now and at 0.8.1.
+    // copies and the bytes of that pass, now and at 0.8.1. A table of 1024 buckets was not
+    // accepted then.
     let ceilings = [
         // The largest table the reader accepts.
-        (512, Held::Shared, false, (418, 867, 65_532), (512, 2105, 45_580)),
-        (512, Held::Own, false, (172, 888, 65_472), (235, 1699, 65_388)),
-        (512, Held::Largest, false, (15, 103, 63_784), (16, 166, 63_432)),
-        (512, Held::Shared, true, (352, 754, 65_514), (512, 2124, 51_634)),
-        (512, Held::Own, true, (145, 772, 65_478), (200, 1473, 65_422)),
-        (512, Held::Largest, true, (13, 112, 64_926), (14, 171, 64_678)),
-        // The table of the live shape, which held 91.
-        (256, Held::Shared, false, (256, 539, 38_340), (256, 1077, 23_052)),
-        (256, Held::Own, false, (227, 1159, 65_504), (256, 1842, 56_712)),
-        (256, Held::Largest, false, (20, 124, 63_776), (21, 197, 63_164)),
-        (256, Held::Shared, true, (256, 558, 44_394), (256, 1096, 29_106)),
-        (256, Held::Own, true, (200, 1043, 65_510), (256, 1861, 62_766)),
-        (256, Held::Largest, true, (18, 133, 64_918), (19, 202, 64_410)),
+        (1024, Held::Shared, false, (1024, 2085, 145_860), None),
+        (1024, Held::Own, false, (940, 4734, 262_080), None),
+        (1024, Held::Largest, false, (85, 459, 260_280), None),
+        (1024, Held::Shared, true, (1024, 2104, 151_914), None),
+        (1024, Held::Own, true, (913, 4618, 262_086), None),
+        (1024, Held::Largest, true, (83, 468, 261_422), None),
+        // The largest it accepted until 13 October 2026, which that day held up to 199.
+        (512, Held::Shared, false, (512, 1055, 74_180), Some((512, 2105, 45_580))),
+        (512, Held::Own, false, (512, 2588, 141_632), Some((235, 1699, 65_388))),
+        (512, Held::Largest, false, (95, 503, 260_264), Some((16, 166, 63_432))),
+        (512, Held::Shared, true, (512, 1074, 80_234), Some((512, 2124, 51_634))),
+        (512, Held::Own, true, (512, 2607, 147_686), Some((200, 1473, 65_422))),
+        (512, Held::Largest, true, (93, 512, 261_406), Some((14, 171, 64_678))),
+        // The table of the live shape of 8 October, which held 91.
+        (256, Held::Shared, false, (256, 539, 38_340), Some((256, 1077, 23_052))),
+        (256, Held::Own, false, (256, 1304, 72_000), Some((256, 1842, 56_712))),
+        (256, Held::Largest, false, (100, 524, 260_256), Some((21, 197, 63_164))),
+        (256, Held::Shared, true, (256, 558, 44_394), Some((256, 1096, 29_106))),
+        (256, Held::Own, true, (256, 1323, 78_054), Some((256, 1861, 62_766))),
+        (256, Held::Largest, true, (98, 533, 261_398), Some((19, 202, 64_410))),
     ];
     for (capacity, held, first, now, before) in ceilings {
         let measured = (
-            most_buffs(capacity, held, now.0, |m| asked(m, first, true)),
-            most_buffs(capacity, held, before.0, |m| asked(m, first, false)),
+            most_buffs(capacity, held, now.0, |m| asked(m, first)),
+            before.map(|before: (u32, usize, usize)| most_buffs(capacity, held, before.0, |m| asked_at_0_8_1(m, first))),
         );
         assert_eq!(measured, (now, before), "{capacity} buckets, {held:?}, first cycle: {first}");
     }
-    // The first that does not fit, and the whole of the largest table: with the least content
-    // there can be its 512 buffs fitted at 0.8.1, and from the 419th they do not.
-    let shared = |count| crowded(MAX_CAPACITY, count, Held::Shared);
-    assert_eq!(asked(&mut shared(418), false, true), (Ok(300.0), 867, 65_532));
-    assert_eq!(asked(&mut shared(419), false, true).0, Err(Uncovered::Bounds));
-    assert_eq!(asked(&mut shared(MAX_CAPACITY), false, true).0, Err(Uncovered::Bounds));
-    assert_eq!(asked(&mut shared(MAX_CAPACITY), false, false), (Ok(300.0), 2105, 45_580));
+    // The table that was the largest until 13 October 2026, with the least content there can
+    // be: with the budget of then 418 buffs fitted and the 419th did not; all 512 fit now, and
+    // so do the 1024 of the largest table there is.
+    let shared = |capacity, count| crowded(capacity, count, Held::Shared);
+    assert_eq!(within(&mut shared(512, 418), false, true, BYTES_BEFORE), (Ok(300.0), 867, 65_532));
+    assert_eq!(within(&mut shared(512, 419), false, true, BYTES_BEFORE).0, Err(Uncovered::Bounds));
+    assert_eq!(asked(&mut shared(512, 512), false).0, Ok(300.0));
+    assert_eq!(asked(&mut shared(MAX_CAPACITY, MAX_CAPACITY), false).0, Ok(300.0));
+    assert_eq!(asked_at_0_8_1(&mut shared(512, 512), false), (Ok(300.0), 2105, 45_580));
     // What a buff adds to a pass: its node and its instance, 28 and 64 bytes, where it was 40.
-    let cost = |count, blocks| asked(&mut shared(count), false, blocks).2;
+    let cost = |count, blocks| within(&mut shared(512, count), false, blocks, MAX_BYTES).2;
     assert_eq!((cost(101, true) - cost(100, true), cost(101, false) - cost(100, false)), (92, 40));
 }
 
@@ -856,7 +874,7 @@ fn bucket_and_table_integrity_reject() {
     assert_eq!(changed(|m, buff| m.put(buff.1 + 0x18, 1002, 4)), Err(Uncovered::Integrity));
     assert_eq!(changed(|m, buff| m.put(buff.2 + 0x58, 0, 4)), Err(Uncovered::Integrity));
     assert_eq!(changed(|m, _| m.put(MANAGER + 0x24, 2, 4)), Err(Uncovered::Integrity));
-    for (capacity, count) in [(0u64, 1u64), (3, 1), (1024, 1), (64, 65)] {
+    for (capacity, count) in [(0u64, 1u64), (3, 1), (2048, 1), (64, 65)] {
         let result = changed(|m, _| {
             m.put(MANAGER + 0x20, capacity, 4);
             m.put(MANAGER + 0x24, count, 4);
@@ -1845,7 +1863,7 @@ fn a_definition_of_52_records_reads_and_so_does_one_at_the_bound_but_not_one_abo
     // One record more than the bound: no value, and the count that did it is in the trace.
     let (value, trace, ..) = traced(&held, &mut with(MAX_MODIFIERS as usize + 1));
     assert_eq!((value, trace.most_records), (Err(Uncovered::Bounds), MAX_MODIFIERS + 1));
-    // The bytes still bound the pass. Three definitions at the bound fit; with a fourth the
+    // The bytes still bound the pass. Thirteen definitions at the bound fit; with one more the
     // pass asks for more than `MAX_BYTES` and has no value, though none of them is over the bound.
     let crowd = |definitions: u32| {
         let mut m = empty();
@@ -1855,12 +1873,82 @@ fn a_definition_of_52_records_reads_and_so_does_one_at_the_bound_but_not_one_abo
         }
         m
     };
-    let (value, trace, _, bytes) = traced(&held, &mut crowd(3));
-    assert_eq!((value, trace.definitions, trace.most_records), (Ok(300.0), 3, MAX_MODIFIERS));
-    assert!(bytes > 3 * 18_492 && bytes <= MAX_BYTES, "{bytes}");
-    let (value, trace, _, bytes) = traced(&held, &mut crowd(4));
+    let (value, trace, _, bytes) = traced(&held, &mut crowd(13));
+    assert_eq!((value, trace.definitions, trace.most_records), (Ok(300.0), 13, MAX_MODIFIERS));
+    assert_eq!(bytes, 2368 + 2 * 64 * 24 + 13 * (92 + 18_492));
+    let (value, trace, _, bytes) = traced(&held, &mut crowd(14));
     assert_eq!((value, trace.most_records), (Err(Uncovered::Bounds), MAX_MODIFIERS));
-    assert!(bytes <= MAX_BYTES, "{bytes}");
+    assert!(bytes <= MAX_BYTES && 2368 + 2 * 64 * 24 + 14 * (92 + 18_492) > MAX_BYTES, "{bytes}");
+}
+
+/// The shape the log of 13 October 2026 showed with the character in a crowd: 168 to 199 buffs
+/// of 87 to 93 definitions, one of them of 52 records, in a table of 512 buckets, on passes
+/// that asked for just under or just over the 65536 bytes they had, so that Magic Find came
+/// and went 26 times in two and a half minutes. Here: 200 buffs of 95 definitions, 94 of two
+/// records and each shared by two or three buffs, and the one of 52, which carries 50 points.
+fn crowd_of_13_october(buffs: u32) -> Fixture {
+    let mut m = empty_at(4, 512, 300);
+    for (kind, value) in [(14, 5.0), (MAGIC_FIND, 6.0), (MAGIC_FIND, 7.0), (126, 1.0)] {
+        m.push(kind, value);
+    }
+    let mut long = vec![record(5, 1.0); 52];
+    long[51] = record(MAGIC_FIND, 50.0);
+    let long = m.plain(&long);
+    m.buff(1001, 501, long);
+    let short: Vec<u64> = (0..94).map(|_| m.plain(&[record(5, 1.0), record(14, 2.0)])).collect();
+    for index in 0..buffs - 1 {
+        m.buff(2000 + index, 600 + index, short[index as usize % short.len()]);
+    }
+    m
+}
+
+/// That pass has a value, with room to spare: 68420 bytes of the 262144 there are now. With
+/// the 65536 of before it is `Bounds`, which is what the game showed. The budget is still a
+/// bound: a table of 1024 buckets full of buffs that share nothing asks for more, and is
+/// `Bounds`; and a table of 2048 is not copied at all.
+#[test]
+fn a_crowd_of_200_buffs_and_95_definitions_reads_where_it_was_bounds() {
+    let verified = verified();
+    let within = |m: &mut Fixture, budget: usize| {
+        let mut trace = Trace::default();
+        let mut reader = Reader::bounded(m, budget);
+        let cache = &mut MagicFindCache::new();
+        let value = magic_find_traced(&mut reader, &verified, CTX, cache, Instant::now(), &mut trace);
+        (value.map(|(value, _)| value.total), trace, reader.reads, reader.bytes)
+    };
+    let seen = Trace { capacity: 512, count: 200, pushed: 4, buffs: 200, definitions: 95, most_records: 52, refused: None };
+    let (value, trace, reads, bytes) = within(&mut crowd_of_13_october(200), MAX_BYTES);
+    assert_eq!((value, trace), (Ok(363.0), seen));
+    // The route twice and the slots, the 512 buckets twice, the pushed table twice, 200 nodes
+    // and instances, 94 definitions of two records and one of 52.
+    assert_eq!(bytes, 2368 + 2 * 512 * 24 + 2 * 4 * 12 + 200 * 92 + 94 * (60 + 2 * 72) + 60 + 52 * 72);
+    assert_eq!((bytes, reads), (68_420, 715));
+    assert!(bytes > BYTES_BEFORE && bytes * 3 < MAX_BYTES);
+    // With the budget of before: no value. And a few buffs fewer fitted it, as in the game.
+    assert_eq!(within(&mut crowd_of_13_october(200), BYTES_BEFORE).0, Err(Uncovered::Bounds));
+    assert_eq!(within(&mut crowd_of_13_october(168), BYTES_BEFORE).0, Ok(363.0));
+    // The first cycle of a build, guards included, and the passes after it, which only verify.
+    let held = CachedMagicFind::new();
+    let mut m = crowd_of_13_october(200);
+    let mut reader = Reader::bounded(&mut m, MAX_BYTES);
+    let first = MagicFindProfile::verified_against(&mut reader, profile(), &synthetic_guards())
+        .and_then(|verified| held.read_traced(&mut reader, &verified, CTX, &mut Trace::default()));
+    assert_eq!((first.map(|(value, _)| value.total), reader.bytes), (Ok(363.0), GUARD_BYTES + 68_420));
+    let (value, _, _, verifying) = traced(&held, &mut m);
+    assert_eq!(value, Ok(363.0));
+    assert!(verifying < 68_420, "{verifying}");
+
+    // Over the budget there is now: the largest table, full, every buff with a definition of
+    // its own. 940 of them fit (`how_many_buffs_fit_the_budget_now_and_at_0_8_1`); 1024 do not.
+    let (value, trace, _, bytes) = within(&mut crowded(MAX_CAPACITY, MAX_CAPACITY, Held::Own), MAX_BYTES);
+    assert_eq!((value, trace.capacity, trace.count), (Err(Uncovered::Bounds), 1024, 1024));
+    assert!(bytes <= MAX_BYTES && trace.buffs > 900, "{bytes} {trace:?}");
+    // And a larger table than the reader accepts is refused by its header.
+    let mut m = crowd_of_13_october(200);
+    m.put(MANAGER + 0x20, 2048, 4);
+    let (value, trace, _, bytes) = within(&mut m, MAX_BYTES);
+    assert_eq!((value, trace.capacity, trace.buffs), (Err(Uncovered::Bounds), 2048, 0));
+    assert!(bytes < 4096, "{bytes}");
 }
 
 /// A pass that ends on a bound leaves the figure that bound is judged by.
@@ -1876,10 +1964,10 @@ fn a_pass_that_ends_on_a_bound_leaves_the_figure_the_bound_is_judged_by() {
     assert_eq!(trace, Trace { capacity: 64, count: 1, buffs: 1, most_records: MAX_MODIFIERS + 1, ..Trace::default() });
     // A table larger than the reader accepts: the header says so before any bucket is copied.
     let (mut m, _) = standard();
-    m.put(MANAGER + 0x20, 1024, 4);
+    m.put(MANAGER + 0x20, 2048, 4);
     let (value, trace, ..) = traced(&held, &mut m);
     assert_eq!(value, Err(Uncovered::Bounds));
-    assert_eq!(trace, Trace { capacity: 1024, count: 1, pushed: 1, ..Trace::default() });
+    assert_eq!(trace, Trace { capacity: 2048, count: 1, pushed: 1, ..Trace::default() });
     // More pushed records than the reader accepts.
     let (mut m, _) = standard();
     m.put(MANAGER + 0xd8 + 12, u64::from(MAX_PUSHED) + 1, 4);

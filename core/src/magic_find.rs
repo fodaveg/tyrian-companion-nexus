@@ -65,7 +65,12 @@ pub const MAGIC_FIND: u32 = 0x71;
 pub const MAGIC_FIND_BOON: u32 = 0x72;
 const CONSTANT_FORMULA: u32 = 6;
 
-pub const MAX_CAPACITY: u32 = 512;
+/// The largest buff table the reader accepts, in buckets. It was 512. The game doubles the
+/// table and does not shrink it: 256 buckets held 91 buffs on 8 October 2026, and 512 held from
+/// 64 to 199 on 13 October, in a crowd. A table of 1024 would have been `Bounds` on every pass
+/// from the next doubling on, for as long as the game stayed open. The buckets are copied twice,
+/// 48 bytes each: 49152 of [`MAX_BYTES`] for a table of 1024.
+pub const MAX_CAPACITY: u32 = 1024;
 /// The most records one definition may declare. It was 32, a guess: the one session the reader
 /// was audited against (8 October 2026) had definitions of one record. On 13 October 2026 an
 /// applied effect whose definition has 52 left Magic Find without a figure for as long as it
@@ -75,18 +80,35 @@ pub const MAX_CAPACITY: u32 = 512;
 /// count the definition gives, and the only check on the way is the content array's
 /// `index < m_count`. So this is a bound on a count read from the game, not a rule of it: a
 /// definition is copied whole or not at all, and a count that is not one makes no copy. At 256
-/// a definition is 18492 bytes in seven copies, under a third of [`MAX_BYTES`], which is what
-/// really bounds a pass: all the definitions of one pass together hold fewer than 911 records,
-/// whatever each of them declares, and a pass that would need more is `Bounds` as before.
+/// a definition is 18492 bytes in seven copies, a fourteenth of [`MAX_BYTES`], which is what
+/// really bounds a pass: all the definitions of one pass together hold fewer than 3641
+/// records, whatever each of them declares, and a pass that would need more is `Bounds`.
 pub const MAX_MODIFIERS: u32 = 256;
 pub const MAX_PUSHED: u32 = 256;
 pub const MAX_LUCK_LEVEL: u32 = 1000;
 const MAX_PLAYER_ID: u32 = 0xffff;
 const MAX_ABS_PERCENT: f32 = 10_000.0;
-/// One whole pass, guards included on the first cycle of a build (6054 bytes). The external
-/// probe's live passes of 2026-10-08 asked for 28706 and 32814 bytes, guards included, with 81
-/// and 92 buffs. A pass that does not fit is no coverage; the budget is never raised.
-pub const MAX_BYTES: usize = 65_536;
+/// One whole pass, guards included on the first cycle of a build (6054 bytes). A pass that does
+/// not fit is no coverage; the budget is never raised at run time.
+///
+/// It was 65536, sized on the external probe's live passes of 2026-10-08: 28706 and 32814
+/// bytes, guards included, with 81 and 92 buffs in a table of 256. On 13 October 2026, with
+/// the character in a crowd, the log of the reader showed passes over 168 to 199 buffs of 87
+/// to 93 definitions, in a table of 512, asking for just under or just over that: 65284 and
+/// 65472 bytes read, and `Bounds` at 185 and at 199 buffs, back and forth 26 times in two
+/// and a half minutes.
+///
+/// What a pass asks for: 2368 bytes for the route twice and the slots, 48 for each bucket of
+/// the table (it is copied twice), 92 for each buff and, for each definition in use, 60 and 72
+/// more for each of its records. With the mix of that session, about a definition for every
+/// two buffs and 244 bytes a definition, that is some 214 bytes a buff: this budget holds a
+/// table of [`MAX_CAPACITY`] buckets with over 900 buffs in it.
+///
+/// Time is not what it costs. Those passes took 170 to 730 microseconds for some 65000 bytes,
+/// so one that uses this whole budget takes about 3 milliseconds, of the 250 the bag and
+/// Magic Find passes share (the adapter's `EXTRAS_TIME`); a pass that is out of time is no
+/// coverage either, and that clock is the adapter's, not this module's.
+pub const MAX_BYTES: usize = 262_144;
 const BUCKET: usize = 24;
 const PUSHED: usize = 12;
 const MODIFIER: usize = 72;
@@ -252,6 +274,11 @@ const _: () = assert!(PLAYER_VTABLE + 0x328 <= TLS_INDEX_RVA);
 // One definition at its bound, with its head and its group, is under a third of a pass's
 // budget: the bound on records can never be what lets a pass ask for more than `MAX_BYTES`.
 const _: () = assert!((DEFINITION_HEAD + 12 + MAX_MODIFIERS as usize * MODIFIER) * 3 < MAX_BYTES);
+// The reader gives no pass more than `MAX_READER_BYTES`, whatever budget it is asked for: a
+// budget above it would be one the pass does not have. And the largest table, copied twice,
+// has to leave most of the budget to what hangs from it.
+const _: () = assert!(MAX_BYTES <= crate::inventory::MAX_READER_BYTES);
+const _: () = assert!(MAX_CAPACITY as usize * BUCKET * 2 * 4 < MAX_BYTES);
 
 /// The hero panel's Magic Find, uncapped, with the three addends the client sums.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -450,7 +477,7 @@ impl Kept {
 /// It is filled by a whole pass that ends in a value and emptied by any pass that does not.
 /// Its size is bounded by the reader's own bounds: at most [`MAX_CAPACITY`] instances and as
 /// many definitions of at most [`MAX_MODIFIERS`] records, and one copy of the buckets. All of
-/// it was copied by one pass, so [`MAX_BYTES`] bounds it as well: fewer than 911 records in all.
+/// it was copied by one pass, so [`MAX_BYTES`] bounds it as well: fewer than 3641 records in all.
 #[derive(Default)]
 pub struct MagicFindCache {
     kept: Option<Kept>,

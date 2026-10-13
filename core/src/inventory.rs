@@ -21,6 +21,12 @@ pub const PROFILE: &str = "owned-bags-v3";
 pub const TLS_INDEX_RVA: u64 = 0x28155c0;
 pub const MAX_POSITIONS: u32 = 640;
 pub const MAX_BYTES: usize = 131_072;
+/// The most bytes any reader of a cycle may ask for, whatever budget its caller gives it
+/// ([`Reader::bounded`]). The inventory's own budget is [`MAX_BYTES`], the wallet's and the
+/// bags' are smaller, and the Magic Find's is this much since 13 October 2026, when a
+/// character with 200 effects needed more than the 65536 it had. Every budget is a constant
+/// of its module; none is raised at run time.
+pub const MAX_READER_BYTES: usize = 262_144;
 pub const MAX_READS: usize = 32_768;
 /// The most threads of the game's own process the full search will walk. A `Gw2-64.exe` measured
 /// on 8 October 2026 had 133, so 128 was already short of it; 256 is about twice that. The
@@ -84,11 +90,11 @@ impl<M: Memory> Reader<M> {
     pub fn new(memory: M) -> Self {
         Self::bounded(memory, MAX_BYTES)
     }
-    /// A reader with a smaller byte budget of its own; `limit` can never raise [`MAX_BYTES`].
+    /// A reader with a byte budget of its own; `limit` can never raise [`MAX_READER_BYTES`].
     pub fn bounded(memory: M, limit: usize) -> Self {
         Self {
             memory,
-            limit: limit.min(MAX_BYTES),
+            limit: limit.min(MAX_READER_BYTES),
             bytes: 0,
             reads: 0,
         }

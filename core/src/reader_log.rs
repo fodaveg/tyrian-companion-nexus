@@ -464,7 +464,7 @@ mod tests {
             [
                 "reader: Bags: read, first pass; 313 used of 414, 101 free; bytes 6012/16384, reads 55, pass 310 us",
                 "reader: Magic Find: read, first pass; total 363 = luck 300 + pushed 13 + buffs 50, boon no; \
-                 bytes 20112/65536, reads 201, pass 1432 us; table 91/256, pushed 4, buffs 91, definitions 47, most records 5",
+                 bytes 20112/262144, reads 201, pass 1432 us; table 91/256, pushed 4, buffs 91, definitions 47, most records 5",
             ]
         );
         // Nothing changes: nothing is logged, however many cycles.
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            "reader: Magic Find: Unsupported, after read for 60 passes (60 s); bytes 20112/65536, reads 201, \
+            "reader: Magic Find: Unsupported, after read for 60 passes (60 s); bytes 20112/262144, reads 201, \
              pass 1432 us; table 92/256, pushed 4, buffs 92, definitions 47, most records 5"
         );
         assert!(lines[1].starts_with("reader: Magic Find record refused: effect 12345 record 2 "));
@@ -511,7 +511,7 @@ mod tests {
         let unavailable = MagicFindCoverage::Unavailable(Uncovered::Deadline);
         assert_eq!(
             magic_find_detail(unavailable, slow, &Trace { capacity: 512, count: 301, buffs: 120, definitions: 80, ..Trace::default() }, None),
-            "bytes 40000/65536, reads 300, pass 250117 us; table 301/512, pushed 0, buffs 120, definitions 80, most records 0"
+            "bytes 40000/262144, reads 300, pass 250117 us; table 301/512, pushed 0, buffs 120, definitions 80, most records 0"
         );
         let bags = BagCoverage::Unavailable(Uncovered::Deadline);
         assert_eq!(bags_detail(bags, (900, 12, None), None), "bytes 900/16384, reads 12, pass not run");
