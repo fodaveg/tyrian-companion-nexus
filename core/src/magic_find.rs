@@ -66,7 +66,19 @@ pub const MAGIC_FIND_BOON: u32 = 0x72;
 const CONSTANT_FORMULA: u32 = 6;
 
 pub const MAX_CAPACITY: u32 = 512;
-pub const MAX_MODIFIERS: u32 = 32;
+/// The most records one definition may declare. It was 32, a guess: the one session the reader
+/// was audited against (8 October 2026) had definitions of one record. On 13 October 2026 an
+/// applied effect whose definition has 52 left Magic Find without a figure for as long as it
+/// was applied (`Bounds`, by the log of that session), though the pass fitted its budget.
+///
+/// The game has no maximum of its own: its sum (RVA `0x12C1050`) walks the records up to the
+/// count the definition gives, and the only check on the way is the content array's
+/// `index < m_count`. So this is a bound on a count read from the game, not a rule of it: a
+/// definition is copied whole or not at all, and a count that is not one makes no copy. At 256
+/// a definition is 18492 bytes in seven copies, under a third of [`MAX_BYTES`], which is what
+/// really bounds a pass: all the definitions of one pass together hold fewer than 911 records,
+/// whatever each of them declares, and a pass that would need more is `Bounds` as before.
+pub const MAX_MODIFIERS: u32 = 256;
 pub const MAX_PUSHED: u32 = 256;
 pub const MAX_LUCK_LEVEL: u32 = 1000;
 const MAX_PLAYER_ID: u32 = 0xffff;
@@ -237,6 +249,9 @@ pub const SLOTS: [(u64, u64, u64); 12] = [
 // every address this module reads inside the executable.
 const _: () = assert!(BUFF_MANAGER_VTABLE + 0x30 <= TLS_INDEX_RVA);
 const _: () = assert!(PLAYER_VTABLE + 0x328 <= TLS_INDEX_RVA);
+// One definition at its bound, with its head and its group, is under a third of a pass's
+// budget: the bound on records can never be what lets a pass ask for more than `MAX_BYTES`.
+const _: () = assert!((DEFINITION_HEAD + 12 + MAX_MODIFIERS as usize * MODIFIER) * 3 < MAX_BYTES);
 
 /// The hero panel's Magic Find, uncapped, with the three addends the client sums.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -434,7 +449,8 @@ impl Kept {
 ///
 /// It is filled by a whole pass that ends in a value and emptied by any pass that does not.
 /// Its size is bounded by the reader's own bounds: at most [`MAX_CAPACITY`] instances and as
-/// many definitions of at most [`MAX_MODIFIERS`] records, and one copy of the buckets.
+/// many definitions of at most [`MAX_MODIFIERS`] records, and one copy of the buckets. All of
+/// it was copied by one pass, so [`MAX_BYTES`] bounds it as well: fewer than 911 records in all.
 #[derive(Default)]
 pub struct MagicFindCache {
     kept: Option<Kept>,

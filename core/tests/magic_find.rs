@@ -525,9 +525,13 @@ enum Held {
     Shared,
     /// Each a definition of its own, of one record, as half the buffs of the live shape.
     Own,
-    /// Each a definition of its own with `MAX_MODIFIERS` records: the most the reader accepts.
+    /// Each a definition of its own with 32 records, which was the most the reader accepted
+    /// until 13 October 2026 (`MAX_MODIFIERS` is 256 since). Kept at 32 so that the figures
+    /// below stay the ones measured then, next to those of 0.8.1.
     Largest,
 }
+/// The records of a [`Held::Largest`] definition.
+const LARGEST: usize = 32;
 /// A pass over `m` as [`most_buffs`] wants it: the total, the copies and the bytes.
 type Asked = (Result<f32, Uncovered>, usize, usize);
 /// `count` buffs in a table of `capacity` buckets, held as `held`. No record is of a Magic Find
@@ -540,7 +544,7 @@ fn crowded(capacity: u32, count: u32, held: Held) -> Fixture {
         let definition = match held {
             Held::Shared => shared,
             Held::Own => m.plain(&[record(5, 1.0)]),
-            Held::Largest => m.plain(&[record(5, 1.0); MAX_MODIFIERS as usize]),
+            Held::Largest => m.plain(&[record(5, 1.0); LARGEST]),
         };
         m.buff(2000 + index, 600 + index, definition);
     }
@@ -1806,6 +1810,57 @@ fn a_refused_record_is_told_with_its_fields_and_what_its_conditions_name() {
     m.put(records + 72, 5, 4);
     let (value, trace, ..) = traced(&held, &mut m);
     assert_eq!((value, trace.refused), (Ok(337.0), None));
+}
+
+/// The session of 13 October 2026: an applied effect whose definition has 52 records left
+/// Magic Find without a figure for as long as it was applied, because the reader accepted 32.
+/// A definition of 52 reads, and so does one at the bound there is now; one record more is
+/// `Bounds`, and so is a pass whose definitions, each within the bound, do not fit its bytes.
+#[test]
+fn a_definition_of_52_records_reads_and_so_does_one_at_the_bound_but_not_one_above_it() {
+    let held = CachedMagicFind::new();
+    let (mut plain, _) = standard();
+    let (_, _, plain_reads, plain_bytes) = traced(&held, &mut plain);
+    // The effect with many records, applied next to the food of the standard fixture. Its
+    // Magic Find is in its last record: every record before it has to be copied and walked.
+    let with = |count: usize| {
+        let (mut m, _) = standard();
+        let mut records = vec![record(5, 1.0); count];
+        records[count - 1] = record(MAGIC_FIND, 100.0);
+        let definition = m.plain(&records);
+        m.buff(1002, 502, definition);
+        m
+    };
+    for count in [52, MAX_MODIFIERS as usize] {
+        let (value, trace, reads, bytes) = traced(&held, &mut with(count));
+        assert_eq!(value, Ok(437.0), "{count} records");
+        assert_eq!((trace.buffs, trace.definitions, trace.most_records), (2, 2, count as u32));
+        // What the effect adds to the pass: its node and its instance, the head and the group
+        // of its definition, and its records in copies of 56 of them.
+        assert_eq!(bytes - plain_bytes, 28 + 64 + 48 + 12 + 72 * count, "{count} records");
+        assert_eq!(reads - plain_reads, 4 + (72 * count).div_ceil(4032), "{count} records");
+    }
+    // 18492 bytes for the definition at the bound, in seven copies, as the constant says.
+    assert_eq!((48 + 12 + 72 * MAX_MODIFIERS as usize, 2 + (72 * MAX_MODIFIERS as usize).div_ceil(4032)), (18_492, 7));
+    // One record more than the bound: no value, and the count that did it is in the trace.
+    let (value, trace, ..) = traced(&held, &mut with(MAX_MODIFIERS as usize + 1));
+    assert_eq!((value, trace.most_records), (Err(Uncovered::Bounds), MAX_MODIFIERS + 1));
+    // The bytes still bound the pass. Three definitions at the bound fit; with a fourth the
+    // pass asks for more than `MAX_BYTES` and has no value, though none of them is over the bound.
+    let crowd = |definitions: u32| {
+        let mut m = empty();
+        for index in 0..definitions {
+            let definition = m.plain(&[record(5, 1.0); MAX_MODIFIERS as usize]);
+            m.buff(3000 + index, 700 + index, definition);
+        }
+        m
+    };
+    let (value, trace, _, bytes) = traced(&held, &mut crowd(3));
+    assert_eq!((value, trace.definitions, trace.most_records), (Ok(300.0), 3, MAX_MODIFIERS));
+    assert!(bytes > 3 * 18_492 && bytes <= MAX_BYTES, "{bytes}");
+    let (value, trace, _, bytes) = traced(&held, &mut crowd(4));
+    assert_eq!((value, trace.most_records), (Err(Uncovered::Bounds), MAX_MODIFIERS));
+    assert!(bytes <= MAX_BYTES, "{bytes}");
 }
 
 /// A pass that ends on a bound leaves the figure that bound is judged by.

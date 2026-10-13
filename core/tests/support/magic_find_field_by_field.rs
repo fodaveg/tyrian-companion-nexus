@@ -3,7 +3,10 @@
 //! Kept only as the oracle of `tests/magic_find.rs`: the reader that copies in blocks, and the
 //! one that keeps content between passes, must give what this one gives. It is the old
 //! function and its helpers from `passive`, unchanged but for two things it cannot reach from
-//! outside the crate: the image base and the key hash, which come as parameters.
+//! outside the crate: the image base and the key hash, which come as parameters. Its bounds
+//! are the crate's own constants, so the most records it accepts in a definition is whatever
+//! the reader accepts: 32 at 0.8.1, 256 since 13 October 2026. An oracle with another bound
+//! would disagree with the reader for that reason and no other.
 use std::collections::{BTreeMap, BTreeSet};
 use tyrian_companion_nexus_core::inventory::{Memory, Reader};
 use tyrian_companion_nexus_core::magic_find::*;

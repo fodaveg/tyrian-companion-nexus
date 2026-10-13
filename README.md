@@ -507,7 +507,8 @@ How many buffs a Magic Find pass fits, which is fewer than at 0.8.1. A pass copi
 twice and the twelve slots (2368 bytes in all), the buckets twice whatever they hold (48 bytes a
 bucket: 12288 for a table of 256, 24576 for one of 512, the largest accepted), and then, for
 each buff, its node and its instance, and once for each definition in use its head, its group
-and its records (132 bytes with one record, 2364 with the 32 that are the most accepted).
+and its records (132 bytes with one record, 2364 with 32, and 18492 with the 256 that are
+the most accepted).
 Copying an object as one block took the node and the instance from 40 bytes to 92: fewer
 copies, 349 against 557 over the live shape, and more bytes. The most buffs that fit, on any
 cycle but the first of a build, whose 6054 bytes of guards come out of the same budget:
@@ -525,8 +526,27 @@ One more than that is `Bounds`: no coverage for that cycle, never part of a tota
 `core/tests/magic_find.rs` pins every figure, with the reader of 0.8.1 kept there as it was.
 What is not known is which row a game session is on. The fixture of the live shape of 8
 October 2026 (91 buffs in 256 buckets, 47 definitions of one record each) asks for 29328 of
-the 65536 bytes. When the game doubles its table, how many of its buffs share a definition and
-how many records a definition carries have not been observed.
+the 65536 bytes.
+
+**A definition may declare up to 256 records** (`magic_find::MAX_MODIFIERS`). It was 32 until
+13 October 2026, a guess made when every definition seen had one record. That day, in the
+first session after the game's update, the log of the reader said why the panel's Magic Find
+had no figure most of the time: 13 passes that read (623 = luck 300 + pushed 13 + buffs 310,
+64 buffs of 57 definitions in a table of 512 buckets, the longest definition of 9 records,
+46866 bytes with the guards of the first cycle), and then `Bounds` for as long as it was
+looked at, on a pass that had asked for 26048 of its 65536 bytes when it met a definition
+of **52 records**. One applied effect, and no figure while it lasted. The game has no
+maximum of its own: its sum walks the records up to the count the definition gives. So the
+bound is the reader's, on a count it copies from the game: one definition at 256 records is
+18492 bytes in seven copies, under a third of the budget, and the budget is still what
+bounds a pass, since all the definitions of one pass hold fewer than 911 records between
+them. A definition of 257 is `Bounds`, and so is a pass whose definitions do not fit its
+bytes, each within the bound or not. The rows of "32 records" above are the figures
+measured with the old bound, kept as a shape.
+
+That session also showed a table of 512 buckets, the largest the reader accepts, holding 64
+and then 84 buffs: the game doubles the table and does not shrink it. A table of 1024 would
+be `Bounds` on every pass, and has not been seen.
 
 Cadence is the cycle's: once per second, in this order — inventory, wallet, bags, Magic Find.
 The last two run **before** the cycle hands the inventory sample to the client, which then
@@ -1093,7 +1113,7 @@ reader: Bags: not read, after read for 63 passes (60 s); capture Changed
   and seconds. After it come what the pass cost (bytes of its budget, copies, microseconds)
   and, for Magic Find, the figures its bounds are judged by, as far as the pass got: count
   and capacity of the buff table, records the server pushed, buffs walked, definitions read
-  and the most records one definition declared (32 is the bound). `not read` says how the
+  and the most records one definition declared (256 is the bound). `not read` says how the
   capture before it ended.
 - **`record refused`** is the record that made a Magic Find pass end in `Unsupported`: the id
   of the applied effect that carries it, its position in the definition, and every field the
