@@ -1,13 +1,13 @@
 //! Passive, bounded Magic Find for the same certified GW2 build.
 //!
-//! The client stores no total. Its attribute widget (`AtAttribute.cpp`, RVA `0x3E47F8`) sums
+//! The client stores no total. Its attribute widget (`AtAttribute.cpp`, RVA `0x3E4898`) sums
 //! three stored inputs every time it paints the hero panel:
 //!
 //! ```text
 //! min(cap, account luck level + modifiers(0x71) + [modifiers(0x72) while a boon is applied])
 //! ```
 //!
-//! where `modifiers(type)` (RVA `0x12C0540`) is the sum of the records the server pushed to the
+//! where `modifiers(type)` (RVA `0x12C1050`) is the sum of the records the server pushed to the
 //! character's buff manager plus the records of that type on every applied buff. This module
 //! reads those inputs and repeats the sum; it calls nothing. The route and its RVAs come from
 //! `tyrian-companion/docs/audit/loot-mf-probe`, whose external probe matched the hero panel in a
@@ -51,15 +51,15 @@ use crate::wallet::currency_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215cf48;
-pub const CHARACTER_VTABLE: u64 = 0x215fb60;
-pub const CHARACTER_AGENT_VTABLE: u64 = 0x21601d0;
-pub const COMBATANT_VTABLE: u64 = 0x2160498;
-pub const PLAYER_VTABLE: u64 = 0x215d958;
-pub const PLAYER_STATS_VTABLE: u64 = 0x2168138;
-pub const BUFF_MANAGER_VTABLE: u64 = 0x2183118;
-/// Installed by the table node constructor (RVA `0x12C1890`); 91 of 91 nodes in the live run.
-pub const BUFF_NODE_VTABLE: u64 = 0x21830d0;
+pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
+pub const CHARACTER_VTABLE: u64 = 0x2160be0;
+pub const CHARACTER_AGENT_VTABLE: u64 = 0x2161250;
+pub const COMBATANT_VTABLE: u64 = 0x2161518;
+pub const PLAYER_VTABLE: u64 = 0x215e9d8;
+pub const PLAYER_STATS_VTABLE: u64 = 0x21691b8;
+pub const BUFF_MANAGER_VTABLE: u64 = 0x21841a8;
+/// Installed by the table node constructor (RVA `0x12C23A0`); 91 of 91 nodes in the live run.
+pub const BUFF_NODE_VTABLE: u64 = 0x2184160;
 /// `RewardCreatureAll` and `RewardCreatureAllBoon` in the client's modifier name table.
 pub const MAGIC_FIND: u32 = 0x71;
 pub const MAGIC_FIND_BOON: u32 = 0x72;
@@ -105,133 +105,133 @@ pub const MAX_CONTENT_AGE: Duration = Duration::from_secs(30);
 pub const GUARDS: [Guard; 19] = [
     Guard {
         name: "local_player_getter",
-        rva: 0x498860,
+        rva: 0x498900,
         size: 8,
         sha256: "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
     },
     Guard {
         name: "controlled_character_getter",
-        rva: 0x11b4480,
+        rva: 0x11b4f10,
         size: 29,
         sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
     },
     Guard {
         name: "player_by_id_getter",
-        rva: 0x11b6d60,
+        rva: 0x11b77f0,
         size: 25,
         sha256: "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086",
     },
     Guard {
         name: "player_stats_getter",
-        rva: 0x11ba730,
+        rva: 0x11bb1c0,
         size: 8,
         sha256: "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e",
     },
     Guard {
         name: "account_luck_level_getter",
-        rva: 0x402ae0,
+        rva: 0x402b80,
         size: 4,
         sha256: "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635",
     },
     Guard {
         name: "combatant_cast",
-        rva: 0x11d6a20,
+        rva: 0x11d74b0,
         size: 14,
         sha256: "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf",
     },
     Guard {
         name: "buff_manager_getter",
-        rva: 0x400060,
+        rva: 0x400100,
         size: 8,
         sha256: "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b",
     },
     Guard {
         name: "is_player",
-        rva: 0x11d9150,
+        rva: 0x11d9be0,
         size: 24,
         sha256: "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e",
     },
     Guard {
         name: "player_id_getter",
-        rva: 0x11d7a50,
+        rva: 0x11d84e0,
         size: 54,
         sha256: "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891",
     },
     Guard {
         name: "modifier_value",
-        rva: 0x12c2450,
+        rva: 0x12c2f60,
         size: 129,
-        sha256: "02c17502d33b741829ee827be8a95cbaf91e69d27f07171cff624f77662a268a",
+        sha256: "a581f4a80d24c21f359d6b3ee8a93183db4cc533230c6de1b68188aa553cb7e1",
     },
     Guard {
         name: "pushed_modifier_sum",
-        rva: 0x12c2520,
+        rva: 0x12c3030,
         size: 212,
         sha256: "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88",
     },
     Guard {
         name: "buff_iterator",
-        rva: 0x12c28d0,
+        rva: 0x12c33e0,
         size: 188,
         sha256: "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18",
     },
     Guard {
         name: "buff_filter",
-        rva: 0x12c4320,
+        rva: 0x12c4e30,
         size: 142,
-        sha256: "490a1348d0a788393e5af59d0a10a6ffb9ac46b65a6ba3dbea93e607c7a58ffe",
+        sha256: "7b44974ea06ed7f392fde2572356338fde9dc4eba4922634d480716d6a20abce",
     },
     Guard {
         name: "buff_lookup",
         rva: 0x251e20,
         size: 296,
-        sha256: "4da24189ebd19ebf99989e17bcdde5d7804b974ca6761d697fbad6357dc70784",
+        sha256: "da6f2f3399943312c769046a68e5612e416d4af1c663cbf0108895acdf32aeea",
     },
     Guard {
         name: "modifier_sum",
-        rva: 0x12c0540,
+        rva: 0x12c1050,
         size: 2536,
-        sha256: "887f54e8f9981ecacb51c55324f2174d2adb2c91b7238b07f6361a051c906593",
+        sha256: "d42282064b43fe101e6c0296e8d39d56b12241736a56b78b20dfb91c96c2a3f2",
     },
     Guard {
         name: "modifier_formula",
-        rva: 0x12c0f30,
+        rva: 0x12c1a40,
         size: 816,
-        sha256: "03c40bfe57089a26ee53e0790bdfee39a26a3645e94b93cbc5c6d2df45ffd132",
+        sha256: "03cf6e4c30459e903354441baf6fddf5a18a642b01d8de2cee51296b9a19e500",
     },
     Guard {
         name: "magic_find_case",
-        rva: 0x3e47f8,
+        rva: 0x3e4898,
         size: 241,
-        sha256: "eb21265687ff6a00dc5f53148d98f6a44b268bcde2c93b6c5d77ac419346e93e",
+        sha256: "189467c9767e02761b8847a53bc2e5e81fd5cc7b9eddb3d35d44341a9180a48a",
     },
     Guard {
         name: "attribute_modifier_map",
-        rva: 0x3e3e00,
+        rva: 0x3e3ea0,
         size: 296,
-        sha256: "6bad628623282ed7de1d3f5ca56adbd3ee756b9f790460b43e6adb3b3ac25912",
+        sha256: "f3365e3fff838ba902f21415c68560a92bc466f2a02c9af21eb0c6f41ef0cc3d",
     },
     Guard {
         name: HASH_TABLE,
-        rva: 0x1b8fdb0,
+        rva: 0x1b90df0,
         size: 1024,
         sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
     },
 ];
 /// Vtable, slot and the guarded code that slot must select.
 pub const SLOTS: [(u64, u64, u64); 12] = [
-    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4480),
-    (CHAR_CONTEXT_VTABLE, 0x70, 0x498860),
-    (CHAR_CONTEXT_VTABLE, 0x118, 0x11b6d60),
-    (CHARACTER_VTABLE, 0x100, 0x11d6a20),
-    (COMBATANT_VTABLE, 0x38, 0x400060),
-    (CHARACTER_AGENT_VTABLE, 0x68, 0x11d9150),
-    (CHARACTER_AGENT_VTABLE, 0x18, 0x11d7a50),
-    (PLAYER_VTABLE, 0x320, 0x11ba730),
-    (PLAYER_STATS_VTABLE, 0x30, 0x402ae0),
-    (BUFF_MANAGER_VTABLE, 0x18, 0x12c2450),
-    (BUFF_MANAGER_VTABLE, 0x20, 0x12c2520),
-    (BUFF_MANAGER_VTABLE, 0x28, 0x12c28d0),
+    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4f10),
+    (CHAR_CONTEXT_VTABLE, 0x70, 0x498900),
+    (CHAR_CONTEXT_VTABLE, 0x118, 0x11b77f0),
+    (CHARACTER_VTABLE, 0x100, 0x11d74b0),
+    (COMBATANT_VTABLE, 0x38, 0x400100),
+    (CHARACTER_AGENT_VTABLE, 0x68, 0x11d9be0),
+    (CHARACTER_AGENT_VTABLE, 0x18, 0x11d84e0),
+    (PLAYER_VTABLE, 0x320, 0x11bb1c0),
+    (PLAYER_STATS_VTABLE, 0x30, 0x402b80),
+    (BUFF_MANAGER_VTABLE, 0x18, 0x12c2f60),
+    (BUFF_MANAGER_VTABLE, 0x20, 0x12c3030),
+    (BUFF_MANAGER_VTABLE, 0x28, 0x12c33e0),
 ];
 // `BuildProfile::checked` only accepts an image that reaches the TLS index, which lies beyond
 // every address this module reads inside the executable.
@@ -824,7 +824,7 @@ fn pass<M: Memory>(
     let (table_header, pushed_header) = (first.table_header, first.pushed_header);
     let hidden_mode = first.hidden_mode;
 
-    // RVA 0x12C2520 returns 0 for an empty table without dereferencing it.
+    // RVA 0x12C3030 returns 0 for an empty table without dereferencing it.
     let pushed_count = dword(&pushed_header, 12);
     if pushed_count > MAX_PUSHED {
         return Err(Uncovered::Bounds);
@@ -852,7 +852,7 @@ fn pass<M: Memory>(
         previous = dword(record, 0);
     }
 
-    // RVA 0x12C28D0 returns no buff when the count is 0, whatever the table holds.
+    // RVA 0x12C33E0 returns no buff when the count is 0, whatever the table holds.
     let (capacity, count) = (dword(&table_header, 0), dword(&table_header, 4));
     let entries = qword(&table_header, 8);
     let buckets = if count == 0 {

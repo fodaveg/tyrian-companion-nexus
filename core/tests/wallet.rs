@@ -1,9 +1,13 @@
 //! Sparse wallet fixtures over owned bytes; never open a real process.
 //!
-//! `fixtures/wallet_profile.json` is a verbatim copy of the audited profile in
-//! `tyrian-companion/docs/audit/loot-wallet-probe/profile.json` (commit f821362): its guard bytes
-//! are what the certified executable holds at those RVAs. Its `scope` text predates the live
-//! comparison of 2026-10-07, which found the native keys to be the public currency IDs.
+//! `fixtures/wallet_profile.json` is the audited profile of
+//! `tyrian-companion/docs/audit/loot-wallet-probe/profile.json` (commit f821362) as the
+//! recertification of 2026-10-13 carried it to the game's build of that day (its `recertified`
+//! key, and `docs/audit/2026-10-13-recertification-build-208574.json`): its guard bytes are what
+//! the certified executable holds at those RVAs, and differ from the audited ones only in the
+//! rel32 fields that moved with the code. The file in that repository still describes the
+//! build of 2026-10-06. Its `scope` text predates the live comparison of 2026-10-07, which found
+//! the native keys to be the public currency IDs.
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -14,7 +18,7 @@ use tyrian_companion_nexus_core::inventory::{
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 use tyrian_companion_nexus_core::wallet::*;
 const BASE: u64 = 0x140000000;
-const IMAGE: u64 = 0x2c48000;
+const IMAGE: u64 = 0x2c49000;
 const CTX: u64 = 0x200000;
 const CHAR_CONTEXT: u64 = 0x210000;
 const CHARACTER: u64 = 0x220000;

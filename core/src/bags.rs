@@ -1,11 +1,11 @@
 //! Passive, bounded bag capacity and free slots for the same certified GW2 build.
 //!
 //! The client keeps no capacity field. Its inventory counter (`InvButtonBar.cpp`, RVA
-//! `0x6A2930`) asks the inventory for two numbers and a third method subtracts them:
+//! `0x6A29D0`) asks the inventory for two numbers and a third method subtracts them:
 //!
-//! * total, slot `0x1F0` -> RVA `0x11EE520`: the sum of each equipped bag's size;
-//! * used, slot `0x1E8` -> RVA `0x11EE4E0`: the non-null entries of the array at `+0xC8`;
-//! * free, slot `0x1E0` -> RVA `0x11EE4A0`: total minus used.
+//! * total, slot `0x1F0` -> RVA `0x11EEFB0`: the sum of each equipped bag's size;
+//! * used, slot `0x1E8` -> RVA `0x11EEF70`: the non-null entries of the array at `+0xC8`;
+//! * free, slot `0x1E0` -> RVA `0x11EEF30`: total minus used.
 //!
 //! This module reads the same stored inputs and repeats that arithmetic. The route, its RVAs
 //! and the bag item class come from `tyrian-companion/docs/audit/loot-bag-capacity-probe`,
@@ -20,11 +20,11 @@ use crate::passive::{
     Uncovered,
 };
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215cf48;
-pub const CHARACTER_AGENT_VTABLE: u64 = 0x21601d0;
-pub const INVENTORY_VTABLE: u64 = 0x21621a8;
-/// `ItCliBag`: the class the item factory (RVA `0x13C6E03`) builds for definition type 3.
-pub const BAG_ITEM_VTABLE: u64 = 0x225cd18;
+pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
+pub const CHARACTER_AGENT_VTABLE: u64 = 0x2161250;
+pub const INVENTORY_VTABLE: u64 = 0x2163228;
+/// `ItCliBag`: the class the item factory (RVA `0x13C7923`) builds for definition type 3.
+pub const BAG_ITEM_VTABLE: u64 = 0x225de68;
 /// `CHAR_INVENTORY_BAGS_MAX` and `CHAR_INVENTORY_BAG_MAX_SIZE` of this build.
 pub const BAGS: usize = 16;
 pub const BAG_SIZE_MAX: u32 = 32;
@@ -48,89 +48,89 @@ pub const MAX_BYTES: usize = 16_384;
 pub const GUARDS: [Guard; 12] = [
     Guard {
         name: "controlled_character_getter",
-        rva: 0x11b4480,
+        rva: 0x11b4f10,
         size: 29,
         sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
     },
     Guard {
         name: "character_inventory_getter",
-        rva: 0x11d74d0,
+        rva: 0x11d7f60,
         size: 70,
-        sha256: "e7bd0ae3e1e372ee63d98c89639d52046ad8085b5d899cc076e252c808b0410c",
+        sha256: "12edfab95716e429e1d8f6d5878c4aa57e53e1d87a2c7fbfc080ae7cbd21647f",
     },
     Guard {
         name: "inventory_owner_getter",
-        rva: 0x45dd90,
+        rva: 0x45de30,
         size: 5,
         sha256: "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107",
     },
     Guard {
         name: "bag_slot_count_getter",
-        rva: 0x11ee300,
+        rva: 0x11eed90,
         size: 7,
         sha256: "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b",
     },
     Guard {
         name: "bag_getter",
-        rva: 0x12908e0,
+        rva: 0x12913f0,
         size: 72,
-        sha256: "bac37e1cff99524d0b12d2ee360c6f462acfc93a8bd73a1d7cf274935d245b90",
+        sha256: "47c8e28fb4ed3ccd1506da0d63905194e3da2d67e87b806a600bd3d11cf8eced",
     },
     Guard {
         name: "bag_size_getter",
-        rva: 0x1290930,
+        rva: 0x1291440,
         size: 133,
-        sha256: "e830e97da7ff9a0a24ac044e3ff26824bda8637d2c07c998bea87d55880453e8",
+        sha256: "e054565f4fd7d4e99cf9170cebe37842aaf80619131e799a3defbc9c67c220cc",
     },
     Guard {
         name: "slot_validity",
-        rva: 0x1290ac0,
+        rva: 0x12915d0,
         size: 148,
-        sha256: "587a452b7f33987938235c45fb271fe137fa495019d31b6b492ca5db6f440587",
+        sha256: "a85a558be74a0dd3cb112e51769194faba3a6788fd59ea4e053726e7c534e396",
     },
     Guard {
         name: "free_slots_getter",
-        rva: 0x11ee4a0,
+        rva: 0x11eef30,
         size: 59,
         sha256: "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a",
     },
     Guard {
         name: "used_slots_getter",
-        rva: 0x11ee4e0,
+        rva: 0x11eef70,
         size: 60,
         sha256: "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d",
     },
     Guard {
         name: "capacity_getter",
-        rva: 0x11ee520,
+        rva: 0x11eefb0,
         size: 103,
         sha256: "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342",
     },
     Guard {
         name: "item_definition_getter",
-        rva: 0x13c3e10,
+        rva: 0x13c4930,
         size: 61,
-        sha256: "d8cf3b68aa76a6ded61325e8533f1ff5735173ed7593a308456a7fa32d84037e",
+        sha256: "f430638166c7ed4e47aed1717abbed7cc30ffe92c7714a7a9e66648c0fbca7ef",
     },
     Guard {
         name: "capacity_counter_text",
-        rva: 0x6a2930,
+        rva: 0x6a29d0,
         size: 136,
-        sha256: "208e0765e402ed4d92092a68ba72c3cb56e5d5b2b793f172800405a6ce265203",
+        sha256: "2e39a5e22e8a6ea2e8f214ae1715088732885d31bed67f0b246b18620f7af850",
     },
 ];
 /// Vtable, slot and the guarded code that slot must select.
 pub const SLOTS: [(u64, u64, u64); 10] = [
-    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4480),
-    (CHARACTER_AGENT_VTABLE, 0xc8, 0x11d74d0),
-    (INVENTORY_VTABLE, 0x220, 0x45dd90),
-    (INVENTORY_VTABLE, 0x138, 0x12908e0),
-    (INVENTORY_VTABLE, 0x140, 0x1290930),
-    (INVENTORY_VTABLE, 0x148, 0x11ee300),
-    (INVENTORY_VTABLE, 0x1e0, 0x11ee4a0),
-    (INVENTORY_VTABLE, 0x1e8, 0x11ee4e0),
-    (INVENTORY_VTABLE, 0x1f0, 0x11ee520),
-    (BAG_ITEM_VTABLE, 0x8, 0x13c3e10),
+    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4f10),
+    (CHARACTER_AGENT_VTABLE, 0xc8, 0x11d7f60),
+    (INVENTORY_VTABLE, 0x220, 0x45de30),
+    (INVENTORY_VTABLE, 0x138, 0x12913f0),
+    (INVENTORY_VTABLE, 0x140, 0x1291440),
+    (INVENTORY_VTABLE, 0x148, 0x11eed90),
+    (INVENTORY_VTABLE, 0x1e0, 0x11eef30),
+    (INVENTORY_VTABLE, 0x1e8, 0x11eef70),
+    (INVENTORY_VTABLE, 0x1f0, 0x11eefb0),
+    (BAG_ITEM_VTABLE, 0x8, 0x13c4930),
 ];
 // `BuildProfile::checked` only accepts an image that reaches the TLS index, which lies beyond
 // every address this module reads inside the executable.
@@ -199,7 +199,7 @@ impl BagProfile {
     }
 }
 
-/// One equipped bag: item -> definition -> bag payload -> size, the hops of RVA `0x1290930`.
+/// One equipped bag: item -> definition -> bag payload -> size, the hops of RVA `0x1291440`.
 fn bag_size<M: Memory>(r: &mut Reader<M>, base: u64, item: u64) -> Result<u32, Uncovered> {
     let item = heap(item)?;
     identity(r, item, base + BAG_ITEM_VTABLE)?;

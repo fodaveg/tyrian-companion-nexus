@@ -248,8 +248,25 @@ The reader validates the executable's SHA-256 and AMD64 PE profile, discovers TE
 contexts autonomously, and checks the controlled character, inventory owner, location3
 matrix (`C8/D0/D4`), sparse instance resolver, definitions and quantity getter identities.
 No session pointer or PID is hardcoded. The currently certified executable is
-`27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c`, profile
-`owned-bags-v3`. All other builds are unavailable until separately certified.
+`c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb` (the game's update of 13
+October 2026), profile `owned-bags-v3`. All other builds are unavailable until separately
+certified, the one of 6 October (`27d179bf…0802c`) included: one executable is certified at a
+time.
+
+That certificate was carried over from the build of 6 October statically, over the file on
+disk and nothing else (`docs/audit/2026-10-13-recertification-build-208574.json`). Each of
+the 37 ranges the three audited profiles keep by digest was found again in the new file, and
+the bytes the old build held there were rebuilt from the new ones by moving back what moves
+with the code (the rel32 fields, the image-relative displacements and the jump table
+entries): every rebuilt range has the digest audited for the old build, so the code is the
+same and only its place changed. The vtables are the only places in `.rdata` whose slots
+select those ranges, and the code that installs them refers to them. The functions the
+inventory reader compares by address alone (the location, instance and quantity getters and
+the three conditional predicates) carry no digest and were read in the new file one by one.
+No field offset changed. What that does not give is a reading: **the live evidence quoted in
+this document was taken on the build of 6 October, and nothing has been read from a running
+game of this one.** The `live_open` frame carries the new hash, so the plugin has to accept
+it as well.
 
 That verification starts on the first cycle and its answer is kept for the whole load only
 when it is final, which is whenever the file or its loaded image decides it: the certified
@@ -1335,9 +1352,10 @@ covers what does not need a running game:
   headers and pointers, failed copies, wrong hashes, unreachable and repeated keys, a count
   that disagrees, out-of-range keys and balances, concurrent changes and the wallet budget;
 - passive bag and Magic Find fixtures over synthetic guard contents (no byte of the game),
-  with the production digests, RVAs and slots required to equal verbatim copies of the two
-  audited probe profiles (`core/tests/fixtures/bag_capacity_profile.json` and
-  `magic_find_profile.json`, digests only): the
+  with the production digests, RVAs and slots required to equal the two audited probe
+  profiles as the recertification of 13 October 2026 carried them to the current build
+  (`core/tests/fixtures/bag_capacity_profile.json` and `magic_find_profile.json`, digests
+  only): the
   live shapes of 8 October 2026 (414 capacity and 101 free; 333.0 and 363.0), covered zeroes,
   every identity on both routes, the bag class and definition type, both pointer rules with
   valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported

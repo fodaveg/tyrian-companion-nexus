@@ -1,6 +1,10 @@
 //! Passive, bounded inventory interpretation for one certified GW2 build.
 //!
-//! Addresses here are RVAs/field offsets from the 2026-10-06 proof, never session pointers.
+//! Addresses here are RVAs/field offsets, never session pointers. The route and the field
+//! offsets come from the 2026-10-06 proof; the RVAs are those of the game's build of 13 October
+//! 2026, to which the static recertification of that day carried them
+//! (`docs/audit/2026-10-13-recertification-build-208574.json`). In this module and in `bags`,
+//! `wallet` and `magic_find`, every RVA and every digest belongs to that one executable.
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
 //!
@@ -12,9 +16,9 @@ use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const BUILD_SHA256: &str = "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c";
+pub const BUILD_SHA256: &str = "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb";
 pub const PROFILE: &str = "owned-bags-v3";
-pub const TLS_INDEX_RVA: u64 = 0x28145c0;
+pub const TLS_INDEX_RVA: u64 = 0x28155c0;
 pub const MAX_POSITIONS: u32 = 640;
 pub const MAX_BYTES: usize = 131_072;
 pub const MAX_READS: usize = 32_768;
@@ -330,7 +334,7 @@ pub struct InventorySnapshot {
 /// Where the item vtables of the certified build live, and so where a class is a fixed word of
 /// the executable rather than something the game writes.
 fn vtables(base: u64) -> std::ops::Range<u64> {
-    base + 0x1913000..base + 0x2552390
+    base + 0x1914000..base + 0x2553500
 }
 /// Up to 8 bytes at `address`, little-endian.
 fn word<M: Memory>(r: &mut Reader<M>, address: u64, size: usize) -> Result<u64, ReadError> {
@@ -389,10 +393,10 @@ type Conditional = (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
 /// The conditional profile of an item class, for the three classes that have one.
 fn conditional(base: u64, vt: u64) -> Option<Conditional> {
     Some(match vt.checked_sub(base) {
-        Some(0x225d580) => (0xa8, 0x225d898, 0, 0x13c9d60, 5, 0, 1, 1, 0x98, 0x13c9d20),
-        Some(0x225dd78) => (0xa8, 0x225e080, 0, 0x13ca590, 10, 0, 1, 1, 0x98, 0x13c9d20),
-        Some(0x225d910) => (
-            0xe0, 0x225dcb8, 0x20, 0x13ca130, 9, 0x18, 0xffffffff, 4, 0xe8, 0x13c9f60,
+        Some(0x225e6d0) => (0xa8, 0x225e9e8, 0, 0x13ca880, 5, 0, 1, 1, 0x98, 0x13ca840),
+        Some(0x225eec8) => (0xa8, 0x225f1d0, 0, 0x13cb0b0, 10, 0, 1, 1, 0x98, 0x13ca840),
+        Some(0x225ea60) => (
+            0xe0, 0x225ee08, 0x20, 0x13cac50, 9, 0x18, 0xffffffff, 4, 0xe8, 0x13caa80,
         ),
         _ => return None,
     })
@@ -431,8 +435,8 @@ fn quantity<M: Memory>(
 ) -> Result<Option<u32>, ReadError> {
     let getter = pointer_value(statics.word(r, vt + 0x260, 8)?)?;
     let offset = match getter.checked_sub(base) {
-        Some(0x84c310) => Some(0x98),
-        Some(0x13c81c0) => Some(0xd0),
+        Some(0x84c4c0) => Some(0x98),
+        Some(0x13c8ce0) => Some(0xd0),
         Some(0x168aa0) => {
             // `xor eax, eax; ret`, the bytes 33 C0 C3.
             if statics.word(r, getter, 3)? != 0xc3c033 {
@@ -596,19 +600,19 @@ pub fn inventory_snapshot<M: Memory>(
     }
     let b = profile.base;
     let charctx = r.pointer(context + 0x98)?;
-    r.equal(charctx, 8, b + 0x215cf48)?;
-    r.equal(b + 0x215cf48 + 0x68, 8, b + 0x11b4480)?;
+    r.equal(charctx, 8, b + 0x215dfc8)?;
+    r.equal(b + 0x215dfc8 + 0x68, 8, b + 0x11b4f10)?;
     let character = r.pointer(charctx + 0x98)?;
     if character == 0 || r.scalar(character + 0x178, 4)? & 0x10 == 0 {
         return Err(ReadError::RootUnavailable);
     }
-    r.equal(character + 8, 8, b + 0x21601d0)?;
-    r.equal(b + 0x21601d0 + 0xc8, 8, b + 0x11d74d0)?;
+    r.equal(character + 8, 8, b + 0x2161250)?;
+    r.equal(b + 0x2161250 + 0xc8, 8, b + 0x11d7f60)?;
     let inventory = r.pointer(character + 0x3f0)?;
-    r.equal(inventory, 8, b + 0x21621a8)?;
-    r.equal(b + 0x21621a8 + 0x220, 8, b + 0x45dd90)?;
+    r.equal(inventory, 8, b + 0x2163228)?;
+    r.equal(b + 0x2163228 + 0x220, 8, b + 0x45de30)?;
     r.equal(inventory + 0x70, 8, character)?;
-    r.equal(b + 0x21621a8 + 0x190, 8, b + 0x11ee3d0)?;
+    r.equal(b + 0x2163228 + 0x190, 8, b + 0x11eee60)?;
     let count = r.scalar(inventory + 0xd4, 4)?;
     let capacity = r.scalar(inventory + 0xd0, 4)?;
     if count > capacity || capacity > MAX_POSITIONS as u64 {
@@ -619,8 +623,8 @@ pub fn inventory_snapshot<M: Memory>(
         return Err(ReadError::Bounds);
     }
     let itemctx = r.pointer(context + 0x178)?;
-    r.equal(itemctx, 8, b + 0x225bd00)?;
-    r.equal(b + 0x225bd00 + 0x10, 8, b + 0x13c6400)?;
+    r.equal(itemctx, 8, b + 0x225ce50)?;
+    r.equal(b + 0x225ce50 + 0x10, 8, b + 0x13c6f20)?;
     let length = r.scalar(itemctx + 0x3c, 4)?;
     let item_capacity = r.scalar(itemctx + 0x38, 4)?;
     if length > item_capacity || item_capacity > 1_048_576 {
@@ -647,7 +651,7 @@ pub fn inventory_snapshot<M: Memory>(
         if !vtables(b).contains(&vt) {
             return Err(ReadError::ProfileMismatch);
         }
-        statics.equal(r, vt + 0x70, b + 0x13c45d0)?;
+        statics.equal(r, vt + 0x70, b + 0x13c50f0)?;
         let location = r.scalar(item + 0x48, 2)?;
         if location & 15 != 3 {
             // Classification is part of coverage: an excluded entry must not enter our
@@ -656,9 +660,9 @@ pub fn inventory_snapshot<M: Memory>(
             continue;
         }
         r.equal(item + 0x58, 8, inventory)?;
-        statics.equal(r, vt + 0xa0, b + 0x13c46d0)?;
-        statics.equal(r, vt + 8, b + 0x13c3e10)?;
-        statics.equal(r, vt + 0x68, b + 0x31b980)?;
+        statics.equal(r, vt + 0xa0, b + 0x13c51f0)?;
+        statics.equal(r, vt + 8, b + 0x13c4930)?;
+        statics.equal(r, vt + 0x68, b + 0x31ba20)?;
         let reference = r.scalar(item + 0x38, 4)?;
         if reference == 0 || reference >= length || !seen.insert(reference) {
             return Err(ReadError::Bounds);

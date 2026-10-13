@@ -5,11 +5,14 @@
 //! which accepts other digests only for exactly the audited ranges and which the addon never
 //! calls.
 //!
-//! What ties production to the audit is `fixtures/bag_capacity_profile.json`: a verbatim copy
-//! (sha256 `5c2303e3…599d81`) of `tyrian-companion/docs/audit/loot-bag-capacity-probe/
-//! profile.json` at the commit "add the free-slots getter to the audited bag capacity profile".
-//! It holds digests only, and that repository's `check_profile_offline.py` compares each of its
-//! 12 digests and 10 slots with the installed executable.
+//! What ties production to the audit is `fixtures/bag_capacity_profile.json`:
+//! `tyrian-companion/docs/audit/loot-bag-capacity-probe/profile.json` at the commit "add the
+//! free-slots getter to the audited bag capacity profile" (sha256 `5c2303e3…599d81`), as the
+//! recertification of 2026-10-13 carried it to the game's build of that day (its `recertified`
+//! key, and `docs/audit/2026-10-13-recertification-build-208574.json`). The file in that
+//! repository still describes the build of 2026-10-06. It holds digests only, and that
+//! repository's `check_profile_offline.py`, run over this fixture, compares each of its 12
+//! digests and 10 slots with the installed executable.
 //! `production_constants_are_the_audited_profile` requires `GUARDS`, `SLOTS` and the vtables to
 //! equal it, so a mistyped digest or RVA here turns the suite red.
 //!
@@ -25,7 +28,7 @@ use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 
 const BASE: u64 = 0x140000000;
-const IMAGE: u64 = 0x2c48000;
+const IMAGE: u64 = 0x2c49000;
 const CTX: u64 = 0x200000;
 const CHAR_CONTEXT: u64 = 0x210000;
 const CHARACTER: u64 = 0x220000;
@@ -36,7 +39,7 @@ const LIVE_SIZES: [u32; 16] = [
     18, 32, 24, 20, 20, 20, 20, 20, 20, 28, 32, 32, 32, 32, 32, 32,
 ];
 /// The class the first external candidate accepted by mistake: `ItCliConsumable`.
-const CONSUMABLE_VTABLE: u64 = 0x225d070;
+const CONSUMABLE_VTABLE: u64 = 0x225e1c0;
 
 fn synthetic_bytes(guard: &Guard) -> Vec<u8> {
     (0..guard.size)
@@ -309,7 +312,7 @@ fn bag_class_definition_type_and_size_reject() {
     // The class of a consumable, although its definition getter dispatches alike.
     let consumable = changed(|m| {
         let item = m.bags[&1].0;
-        m.put(BASE + CONSUMABLE_VTABLE + 8, BASE + 0x13c3e10, 8);
+        m.put(BASE + CONSUMABLE_VTABLE + 8, BASE + 0x13c4930, 8);
         m.put(item, BASE + CONSUMABLE_VTABLE, 8);
     });
     assert_eq!(consumable, Err(Uncovered::Profile));

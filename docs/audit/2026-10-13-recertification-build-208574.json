@@ -1,0 +1,1370 @@
+{
+  "version": 1,
+  "date": "2026-10-13",
+  "scope": "Static recertification of the passive readers for the game's update of 13 October 2026 (Nexus LastGameBuild 208574). File on disk only: no process was opened, read or probed. Not a live reading.",
+  "from": {
+    "binary_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+    "image_size": 46432256,
+    "available": "no: the file was replaced by the update; what is known of it is the audited profiles (digests, and bytes for the wallet guards)"
+  },
+  "to": {
+    "binary_sha256": "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb",
+    "file": "Gw2-64.exe, 43065736 bytes, written 2026-10-13 18:01 CEST",
+    "image_base": "0x140000000",
+    "image_size": "0x2c49000",
+    "pe_timestamp": 1791828055,
+    "sections": [
+      {
+        "name": ".text",
+        "rva": "0x1000",
+        "virtual_size": "0x191202c",
+        "file_offset": "0x400"
+      },
+      {
+        "name": ".rdata",
+        "rva": "0x1914000",
+        "virtual_size": "0xc3f500",
+        "file_offset": "0x1912600"
+      },
+      {
+        "name": ".data",
+        "rva": "0x2554000",
+        "virtual_size": "0x44fa44",
+        "file_offset": "0x2551c00"
+      },
+      {
+        "name": ".pdata",
+        "rva": "0x29a4000",
+        "virtual_size": "0x154998",
+        "file_offset": "0x2669800"
+      },
+      {
+        "name": "_RDATA",
+        "rva": "0x2af9000",
+        "virtual_size": "0x10ee0",
+        "file_offset": "0x27be200"
+      },
+      {
+        "name": ".rsrc",
+        "rva": "0x2b0a000",
+        "virtual_size": "0xb41f8",
+        "file_offset": "0x27cf200"
+      },
+      {
+        "name": ".reloc",
+        "rva": "0x2bbf000",
+        "virtual_size": "0x89b90",
+        "file_offset": "0x2883400"
+      }
+    ]
+  },
+  "method": [
+    "Ranges with no relocatable field: every 16-byte-aligned offset of .text (every offset for ranges of 16 bytes or less), and every 8-byte-aligned offset of .rdata for the hash table, was hashed and compared with the audited digest.",
+    "Ranges with relocatable fields: at each candidate place the bytes of the old build were rebuilt from the new ones by moving back the rel32 branch and RIP-relative fields (rel_old = rel_new + delta_code - delta_target), the image-relative displacements and the jump table entries (old = new - delta_target), and the rebuilt range was hashed. A match means the audited code, moved, with no other byte changed. Target deltas were taken from the proven anchors around each target; the wallet guards, whose old bytes are retained in the audit, gave the first ones directly.",
+    "Vtables: searched in .rdata as the places whose slots hold the new addresses of the proven getters; the nine vtables of the routes and the item context are each referred to by exactly two lea instructions (constructor and destructor).",
+    "Functions the inventory reader compares by address only were disassembled in the new file and compared with the route of inventory_reader_v3.py.",
+    "The audited profiles were rewritten for the new build and checked with the audit's own check_profile_offline.py (unchanged) against the installed file."
+  ],
+  "tooling": "Python 3.14 with capstone 5.0.7 and numpy 2.5.4 in a scratch venv, x86_64-w64-mingw32-objdump; scratch scripts not retained",
+  "deltas": {
+    ".text": "0x0 up to 0x251e20, 0xa0 at 0x3e3e00..0x6a2930, 0x1b0 at 0x84c310..0x9cd440, 0x860 at 0x9daf40, 0x9b0..0xa30 at 0x1047670..0x110e670, 0xa90 at 0x11b4480..0x1271810, 0xb10 at 0x12908e0..0x130b640, 0xb20 from 0x13c3a20",
+    ".rdata": "0x1000 (the section starts one page later), 0x1010 at 0x1ac8478, 0x1030 at 0x1b67d9c, 0x1040 at 0x1b8fdb0, 0x1080 at 0x215cf48..0x21720f8, 0x1090 at 0x2179b10..0x21833a0, 0x1150 at 0x225b7e0..0x225e080",
+    ".data": "0x1000"
+  },
+  "image": [
+    {
+      "name": "tls_index",
+      "old_rva": "0x28145c0",
+      "new_rva": "0x28155c0",
+      "delta": "0x1000",
+      "evidence": "AddressOfIndex of the PE TLS directory; the context getter at 0x9b1fb0 reads it, then gs:[0x58], then block+0x10"
+    },
+    {
+      "name": "vtables_range_start",
+      "old_rva": "0x1913000",
+      "new_rva": "0x1914000",
+      "delta": "0x1000",
+      "evidence": "start of .rdata"
+    },
+    {
+      "name": "vtables_range_end",
+      "old_rva": "0x2552390",
+      "new_rva": "0x2553500",
+      "delta": "0x1170",
+      "evidence": "end of .rdata (rva + virtual size)"
+    }
+  ],
+  "guards": [
+    {
+      "names": [
+        "wallet:hash_lookup"
+      ],
+      "old_rva": "0x2397f0",
+      "new_rva": "0x2397f0",
+      "delta": "0x0",
+      "size": 296,
+      "file_offset": "0x238bf0",
+      "old_sha256": "e329f745caf728032181eb834e5c86915ab1f528b8788c40e5982664d06ffb63",
+      "new_sha256": "c0c92b06913be7e76211d3b0b20cc397d17e7767a528d46f71ecbbae7b3e75a4",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x23a470",
+          "old": "0x23a470",
+          "delta": "0x0",
+          "section": ".text"
+        },
+        {
+          "new": "0x1b90df0",
+          "old": "0x1b8fdb0",
+          "delta": "0x1040",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1b90eb8",
+          "old": "0x1b8fe78",
+          "delta": "0x1040",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:buff_lookup"
+      ],
+      "old_rva": "0x251e20",
+      "new_rva": "0x251e20",
+      "delta": "0x0",
+      "size": 296,
+      "file_offset": "0x251220",
+      "old_sha256": "4da24189ebd19ebf99989e17bcdde5d7804b974ca6761d697fbad6357dc70784",
+      "new_sha256": "da6f2f3399943312c769046a68e5612e416d4af1c663cbf0108895acdf32aeea",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x2574f0",
+          "old": "0x2574f0",
+          "delta": "0x0",
+          "section": ".text"
+        },
+        {
+          "new": "0x1b90df0",
+          "old": "0x1b8fdb0",
+          "delta": "0x1040",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1b90eb8",
+          "old": "0x1b8fe78",
+          "delta": "0x1040",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:attribute_modifier_map"
+      ],
+      "old_rva": "0x3e3e00",
+      "new_rva": "0x3e3ea0",
+      "delta": "0xa0",
+      "size": 296,
+      "file_offset": "0x3e32a0",
+      "old_sha256": "6bad628623282ed7de1d3f5ca56adbd3ee756b9f790460b43e6adb3b3ac25912",
+      "new_sha256": "f3365e3fff838ba902f21415c68560a92bc466f2a02c9af21eb0c6f41ef0cc3d",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db950",
+          "old": "0x9db0f0",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x1ac9488",
+          "old": "0x1ac8478",
+          "delta": "0x1010",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1ae66a0",
+          "old": "0x1ae5690",
+          "delta": "0x1010",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:magic_find_case"
+      ],
+      "old_rva": "0x3e47f8",
+      "new_rva": "0x3e4898",
+      "delta": "0xa0",
+      "size": 241,
+      "file_offset": "0x3e3c98",
+      "old_sha256": "eb21265687ff6a00dc5f53148d98f6a44b268bcde2c93b6c5d77ac419346e93e",
+      "new_sha256": "189467c9767e02761b8847a53bc2e5e81fd5cc7b9eddb3d35d44341a9180a48a",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x3e4541",
+          "old": "0x3e44a1",
+          "delta": "0xa0",
+          "section": ".text"
+        },
+        {
+          "new": "0x12c1050",
+          "old": "0x12c0540",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x12ddc30",
+          "old": "0x12dd120",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x12e3c90",
+          "old": "0x12e3180",
+          "delta": "0xb10",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:buff_manager_getter"
+      ],
+      "old_rva": "0x400060",
+      "new_rva": "0x400100",
+      "delta": "0xa0",
+      "size": 8,
+      "file_offset": "0x3ff500",
+      "old_sha256": "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b",
+      "new_sha256": "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:account_luck_level_getter"
+      ],
+      "old_rva": "0x402ae0",
+      "new_rva": "0x402b80",
+      "delta": "0xa0",
+      "size": 4,
+      "file_offset": "0x401f80",
+      "old_sha256": "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635",
+      "new_sha256": "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:inventory_owner_getter"
+      ],
+      "old_rva": "0x45dd90",
+      "new_rva": "0x45de30",
+      "delta": "0xa0",
+      "size": 5,
+      "file_offset": "0x45d230",
+      "old_sha256": "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107",
+      "new_sha256": "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:local_player_getter",
+        "wallet:local_character"
+      ],
+      "old_rva": "0x498860",
+      "new_rva": "0x498900",
+      "delta": "0xa0",
+      "size": 8,
+      "file_offset": "0x497d00",
+      "old_sha256": "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
+      "new_sha256": "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:capacity_counter_text"
+      ],
+      "old_rva": "0x6a2930",
+      "new_rva": "0x6a29d0",
+      "delta": "0xa0",
+      "size": 136,
+      "file_offset": "0x6a1dd0",
+      "old_sha256": "208e0765e402ed4d92092a68ba72c3cb56e5d5b2b793f172800405a6ce265203",
+      "new_sha256": "2e39a5e22e8a6ea2e8f214ae1715088732885d31bed67f0b246b18620f7af850",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x1048020",
+          "old": "0x1047670",
+          "delta": "0x9b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x1071650",
+          "old": "0x1070ca0",
+          "delta": "0x9b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x10dbde0",
+          "old": "0x10db420",
+          "delta": "0x9c0",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:controlled_character_getter",
+        "mf:controlled_character_getter"
+      ],
+      "old_rva": "0x11b4480",
+      "new_rva": "0x11b4f10",
+      "delta": "0xa90",
+      "size": 29,
+      "file_offset": "0x11b4310",
+      "old_sha256": "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
+      "new_sha256": "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:player_by_id_getter"
+      ],
+      "old_rva": "0x11b6d60",
+      "new_rva": "0x11b77f0",
+      "delta": "0xa90",
+      "size": 25,
+      "file_offset": "0x11b6bf0",
+      "old_sha256": "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086",
+      "new_sha256": "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "wallet:wallet_manager"
+      ],
+      "old_rva": "0x11ba5e0",
+      "new_rva": "0x11bb070",
+      "delta": "0xa90",
+      "size": 8,
+      "file_offset": "0x11ba470",
+      "old_sha256": "c203d880264ebf1b4f76b9fea85fe724b261855c6a7c80a705f2176e816eea1d",
+      "new_sha256": "c203d880264ebf1b4f76b9fea85fe724b261855c6a7c80a705f2176e816eea1d",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:player_stats_getter"
+      ],
+      "old_rva": "0x11ba730",
+      "new_rva": "0x11bb1c0",
+      "delta": "0xa90",
+      "size": 8,
+      "file_offset": "0x11ba5c0",
+      "old_sha256": "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e",
+      "new_sha256": "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:combatant_cast"
+      ],
+      "old_rva": "0x11d6a20",
+      "new_rva": "0x11d74b0",
+      "delta": "0xa90",
+      "size": 14,
+      "file_offset": "0x11d68b0",
+      "old_sha256": "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf",
+      "new_sha256": "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:character_inventory_getter"
+      ],
+      "old_rva": "0x11d74d0",
+      "new_rva": "0x11d7f60",
+      "delta": "0xa90",
+      "size": 70,
+      "file_offset": "0x11d7360",
+      "old_sha256": "e7bd0ae3e1e372ee63d98c89639d52046ad8085b5d899cc076e252c808b0410c",
+      "new_sha256": "12edfab95716e429e1d8f6d5878c4aa57e53e1d87a2c7fbfc080ae7cbd21647f",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x1ae71f0",
+          "old": "0x1ae61e0",
+          "delta": "0x1010",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x21618c0",
+          "old": "0x2160840",
+          "delta": "0x1080",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:player_id_getter"
+      ],
+      "old_rva": "0x11d7a50",
+      "new_rva": "0x11d84e0",
+      "delta": "0xa90",
+      "size": 54,
+      "file_offset": "0x11d78e0",
+      "old_sha256": "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891",
+      "new_sha256": "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:is_player"
+      ],
+      "old_rva": "0x11d9150",
+      "new_rva": "0x11d9be0",
+      "delta": "0xa90",
+      "size": 24,
+      "file_offset": "0x11d8fe0",
+      "old_sha256": "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e",
+      "new_sha256": "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:bag_slot_count_getter"
+      ],
+      "old_rva": "0x11ee300",
+      "new_rva": "0x11eed90",
+      "delta": "0xa90",
+      "size": 7,
+      "file_offset": "0x11ee190",
+      "old_sha256": "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b",
+      "new_sha256": "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:free_slots_getter"
+      ],
+      "old_rva": "0x11ee4a0",
+      "new_rva": "0x11eef30",
+      "delta": "0xa90",
+      "size": 59,
+      "file_offset": "0x11ee330",
+      "old_sha256": "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a",
+      "new_sha256": "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:used_slots_getter"
+      ],
+      "old_rva": "0x11ee4e0",
+      "new_rva": "0x11eef70",
+      "delta": "0xa90",
+      "size": 60,
+      "file_offset": "0x11ee370",
+      "old_sha256": "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d",
+      "new_sha256": "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "bag:capacity_getter"
+      ],
+      "old_rva": "0x11ee520",
+      "new_rva": "0x11eefb0",
+      "delta": "0xa90",
+      "size": 103,
+      "file_offset": "0x11ee3b0",
+      "old_sha256": "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342",
+      "new_sha256": "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "wallet:balance_getter"
+      ],
+      "old_rva": "0x1271810",
+      "new_rva": "0x12722a0",
+      "delta": "0xa90",
+      "size": 80,
+      "file_offset": "0x12716a0",
+      "old_sha256": "a2d9cdc2da040577c5682f45c191f1926eca5a08eb7be0e91e495b351eeca6cb",
+      "new_sha256": "083b4b0fa2e89c842b05e661289ba3d3376e51ad7feade6031ca927e1073b5ef",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x2397f0",
+          "old": "0x2397f0",
+          "delta": "0x0",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:bag_getter"
+      ],
+      "old_rva": "0x12908e0",
+      "new_rva": "0x12913f0",
+      "delta": "0xb10",
+      "size": 72,
+      "file_offset": "0x12907f0",
+      "old_sha256": "bac37e1cff99524d0b12d2ee360c6f462acfc93a8bd73a1d7cf274935d245b90",
+      "new_sha256": "47c8e28fb4ed3ccd1506da0d63905194e3da2d67e87b806a600bd3d11cf8eced",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x217aba0",
+          "old": "0x2179b10",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x217b230",
+          "old": "0x217a1a0",
+          "delta": "0x1090",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:bag_size_getter"
+      ],
+      "old_rva": "0x1290930",
+      "new_rva": "0x1291440",
+      "delta": "0xb10",
+      "size": 133,
+      "file_offset": "0x1290840",
+      "old_sha256": "e830e97da7ff9a0a24ac044e3ff26824bda8637d2c07c998bea87d55880453e8",
+      "new_sha256": "e054565f4fd7d4e99cf9170cebe37842aaf80619131e799a3defbc9c67c220cc",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x217b230",
+          "old": "0x217a1a0",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x217b2c0",
+          "old": "0x217a230",
+          "delta": "0x1090",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:slot_validity"
+      ],
+      "old_rva": "0x1290ac0",
+      "new_rva": "0x12915d0",
+      "delta": "0xb10",
+      "size": 148,
+      "file_offset": "0x12909d0",
+      "old_sha256": "587a452b7f33987938235c45fb271fe137fa495019d31b6b492ca5db6f440587",
+      "new_sha256": "a85a558be74a0dd3cb112e51769194faba3a6788fd59ea4e053726e7c534e396",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x217b230",
+          "old": "0x217a1a0",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x217b2c0",
+          "old": "0x217a230",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x217b310",
+          "old": "0x217a280",
+          "delta": "0x1090",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:modifier_sum"
+      ],
+      "old_rva": "0x12c0540",
+      "new_rva": "0x12c1050",
+      "delta": "0xb10",
+      "size": 2536,
+      "file_offset": "0x12c0450",
+      "old_sha256": "887f54e8f9981ecacb51c55324f2174d2adb2c91b7238b07f6361a051c906593",
+      "new_sha256": "d42282064b43fe101e6c0296e8d39d56b12241736a56b78b20dfb91c96c2a3f2",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9b6870",
+          "old": "0x9b66c0",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9b6fd0",
+          "old": "0x9b6e20",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9b7520",
+          "old": "0x9b7370",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9cce80",
+          "old": "0x9cccd0",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9cd5f0",
+          "old": "0x9cd440",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x110f0a0",
+          "old": "0x110e670",
+          "delta": "0xa30",
+          "section": ".text"
+        },
+        {
+          "new": "0x11d6ed0",
+          "old": "0x11d6440",
+          "delta": "0xa90",
+          "section": ".text"
+        },
+        {
+          "new": "0x12c09b0",
+          "old": "0x12bfea0",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x12c0ef0",
+          "old": "0x12c03e0",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x12e36d0",
+          "old": "0x12e2bc0",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x130c150",
+          "old": "0x130b640",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x1923648",
+          "old": "0x1922648",
+          "delta": "0x1000",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1924e30",
+          "old": "0x1923e30",
+          "delta": "0x1000",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x19284b8",
+          "old": "0x19274b8",
+          "delta": "0x1000",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x19284f0",
+          "old": "0x19274f0",
+          "delta": "0x1000",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1b90df0",
+          "old": "0x1b8fdb0",
+          "delta": "0x1040",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x1b90eb8",
+          "old": "0x1b8fe78",
+          "delta": "0x1040",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:modifier_formula"
+      ],
+      "old_rva": "0x12c0f30",
+      "new_rva": "0x12c1a40",
+      "delta": "0xb10",
+      "size": 816,
+      "file_offset": "0x12c0e40",
+      "old_sha256": "03c40bfe57089a26ee53e0790bdfee39a26a3645e94b93cbc5c6d2df45ffd132",
+      "new_sha256": "03cf6e4c30459e903354441baf6fddf5a18a642b01d8de2cee51296b9a19e500",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x9db950",
+          "old": "0x9db0f0",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x12c1d70",
+          "old": "0x12c1260",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x1476320",
+          "old": "0x1475800",
+          "delta": "0xb20",
+          "section": ".text"
+        },
+        {
+          "new": "0x2183f78",
+          "old": "0x2182ee8",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x2183fb8",
+          "old": "0x2182f28",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x2183fc8",
+          "old": "0x2182f38",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x2183fd8",
+          "old": "0x2182f48",
+          "delta": "0x1090",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x2183ff0",
+          "old": "0x2182f60",
+          "delta": "0x1090",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:modifier_value"
+      ],
+      "old_rva": "0x12c2450",
+      "new_rva": "0x12c2f60",
+      "delta": "0xb10",
+      "size": 129,
+      "file_offset": "0x12c2360",
+      "old_sha256": "02c17502d33b741829ee827be8a95cbaf91e69d27f07171cff624f77662a268a",
+      "new_sha256": "a581f4a80d24c21f359d6b3ee8a93183db4cc533230c6de1b68188aa553cb7e1",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x251e20",
+          "old": "0x251e20",
+          "delta": "0x0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x12c1a40",
+          "old": "0x12c0f30",
+          "delta": "0xb10",
+          "section": ".text"
+        },
+        {
+          "new": "0x1b68dcc",
+          "old": "0x1b67d9c",
+          "delta": "0x1030",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x2184430",
+          "old": "0x21833a0",
+          "delta": "0x1090",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:pushed_modifier_sum"
+      ],
+      "old_rva": "0x12c2520",
+      "new_rva": "0x12c3030",
+      "delta": "0xb10",
+      "size": 212,
+      "file_offset": "0x12c2430",
+      "old_sha256": "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88",
+      "new_sha256": "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88",
+      "identical_bytes": true,
+      "moved_fields": []
+    },
+    {
+      "names": [
+        "mf:buff_iterator"
+      ],
+      "old_rva": "0x12c28d0",
+      "new_rva": "0x12c33e0",
+      "delta": "0xb10",
+      "size": 188,
+      "file_offset": "0x12c27e0",
+      "old_sha256": "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18",
+      "new_sha256": "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18",
+      "identical_bytes": true,
+      "moved_fields": [
+        {
+          "new": "0x12c4e30",
+          "old": "0x12c4320",
+          "delta": "0xb10",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:buff_filter"
+      ],
+      "old_rva": "0x12c4320",
+      "new_rva": "0x12c4e30",
+      "delta": "0xb10",
+      "size": 142,
+      "file_offset": "0x12c4230",
+      "old_sha256": "490a1348d0a788393e5af59d0a10a6ffb9ac46b65a6ba3dbea93e607c7a58ffe",
+      "new_sha256": "7b44974ea06ed7f392fde2572356338fde9dc4eba4922634d480716d6a20abce",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9b1fb0",
+          "old": "0x9b1e00",
+          "delta": "0x1b0",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:item_definition_getter"
+      ],
+      "old_rva": "0x13c3e10",
+      "new_rva": "0x13c4930",
+      "delta": "0xb20",
+      "size": 61,
+      "file_offset": "0x13c3d30",
+      "old_sha256": "d8cf3b68aa76a6ded61325e8533f1ff5735173ed7593a308456a7fa32d84037e",
+      "new_sha256": "f430638166c7ed4e47aed1717abbed7cc30ffe92c7714a7a9e66648c0fbca7ef",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9db7a0",
+          "old": "0x9daf40",
+          "delta": "0x860",
+          "section": ".text"
+        },
+        {
+          "new": "0x1ae8a08",
+          "old": "0x1ae79f8",
+          "delta": "0x1010",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x225c930",
+          "old": "0x225b7e0",
+          "delta": "0x1150",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:item_factory_type_switch"
+      ],
+      "old_rva": "0x13c6e03",
+      "new_rva": "0x13c7923",
+      "delta": "0xb20",
+      "size": 40,
+      "file_offset": "0x13c6d23",
+      "old_sha256": "a461abfdb11f05ee2de3a9ee0603401ac35c692613e5f38ad25ed7133e901f61",
+      "new_sha256": "86c1736dd5bf759d7f76767c098f46e35c1b4915d85195a390823e7b339ff324",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x13c81a2",
+          "old": "0x13c7682",
+          "delta": "0xb20",
+          "section": ".text"
+        },
+        {
+          "new": "0x13c81ec",
+          "old": "0x13c76cc",
+          "delta": "0xb20",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:item_factory_bag_case"
+      ],
+      "old_rva": "0x13c6f4a",
+      "new_rva": "0x13c7a6a",
+      "delta": "0xb20",
+      "size": 86,
+      "file_offset": "0x13c6e6a",
+      "old_sha256": "46484198a4575c88c911cc5600f5aa7410ae81230dcca2e4c39db454c0f6d8a2",
+      "new_sha256": "b2d58724217d944e3d304f87eb7314f29eb454b3d8b2f20185c31d699c5b5d75",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x9b1010",
+          "old": "0x9b0e60",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9cce60",
+          "old": "0x9cccb0",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x9cd5f0",
+          "old": "0x9cd440",
+          "delta": "0x1b0",
+          "section": ".text"
+        },
+        {
+          "new": "0x13c814e",
+          "old": "0x13c762e",
+          "delta": "0xb20",
+          "section": ".text"
+        },
+        {
+          "new": "0x13c8156",
+          "old": "0x13c7636",
+          "delta": "0xb20",
+          "section": ".text"
+        },
+        {
+          "new": "0x13c9730",
+          "old": "0x13c8c10",
+          "delta": "0xb20",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:item_factory_table_bag_entry"
+      ],
+      "old_rva": "0x13c76d8",
+      "new_rva": "0x13c81f8",
+      "delta": "0xb20",
+      "size": 4,
+      "file_offset": "0x13c75f8",
+      "old_sha256": "1a6b5a308b0c5ed0908e85ae08f095a4cba8d26b7541daa7e400d6066e73cf9c",
+      "new_sha256": "f60dda698009476fe46574d055fc6869b3900b468842bd83421afc57241db6cf",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x13c7a6a",
+          "old": "0x13c6f4a",
+          "delta": "0xb20",
+          "section": ".text"
+        }
+      ]
+    },
+    {
+      "names": [
+        "bag:bag_item_constructor"
+      ],
+      "old_rva": "0x13c8c10",
+      "new_rva": "0x13c9730",
+      "delta": "0xb20",
+      "size": 44,
+      "file_offset": "0x13c8b30",
+      "old_sha256": "f527f8d47ef5d0b1c1200a6937de67acacc52a99a09ae9a90e9f6e5d1f059b99",
+      "new_sha256": "5e0168eb8209752e4154f8acba99ae6940833b6eab5acf6090509bfcb2a295a4",
+      "identical_bytes": false,
+      "moved_fields": [
+        {
+          "new": "0x13c4540",
+          "old": "0x13c3a20",
+          "delta": "0xb20",
+          "section": ".text"
+        },
+        {
+          "new": "0x225de68",
+          "old": "0x225cd18",
+          "delta": "0x1150",
+          "section": ".rdata"
+        },
+        {
+          "new": "0x225e170",
+          "old": "0x225d020",
+          "delta": "0x1150",
+          "section": ".rdata"
+        }
+      ]
+    },
+    {
+      "names": [
+        "mf:hash_table",
+        "wallet:hash_table"
+      ],
+      "old_rva": "0x1b8fdb0",
+      "new_rva": "0x1b90df0",
+      "delta": "0x1040",
+      "size": 1024,
+      "file_offset": "0x1b8f3f0",
+      "old_sha256": "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
+      "new_sha256": "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
+      "identical_bytes": true,
+      "moved_fields": []
+    }
+  ],
+  "vtables": [
+    {
+      "name": "char_context",
+      "old_rva": "0x215cf48",
+      "new_rva": "0x215dfc8",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "character_agent",
+      "old_rva": "0x21601d0",
+      "new_rva": "0x2161250",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "inventory",
+      "old_rva": "0x21621a8",
+      "new_rva": "0x2163228",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "character",
+      "old_rva": "0x215fb60",
+      "new_rva": "0x2160be0",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "combatant",
+      "old_rva": "0x2160498",
+      "new_rva": "0x2161518",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "player (wallet character)",
+      "old_rva": "0x215d958",
+      "new_rva": "0x215e9d8",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "player_stats",
+      "old_rva": "0x2168138",
+      "new_rva": "0x21691b8",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "buff_manager",
+      "old_rva": "0x2183118",
+      "new_rva": "0x21841a8",
+      "delta": "0x1090",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "currency_manager",
+      "old_rva": "0x21720f8",
+      "new_rva": "0x2173178",
+      "delta": "0x1080",
+      "evidence": "the only place in .rdata whose slots select the proven getters; installed by code with a lea"
+    },
+    {
+      "name": "buff_node",
+      "old_rva": "0x21830d0",
+      "new_rva": "0x2184160",
+      "delta": "0x1090",
+      "evidence": "installed by the node constructor at 0x12c23a0 (lea at 0x12c23d6)"
+    },
+    {
+      "name": "bag_item (ItCliBag)",
+      "old_rva": "0x225cd18",
+      "new_rva": "0x225de68",
+      "delta": "0x1150",
+      "evidence": "installed by the bag item constructor, whose digest is proven"
+    },
+    {
+      "name": "item_context",
+      "old_rva": "0x225bd00",
+      "new_rva": "0x225ce50",
+      "delta": "0x1150",
+      "evidence": "slot 0x10 selects the resolver; two lea references"
+    },
+    {
+      "name": "conditional item A",
+      "old_rva": "0x225d580",
+      "new_rva": "0x225e6d0",
+      "delta": "0x1150",
+      "evidence": "one of the 15 vtables whose slot 8 is the proven definition getter; slot 0x260 selects 0x13ca840"
+    },
+    {
+      "name": "conditional predicate A",
+      "old_rva": "0x225d898",
+      "new_rva": "0x225e9e8",
+      "delta": "0x1150",
+      "evidence": "slot 0 selects 0x13ca880"
+    },
+    {
+      "name": "conditional item B",
+      "old_rva": "0x225dd78",
+      "new_rva": "0x225eec8",
+      "delta": "0x1150",
+      "evidence": "as A; slot 0x260 selects 0x13ca840"
+    },
+    {
+      "name": "conditional predicate B",
+      "old_rva": "0x225e080",
+      "new_rva": "0x225f1d0",
+      "delta": "0x1150",
+      "evidence": "slot 0 selects 0x13cb0b0"
+    },
+    {
+      "name": "conditional item C",
+      "old_rva": "0x225d910",
+      "new_rva": "0x225ea60",
+      "delta": "0x1150",
+      "evidence": "as A; slot 0x260 selects 0x13caa80"
+    },
+    {
+      "name": "conditional predicate C",
+      "old_rva": "0x225dcb8",
+      "new_rva": "0x225ee08",
+      "delta": "0x1150",
+      "evidence": "slot 0x20 selects 0x13cac50"
+    }
+  ],
+  "compared_by_address_only": [
+    {
+      "name": "location3_index_getter",
+      "old_rva": "0x11ee3d0",
+      "new_rva": "0x11eee60",
+      "delta": "0xa90",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: count at +0xd4, array at +0xc8"
+    },
+    {
+      "name": "item_resolver",
+      "old_rva": "0x13c6400",
+      "new_rva": "0x13c6f20",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: length at +0x3c, array at +0x30"
+    },
+    {
+      "name": "item_instance_getter",
+      "old_rva": "0x31b980",
+      "new_rva": "0x31ba20",
+      "delta": "0xa0",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: mov eax,[rcx+0x38]; ret"
+    },
+    {
+      "name": "item_location_getter",
+      "old_rva": "0x13c45d0",
+      "new_rva": "0x13c50f0",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: movzx eax, word [rcx+0x48]; and eax, 0xf; ret"
+    },
+    {
+      "name": "final_stack_quantity_getter",
+      "old_rva": "0x13c46d0",
+      "new_rva": "0x13c51f0",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: calls slot 0x260 and then the stack's first slot"
+    },
+    {
+      "name": "stackable_at_0x98",
+      "old_rva": "0x84c310",
+      "new_rva": "0x84c4c0",
+      "delta": "0x1b0",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: lea rax,[rcx+0x98]"
+    },
+    {
+      "name": "stackable_at_0xd0",
+      "old_rva": "0x13c81c0",
+      "new_rva": "0x13c8ce0",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: lea rax,[rcx+0xd0]"
+    },
+    {
+      "name": "null_stackable",
+      "old_rva": "0x168aa0",
+      "new_rva": "0x168aa0",
+      "delta": "0x0",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: 33 C0 C3"
+    },
+    {
+      "name": "stack_quantity_getter",
+      "old_rva": "0x168d10",
+      "new_rva": "0x168d10",
+      "delta": "0x0",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: mov eax,[rcx+8]; ret"
+    },
+    {
+      "name": "conditional_stackable_a8",
+      "old_rva": "0x13c9d20",
+      "new_rva": "0x13ca840",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: predicate at +0xa8 slot 0, stack at +0x98"
+    },
+    {
+      "name": "conditional_stackable_e0",
+      "old_rva": "0x13c9f60",
+      "new_rva": "0x13caa80",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: predicate at +0xe0 slot 0x20, stack at +0xe8"
+    },
+    {
+      "name": "conditional_predicate_A",
+      "old_rva": "0x13c9d60",
+      "new_rva": "0x13ca880",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: subtype 5, payload +0 and 1"
+    },
+    {
+      "name": "conditional_predicate_B",
+      "old_rva": "0x13ca590",
+      "new_rva": "0x13cb0b0",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: subtype 10, payload +0 and 1"
+    },
+    {
+      "name": "conditional_predicate_C",
+      "old_rva": "0x13ca130",
+      "new_rva": "0x13cac50",
+      "delta": "0xb20",
+      "evidence": "no digest in the profile; selected by the slot of a proven vtable and read in the new file: subtype 9, payload +0x18 equals 4"
+    }
+  ],
+  "field_offsets": "Unchanged. The getters that carry them are byte-identical or identical but for their rel32 fields: context +0x98 (buff_filter), character context +0x98 and flag +0x178 bit 4 (controlled_character_getter), +0xa0 (local_character), agent +0x3e8, that is character +0x3f0 (character_inventory_getter), inventory +0x70 (inventory_owner_getter), +0xc8/+0xd4 (location3 getter, used and capacity getters), +0x380/+0x440 (bag getters), wallet +0x1878 (wallet_manager), item +0x38/+0x40/+0x48, definition +0x2c/+0x30. Context +0x178 is what the item module's accessor at 0x13c71f0 returns. Item +0x58, the capacity at inventory +0xd0, definition +0x28 and the item context's +0x38 are not named by any range checked here and are assumed.",
+  "checks": [
+    {
+      "command": "check_profile_offline.py (loot-bag-capacity-probe, unchanged) over core/tests/fixtures/bag_capacity_profile.json",
+      "result": "guards 12, slots 10, offline_links 3, candidates 1, failures []"
+    },
+    {
+      "command": "check_profile_offline.py (loot-mf-probe, unchanged) over core/tests/fixtures/magic_find_profile.json",
+      "result": "guards 19, slots 12, offline_links 1, failures []"
+    },
+    {
+      "command": "cargo test --offline -p tyrian_companion_nexus_core",
+      "result": "416 passed, 0 failed"
+    },
+    {
+      "command": "cargo build --offline --release --target x86_64-pc-windows-gnu",
+      "result": "PASS"
+    },
+    {
+      "command": "scripts/check-dead-thread-code.sh",
+      "result": "check-dead-thread-code: OK"
+    }
+  ],
+  "not_proven": [
+    "Any reading from a running game of this build: inventory, wallet, bag slots and Magic Find are all unread.",
+    "The two pointer rules of the bag and Magic Find readers (heap objects on 8 bytes, game content 4 past), which are observations of a session of the old build and not derived from code.",
+    "That the plugin accepts the new hash: it compares live_open.build with its own constant."
+  ]
+}

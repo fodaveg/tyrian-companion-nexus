@@ -5,11 +5,14 @@
 //! `MagicFindProfile::verified_against`, which accepts other digests only for exactly the
 //! audited ranges and which the addon never calls.
 //!
-//! What ties production to the audit is `fixtures/magic_find_profile.json`: a verbatim copy
-//! (sha256 `8992928d…6cebbf`) of `tyrian-companion/docs/audit/loot-mf-probe/profile.json` at
-//! the commit "accept game content pointers at their observed alignment in the Magic Find
-//! probe". It holds digests only, and that repository's `check_profile_offline.py` compares
-//! each of its 19 digests and 12 slots with the installed executable.
+//! What ties production to the audit is `fixtures/magic_find_profile.json`:
+//! `tyrian-companion/docs/audit/loot-mf-probe/profile.json` at the commit "accept game content
+//! pointers at their observed alignment in the Magic Find probe" (sha256 `8992928d…6cebbf`), as
+//! the recertification of 2026-10-13 carried it to the game's build of that day (its
+//! `recertified` key, and `docs/audit/2026-10-13-recertification-build-208574.json`). The file in
+//! that repository still describes the build of 2026-10-06. It holds digests only, and that
+//! repository's `check_profile_offline.py`, run over this fixture, compares each of its 19
+//! digests and 12 slots with the installed executable.
 //! `production_constants_are_the_audited_profile` requires `GUARDS`, `SLOTS`, the vtables and
 //! the modifier types to equal it, so a mistyped digest or RVA here turns the suite red.
 //!
@@ -40,7 +43,7 @@ use tyrian_companion_nexus_core::wallet::currency_hash;
 mod field_by_field;
 
 const BASE: u64 = 0x140000000;
-const IMAGE: u64 = 0x2c48000;
+const IMAGE: u64 = 0x2c49000;
 const CTX: u64 = 0x200000;
 const CHAR_CONTEXT: u64 = 0x210000;
 const CHARACTER: u64 = 0x220000;
@@ -1282,10 +1285,12 @@ fn a_pass_that_verifies_asks_for_164_copies_and_content_is_read_whole_every_30_s
         assert_eq!(outcome.map(|(value, _)| value.total), Ok(333.0));
         dearest = dearest.max((reads, bytes));
     }
-    // Here that is 89 nodes and 47 definition starts: the last definition to be seen for the
-    // first time hangs from the 89th of the 91 buffs.
-    assert_eq!(dearest, (349 + 89 + 47, 29_328 + 89 * 28 + 47 * 48));
-    assert_eq!(dearest, (485, 34_076));
+    // Here that is 90 nodes and 47 definition starts: the last definition to be seen for the
+    // first time hangs from the 90th of the 91 buffs. Which buff that is follows the order of
+    // the buckets, and so the synthetic hash table, whose bytes are seeded by its guard's rva:
+    // with the rvas of the build of 6 October 2026 it was the 89th.
+    assert_eq!(dearest, (349 + 90 + 47, 29_328 + 90 * 28 + 47 * 48));
+    assert_eq!(dearest, (486, 34_104));
 }
 
 #[test]

@@ -13,8 +13,8 @@ const RESOLVER: u64 = 0x106000;
 const ITEM: u64 = 0x107000;
 const DEF: u64 = 0x108000;
 const PAYLOAD: u64 = 0x120000;
-const VT: u64 = BASE + 0x225c148;
-const STACK_VT: u64 = BASE + 0x225c460;
+const VT: u64 = BASE + 0x225d298;
+const STACK_VT: u64 = BASE + 0x225d5b0;
 /// A write by the game between two copies: `value` lands at `target` just before the
 /// `visit`th copy that covers `on` is served, whatever the size of that copy.
 #[derive(Clone, Copy)]
@@ -67,7 +67,7 @@ impl Memory for Fixture {
             "forbidden read {address:x}+{}",
             out.len()
         );
-        if !(0x100000..0x800000).contains(&address) && !(BASE..BASE + 0x2c48000).contains(&address)
+        if !(0x100000..0x800000).contains(&address) && !(BASE..BASE + 0x2c49000).contains(&address)
         {
             return Err(ReadError::ReadFailed);
         }
@@ -92,34 +92,34 @@ impl Memory for &mut Fixture {
     }
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BUILD_SHA256, BASE, 0x2c48000).unwrap()
+    BuildProfile::checked(BUILD_SHA256, BASE, 0x2c49000).unwrap()
 }
 fn fixture(count: u64) -> Fixture {
     let mut m = Fixture::default();
     for (address, value, size) in [
         (CTX + 0x98, CHARCTX, 8),
         (CTX + 0x178, ITEMCTX, 8),
-        (CHARCTX, BASE + 0x215cf48, 8),
-        (BASE + 0x215cf48 + 0x68, BASE + 0x11b4480, 8),
+        (CHARCTX, BASE + 0x215dfc8, 8),
+        (BASE + 0x215dfc8 + 0x68, BASE + 0x11b4f10, 8),
         (CHARCTX + 0x98, CHARACTER, 8),
         (CHARACTER + 0x178, 0x18, 4),
-        (CHARACTER + 8, BASE + 0x21601d0, 8),
-        (BASE + 0x21601d0 + 0xc8, BASE + 0x11d74d0, 8),
+        (CHARACTER + 8, BASE + 0x2161250, 8),
+        (BASE + 0x2161250 + 0xc8, BASE + 0x11d7f60, 8),
         (CHARACTER + 0x3f0, INV, 8),
-        (INV, BASE + 0x21621a8, 8),
-        (BASE + 0x21621a8 + 0x220, BASE + 0x45dd90, 8),
-        (BASE + 0x21621a8 + 0x190, BASE + 0x11ee3d0, 8),
+        (INV, BASE + 0x2163228, 8),
+        (BASE + 0x2163228 + 0x220, BASE + 0x45de30, 8),
+        (BASE + 0x2163228 + 0x190, BASE + 0x11eee60, 8),
         (INV + 0x70, CHARACTER, 8),
         (INV + 0xc8, SLOTS, 8),
         (INV + 0xd0, count, 4),
         (INV + 0xd4, count, 4),
         (SLOTS, ITEM, 8),
         (ITEM, VT, 8),
-        (VT + 8, BASE + 0x13c3e10, 8),
-        (VT + 0x68, BASE + 0x31b980, 8),
-        (VT + 0x70, BASE + 0x13c45d0, 8),
-        (VT + 0xa0, BASE + 0x13c46d0, 8),
-        (VT + 0x260, BASE + 0x84c310, 8),
+        (VT + 8, BASE + 0x13c4930, 8),
+        (VT + 0x68, BASE + 0x31ba20, 8),
+        (VT + 0x70, BASE + 0x13c50f0, 8),
+        (VT + 0xa0, BASE + 0x13c51f0, 8),
+        (VT + 0x260, BASE + 0x84c4c0, 8),
         (ITEM + 0x38, 17, 4),
         (ITEM + 0x40, DEF, 8),
         (DEF + 0x28, 12147, 4),
@@ -128,8 +128,8 @@ fn fixture(count: u64) -> Fixture {
         (ITEM + 0x98, STACK_VT, 8),
         (STACK_VT, BASE + 0x168d10, 8),
         (ITEM + 0xa0, 3, 4),
-        (ITEMCTX, BASE + 0x225bd00, 8),
-        (BASE + 0x225bd10, BASE + 0x13c6400, 8),
+        (ITEMCTX, BASE + 0x225ce50, 8),
+        (BASE + 0x225ce60, BASE + 0x13c6f20, 8),
         (ITEMCTX + 0x30, RESOLVER, 8),
         (ITEMCTX + 0x38, 64, 4),
         (ITEMCTX + 0x3c, 32, 4),
@@ -146,16 +146,16 @@ fn snapshot(m: Fixture) -> Result<InventorySnapshot, ReadError> {
 /// payload says so, 1 otherwise.
 fn conditional(count: u64) -> Fixture {
     let mut m = fixture(count);
-    let vt = BASE + 0x225d580;
+    let vt = BASE + 0x225e6d0;
     for (address, value, size) in [
-        (vt + 8, BASE + 0x13c3e10, 8),
-        (vt + 0x68, BASE + 0x31b980, 8),
-        (vt + 0x70, BASE + 0x13c45d0, 8),
-        (vt + 0xa0, BASE + 0x13c46d0, 8),
-        (vt + 0x260, BASE + 0x13c9d20, 8),
+        (vt + 8, BASE + 0x13c4930, 8),
+        (vt + 0x68, BASE + 0x31ba20, 8),
+        (vt + 0x70, BASE + 0x13c50f0, 8),
+        (vt + 0xa0, BASE + 0x13c51f0, 8),
+        (vt + 0x260, BASE + 0x13ca840, 8),
         (ITEM, vt, 8),
-        (ITEM + 0xa8, BASE + 0x225d898, 8),
-        (BASE + 0x225d898, BASE + 0x13c9d60, 8),
+        (ITEM + 0xa8, BASE + 0x225e9e8, 8),
+        (BASE + 0x225e9e8, BASE + 0x13ca880, 8),
         (DEF + 0x2c, 5, 4),
         (DEF + 0x30, PAYLOAD, 8),
         (PAYLOAD, 1, 4),
@@ -178,20 +178,20 @@ fn dense(positions: u64, occupied: u64, branch: Branch) -> Fixture {
     let mut m = fixture(positions);
     let vt = match branch {
         Branch::Common => VT,
-        Branch::Conditional => BASE + 0x225d580,
+        Branch::Conditional => BASE + 0x225e6d0,
     };
-    let evt = BASE + 0x225d898;
+    let evt = BASE + 0x225e9e8;
     if let Branch::Conditional = branch {
         for (off, fun) in [
-            (8, 0x13c3e10),
-            (0x68, 0x31b980),
-            (0x70, 0x13c45d0),
-            (0xa0, 0x13c46d0),
-            (0x260, 0x13c9d20),
+            (8, 0x13c4930),
+            (0x68, 0x31ba20),
+            (0x70, 0x13c50f0),
+            (0xa0, 0x13c51f0),
+            (0x260, 0x13ca840),
         ] {
             m.put(vt + off, BASE + fun, 8);
         }
-        m.put(evt, BASE + 0x13c9d60, 8);
+        m.put(evt, BASE + 0x13ca880, 8);
         m.put(PAYLOAD, 1, 4);
     }
     m.put(SLOTS, 0, 8);
@@ -254,7 +254,7 @@ fn boundaries_owner_duplicates_and_invalid_pointer_fail_closed() {
         (INV + 0x70, CHARACTER + 0x1000, 8),
         (INV + 0xc8, 0xdeadbeef, 8),
         (ITEM + 0xa0, 251, 4),
-        (VT + 0xa0, BASE + 0x13c46d8, 8),
+        (VT + 0xa0, BASE + 0x13c51f8, 8),
         (ITEMCTX + 0x3c, 65, 4),
         (SLOTS + 8, ITEM, 8),
         (RESOLVER + 17 * 8, ITEM + 8, 8),
@@ -267,7 +267,7 @@ fn boundaries_owner_duplicates_and_invalid_pointer_fail_closed() {
 #[test]
 fn unknown_quantity_never_becomes_one_or_zero() {
     let mut m = fixture(570);
-    m.put(VT + 0x260, BASE + 0x13c9d20, 8);
+    m.put(VT + 0x260, BASE + 0x13ca840, 8);
     let s = snapshot(m).unwrap();
     assert_eq!(s.unknown, 1);
     assert!(s.quantities.is_empty());
@@ -344,7 +344,7 @@ fn stable_excluded_item_does_not_read_its_owner_definition_or_quantity() {
 #[test]
 fn wrong_build_and_invalid_ranges_cannot_read() {
     assert!(matches!(
-        BuildProfile::checked("bad", BASE, 0x2c48000),
+        BuildProfile::checked("bad", BASE, 0x2c49000),
         Err(ReadError::UnsupportedBuild)
     ));
     let mut r = Reader::new(fixture(570));
@@ -438,7 +438,7 @@ fn every_later_look_at_a_conditional_quantity_rejects_its_change() {
     let mismatch = Err(ReadError::ProfileMismatch);
     for (target, size, value, expected) in [
         // The embedded predicate class is judged once per quantity.
-        (ITEM + 0xa8, 8, BASE + 0x225d8a0, vec![mismatch.clone()]),
+        (ITEM + 0xa8, 8, BASE + 0x225e9f0, vec![mismatch.clone()]),
         // Subtype, payload and condition: read and read again in each of the two quantities.
         // The final pass judges the subtype it finds, and takes the payload it finds: one
         // whose condition is not met gives 1, which is not the 7 of the item's turn.
@@ -544,23 +544,23 @@ fn the_matrix_is_copied_whole_in_two_reads_and_a_part_that_fails_gives_no_sample
 fn conditional_profiles_true_and_certified_false() {
     for (primary, embedded, evt, slot, predicate, subtype, field, value, stack, getter) in [
         (
-            0x225d580, 0xa8, 0x225d898, 0, 0x13c9d60, 5, 0, 1, 0x98, 0x13c9d20,
+            0x225e6d0, 0xa8, 0x225e9e8, 0, 0x13ca880, 5, 0, 1, 0x98, 0x13ca840,
         ),
         (
-            0x225dd78, 0xa8, 0x225e080, 0, 0x13ca590, 10, 0, 1, 0x98, 0x13c9d20,
+            0x225eec8, 0xa8, 0x225f1d0, 0, 0x13cb0b0, 10, 0, 1, 0x98, 0x13ca840,
         ),
         (
-            0x225d910, 0xe0, 0x225dcb8, 0x20, 0x13ca130, 9, 0x18, 4, 0xe8, 0x13c9f60,
+            0x225ea60, 0xe0, 0x225ee08, 0x20, 0x13cac50, 9, 0x18, 4, 0xe8, 0x13caa80,
         ),
     ] {
         for active in [true, false] {
             let mut m = fixture(570);
             let vt = BASE + primary;
             for (off, fun) in [
-                (8, 0x13c3e10),
-                (0x68, 0x31b980),
-                (0x70, 0x13c45d0),
-                (0xa0, 0x13c46d0),
+                (8, 0x13c4930),
+                (0x68, 0x31ba20),
+                (0x70, 0x13c50f0),
+                (0xa0, 0x13c51f0),
                 (0x260, getter),
             ] {
                 m.put(vt + off, BASE + fun, 8);
@@ -607,7 +607,7 @@ fn teb_tls_route_null_and_bounds() {
 fn aggregates_multiple_stacks_over_250_and_suppresses_same_id_if_unknown() {
     let mut m = fixture(570);
     let item2 = 0x117000;
-    let vt2 = BASE + 0x225c900;
+    let vt2 = BASE + 0x225da50;
     // Copy one complete fixture instance, then bind a different sparse reference/slot.
     for off in 0..0x110 {
         let b = *m.bytes.get(&(ITEM + off)).unwrap_or(&0);
@@ -625,7 +625,7 @@ fn aggregates_multiple_stacks_over_250_and_suppresses_same_id_if_unknown() {
     m.put(item2 + 0xa0, 200, 4);
     let value = snapshot(m.clone()).unwrap();
     assert_eq!(value.quantities[&12147], 400);
-    m.put(vt2 + 0x260, BASE + 0x13c9d20, 8);
+    m.put(vt2 + 0x260, BASE + 0x13ca840, 8);
     let value = snapshot(m).unwrap();
     assert_eq!(value.unknown, 1);
     assert!(value.quantities.is_empty());
@@ -766,14 +766,14 @@ fn a_class_is_judged_once_per_pass_and_read_again_before_the_pass_is_accepted() 
     let stable = fixture(570);
     for word in words {
         assert_eq!(
-            later_looks(&stable, word, 8, BASE + 0x13c46d8, 2),
+            later_looks(&stable, word, 8, BASE + 0x13c51f8, 2),
             [changed.clone(), Ok(BTreeMap::from([(12147, 3)]))],
             "{word:x}"
         );
     }
     // The slot of the embedded predicate class of a conditional profile.
     assert_eq!(
-        later_looks(&conditional(570), BASE + 0x225d898, 8, BASE + 0x13c9d68, 2),
+        later_looks(&conditional(570), BASE + 0x225e9e8, 8, BASE + 0x13ca888, 2),
         [changed.clone(), Ok(BTreeMap::from([(12147, 7)]))]
     );
     // The machine bytes of the certified NULL fallback.

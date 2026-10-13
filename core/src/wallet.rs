@@ -14,15 +14,15 @@ use crate::inventory::{BuildProfile, Memory, ReadError, Reader, MAX_POINTER, TLS
 use crate::sha256::{hex, sha256};
 use std::collections::BTreeMap;
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215cf48;
+pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
 /// Slot `0x70` of the character context's vtable: `mov rax,[rcx+0xA0]; ret`.
-pub const CHAR_CONTEXT_GETTER: u64 = 0x498860;
-pub const CHARACTER_VTABLE: u64 = 0x215d958;
+pub const CHAR_CONTEXT_GETTER: u64 = 0x498900;
+pub const CHARACTER_VTABLE: u64 = 0x215e9d8;
 /// Slot `0x250` of the wallet character's vtable: `lea rax,[rcx+0x1878]; ret`.
-pub const CHARACTER_WALLET_GETTER: u64 = 0x11ba5e0;
-pub const CURRENCY_MANAGER_VTABLE: u64 = 0x21720f8;
+pub const CHARACTER_WALLET_GETTER: u64 = 0x11bb070;
+pub const CURRENCY_MANAGER_VTABLE: u64 = 0x2173178;
 /// Slot 0 of the currency manager's vtable, the balance getter the wallet list calls by ID.
-pub const BALANCE_GETTER: u64 = 0x1271810;
+pub const BALANCE_GETTER: u64 = 0x12722a0;
 
 /// The map's capacity must be a power of two in `1..=MAX_CAPACITY`.
 pub const MAX_CAPACITY: u32 = 4096;
@@ -63,17 +63,17 @@ pub const GUARDS: [Guard; 5] = [
         name: "balance_getter",
         rva: BALANCE_GETTER,
         size: 80,
-        sha256: "a2d9cdc2da040577c5682f45c191f1926eca5a08eb7be0e91e495b351eeca6cb",
+        sha256: "083b4b0fa2e89c842b05e661289ba3d3376e51ad7feade6031ca927e1073b5ef",
     },
     Guard {
         name: "hash_lookup",
         rva: 0x2397f0,
         size: 296,
-        sha256: "e329f745caf728032181eb834e5c86915ab1f528b8788c40e5982664d06ffb63",
+        sha256: "c0c92b06913be7e76211d3b0b20cc397d17e7767a528d46f71ecbbae7b3e75a4",
     },
     Guard {
         name: HASH_TABLE,
-        rva: 0x1b8fdb0,
+        rva: 0x1b90df0,
         size: 1024,
         sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
     },
@@ -85,7 +85,7 @@ pub const PROFILE_KEY_HASH: u32 = 0xc0da_54d6;
 // every address this module reads inside the executable.
 const _: () = assert!(CURRENCY_MANAGER_VTABLE + 8 <= TLS_INDEX_RVA);
 const _: () = assert!(CHARACTER_VTABLE + 0x258 <= TLS_INDEX_RVA);
-const _: () = assert!(0x1b8fdb0 + 1024 <= TLS_INDEX_RVA);
+const _: () = assert!(0x1b90df0 + 1024 <= TLS_INDEX_RVA);
 
 /// Closed reasons for a wallet without coverage; no address, key or OS error reaches the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
