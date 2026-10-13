@@ -33,6 +33,7 @@ pub mod perf;
 pub mod price;
 pub mod protocol;
 pub mod quick_access;
+pub mod reader_log;
 pub mod settings;
 pub mod sha256;
 pub mod state;

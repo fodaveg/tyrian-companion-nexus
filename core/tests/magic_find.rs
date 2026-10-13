@@ -1720,3 +1720,115 @@ fn the_reader_the_addon_holds_verifies_between_passes_and_reads_everything_after
     assert!(cost(&held, &mut m, 1000).0.is_err());
     assert_eq!(cost(&held, &mut m, MAX_BYTES), whole);
 }
+
+/// One pass through `CachedMagicFind::read_traced`, which is how the addon reads: what it
+/// gives, what it left in the trace and what it asked for.
+fn traced(held: &CachedMagicFind, m: &mut Fixture) -> (Result<f32, Uncovered>, Trace, usize, usize) {
+    let verified = verified();
+    // Whatever a trace held is not this pass's: every pass starts it again.
+    let mut trace = Trace { most_records: 99, buffs: 99, ..Trace::default() };
+    let mut reader = Reader::bounded(m, MAX_BYTES);
+    let value = held.read_traced(&mut reader, &verified, CTX, &mut trace).map(|(value, _)| value.total);
+    (value, trace, reader.reads, reader.bytes)
+}
+
+/// The trace is for the log only. A pass that leaves one gives the value of the pass that
+/// leaves none and asks for the same copies, whole or verifying.
+#[test]
+fn a_traced_pass_gives_the_same_value_for_the_same_copies_and_says_what_it_saw() {
+    let held = CachedMagicFind::new();
+    let mut m = live_shape(20.0);
+    let seen = Trace { capacity: 256, count: 91, pushed: 4, buffs: 91, definitions: 47, most_records: 1, refused: None };
+    // The figures of `the_reader_the_addon_holds_…`, which reads without a trace.
+    assert_eq!(traced(&held, &mut m), (Ok(333.0), seen, 349, 29_328));
+    // A pass that only verifies reads no definition whole, so it has no record count to give.
+    assert_eq!(traced(&held, &mut m), (Ok(333.0), Trace { most_records: 0, ..seen }, 164, 19_556));
+}
+
+/// The record that makes a pass end in `Unsupported` is left in the trace as the game holds
+/// it: the applied effect that carries it, its fields, and what each of its four conditions
+/// names. That is what the log needs to say which condition would have to be evaluated.
+#[test]
+fn a_refused_record_is_told_with_its_fields_and_what_its_conditions_name() {
+    let (mut m, (_, _, food)) = standard();
+    // An effect that is not applied and something else game content names, each with its id
+    // where an effect keeps it.
+    let absent = m.alloc(0x70, true);
+    m.put(absent + 0x28, 777, 4);
+    let other = m.alloc(0x40, true);
+    m.put(other + 0x28, 4242, 4);
+    // A second applied effect whose Magic Find counts in one game mode, with one of the two
+    // first conditions and while two effects are applied: the food, which is, and one that is not.
+    let conditional = Record { mode: 4, need_b: other, when_a: food, when_b: absent, flags: 0x20, ..record(MAGIC_FIND, 100.0) };
+    let definition = m.plain(&[record(5, 1.0), conditional]);
+    let records = m.get(m.get(definition + 0x20) + 0x10);
+    for (at, word) in [(0xc, 0xaa), (0x10, 0xbb), (0x2c, 0xcc)] {
+        m.put(records + 72 + at, word, 4);
+    }
+    m.buff(1002, 502, definition);
+    let refused = RefusedRecord {
+        effect: 502,
+        index: 1,
+        kind: MAGIC_FIND,
+        formula: 6,
+        value: 100.0,
+        mode: 4,
+        flags: 0x20,
+        words: [0xaa, 0xbb, 0xcc],
+        traits: [Condition::default(), Condition { present: true, word: Some(4242), applied: None }],
+        effects: [
+            Condition { present: true, word: Some(501), applied: Some(true) },
+            Condition { present: true, word: Some(777), applied: Some(false) },
+        ],
+    };
+    let held = CachedMagicFind::new();
+    let (value, trace, _, bytes) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Unsupported));
+    assert_eq!(trace, Trace { capacity: 64, count: 2, pushed: 1, buffs: 2, definitions: 2, most_records: 2, refused: Some(refused) });
+    // The pass without a trace ends for the same reason. The traced one asked for 8 bytes more:
+    // the two dwords of what is not applied. The applied effect's id was already read.
+    let (whole, _, whole_bytes) = pass(&mut m, &verified());
+    assert_eq!(whole.map(|_| ()), Err(Uncovered::Unsupported));
+    assert_eq!(bytes, whole_bytes + 8);
+    // A copy of one of those dwords that fails leaves it unknown, and the pass ends as it did.
+    m.fail = Some(absent + 0x28);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Unsupported));
+    let unread = Condition { present: true, word: None, applied: Some(false) };
+    assert_eq!(trace.refused, Some(RefusedRecord { effects: [refused.effects[0], unread], ..refused }));
+    m.fail = None;
+    // What a condition names is followed only where game content sits: 4 past a multiple of 8.
+    m.put(records + 72 + 0x30, other + 4, 8);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Unsupported));
+    assert_eq!(trace.refused.map(|record| record.traits[1]), Some(Condition { present: true, word: None, applied: None }));
+    // Without the conditional record the same fixture reads, and nothing is refused.
+    m.put(records + 72, 5, 4);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!((value, trace.refused), (Ok(337.0), None));
+}
+
+/// A pass that ends on a bound leaves the figure that bound is judged by.
+#[test]
+fn a_pass_that_ends_on_a_bound_leaves_the_figure_the_bound_is_judged_by() {
+    let held = CachedMagicFind::new();
+    // A definition with one record more than the reader accepts.
+    let mut m = empty();
+    let definition = m.plain(&[record(5, 1.0); MAX_MODIFIERS as usize + 1]);
+    m.buff(1, 1, definition);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Bounds));
+    assert_eq!(trace, Trace { capacity: 64, count: 1, buffs: 1, most_records: MAX_MODIFIERS + 1, ..Trace::default() });
+    // A table larger than the reader accepts: the header says so before any bucket is copied.
+    let (mut m, _) = standard();
+    m.put(MANAGER + 0x20, 1024, 4);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Bounds));
+    assert_eq!(trace, Trace { capacity: 1024, count: 1, pushed: 1, ..Trace::default() });
+    // More pushed records than the reader accepts.
+    let (mut m, _) = standard();
+    m.put(MANAGER + 0xd8 + 12, u64::from(MAX_PUSHED) + 1, 4);
+    let (value, trace, ..) = traced(&held, &mut m);
+    assert_eq!(value, Err(Uncovered::Bounds));
+    assert_eq!(trace, Trace { pushed: MAX_PUSHED + 1, ..Trace::default() });
+}

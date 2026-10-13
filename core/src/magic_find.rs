@@ -318,6 +318,60 @@ impl MagicFindProfile {
     }
 }
 
+/// What a refused record asks for through one of its four conditions, for the local log. No
+/// address: what the record names is told by a dword of it, or not at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Condition {
+    /// The record names something here.
+    pub present: bool,
+    /// The dword at `+0x28` of what it names, where an effect keeps its id. `None` when it was
+    /// not copied: nothing named, a pass that does not probe, or a copy that failed.
+    pub word: Option<u32>,
+    /// For an effect condition, whether that effect is among the applied ones.
+    pub applied: Option<bool>,
+}
+
+/// The counted record that made a pass end in [`Uncovered::Unsupported`], as the game holds it:
+/// which applied effect carries it and every field the client's sum (RVA `0x12C1050`) looks
+/// at. Local diagnostics only; it says what the reader would have to evaluate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefusedRecord {
+    /// The id of the applied effect whose definition holds the record (`effect+0x28`).
+    pub effect: u32,
+    /// Its position among the definition's records.
+    pub index: u32,
+    pub kind: u32,
+    pub formula: u32,
+    pub value: f32,
+    /// `+0x14`: the game mode the record counts in. 0 is any.
+    pub mode: u32,
+    pub flags: u32,
+    /// The dwords at `+0xc`, `+0x10` and `+0x2c`, which no rule here reads.
+    pub words: [u32; 3],
+    /// `+0x20` and `+0x30`: the client asks the local player for each of them.
+    pub traits: [Condition; 2],
+    /// `+0x38` and `+0x40`: the client asks the buff table for each of them.
+    pub effects: [Condition; 2],
+}
+
+/// What a pass saw on its way, for the local log of a pass that ends without a value: the
+/// figures its bounds are judged by and the record it refused. Filled as far as the pass got;
+/// what it did not reach stays 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Trace {
+    /// Capacity and count of the buff table, as its header gave them.
+    pub capacity: u32,
+    pub count: u32,
+    /// Records in the table the server pushed.
+    pub pushed: u32,
+    /// Applied buffs walked, and definitions read or compared for them.
+    pub buffs: u32,
+    pub definitions: u32,
+    /// The most records one definition declared, refused or not ([`MAX_MODIFIERS`] is the bound).
+    pub most_records: u32,
+    pub refused: Option<RefusedRecord>,
+}
+
 /// One 72-byte modifier record of a buff definition.
 struct Modifier {
     kind: u32,
@@ -327,6 +381,10 @@ struct Modifier {
     target: u64,
     requirements: u64,
     flags: u32,
+    /// The four conditions `requirements` is the union of: `+0x20`, `+0x30`, `+0x38`, `+0x40`.
+    conditions: [u64; 4],
+    /// `+0xc`, `+0x10` and `+0x2c`.
+    words: [u32; 3],
 }
 struct Definition {
     /// The bytes the three fields below and the modifier group's address were read from.
@@ -396,13 +454,18 @@ impl MagicFindCache {
     }
 }
 
-fn read_definition<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<Definition, Uncovered> {
+fn read_definition<M: Memory>(
+    r: &mut Reader<M>,
+    address: u64,
+    trace: &mut Trace,
+) -> Result<Definition, Uncovered> {
     let head: [u8; DEFINITION_HEAD] = r.read(content(address)?)?;
     if dword(&head, 0x28) == 0 {
         return Err(Uncovered::Bounds);
     }
     let group: [u8; 12] = r.read(content(qword(&head, 0x20))? + 0x10)?;
     let count = dword(&group, 8);
+    trace.most_records = trace.most_records.max(count);
     if count > MAX_MODIFIERS {
         return Err(Uncovered::Bounds);
     }
@@ -415,17 +478,17 @@ fn read_definition<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<Definit
             MODIFIER,
         )?;
         for record in records.chunks_exact(MODIFIER) {
+            let conditions = [0x20, 0x30, 0x38, 0x40].map(|at| qword(record, at));
             modifiers.push(Modifier {
                 kind: dword(record, 0),
                 formula: dword(record, 4),
                 value: f32::from_bits(dword(record, 8)),
                 mode: dword(record, 0x14),
                 target: qword(record, 0x18),
-                requirements: qword(record, 0x20)
-                    | qword(record, 0x30)
-                    | qword(record, 0x38)
-                    | qword(record, 0x40),
+                requirements: conditions.iter().fold(0, |all, one| all | one),
                 flags: dword(record, 0x28),
+                conditions,
+                words: [0xc, 0x10, 0x2c].map(|at| dword(record, at)),
             });
         }
     }
@@ -438,10 +501,14 @@ fn read_definition<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<Definit
     })
 }
 
-/// One definition's contribution, or a refusal when the client would need live state.
-fn definition_value(definition: &Definition, wanted: u32) -> Result<f32, Uncovered> {
+/// One definition's contribution, or a refusal when the client would need live state. A
+/// refusal for a record the reader does not evaluate says which record it was.
+fn definition_value(
+    definition: &Definition,
+    wanted: u32,
+) -> Result<f32, (Uncovered, Option<usize>)> {
     let mut total = 0.0f32;
-    for modifier in &definition.modifiers {
+    for (index, modifier) in definition.modifiers.iter().enumerate() {
         if modifier.kind != wanted {
             continue;
         }
@@ -453,10 +520,10 @@ fn definition_value(definition: &Definition, wanted: u32) -> Result<f32, Uncover
             || modifier.flags & 0x1e != 0
             || modifier.formula != CONSTANT_FORMULA
         {
-            return Err(Uncovered::Unsupported);
+            return Err((Uncovered::Unsupported, Some(index)));
         }
         if !modifier.value.is_finite() || modifier.value.abs() > MAX_ABS_PERCENT {
-            return Err(Uncovered::Bounds);
+            return Err((Uncovered::Bounds, None));
         }
         total += modifier.value;
         if modifier.flags & 1 != 0 {
@@ -466,23 +533,64 @@ fn definition_value(definition: &Definition, wanted: u32) -> Result<f32, Uncover
     Ok(total)
 }
 
+/// A record `definition_value` refused: the applied effect, its definition and the record.
+type Refused = (u32, u64, usize);
+
 /// Sum over applied buffs as the client does: one per effect unless it stacks by intensity.
 fn buff_total(
     buffs: &[(u32, u64)],
     definitions: &BTreeMap<u64, Definition>,
     wanted: u32,
-) -> Result<f32, Uncovered> {
+) -> Result<f32, (Uncovered, Option<Refused>)> {
     let mut seen = BTreeSet::new();
     let mut total = 0.0f32;
-    for (effect, definition) in buffs {
-        let definition = definitions.get(definition).ok_or(Uncovered::Integrity)?;
+    for (effect, address) in buffs {
+        let definition = definitions.get(address).ok_or((Uncovered::Integrity, None))?;
         if definition.stacking != 4 && seen.contains(effect) {
             continue;
         }
         seen.insert(*effect);
-        total += definition_value(definition, wanted)?;
+        total += definition_value(definition, wanted)
+            .map_err(|(reason, index)| (reason, index.map(|index| (*effect, *address, index))))?;
     }
     Ok(total)
+}
+
+/// The refused record as the log tells it. With `probe`, what each condition names is asked
+/// for the dword where an effect keeps its id: up to four copies of 4 bytes, made only by a
+/// pass that has already ended without a value, and a copy that fails only leaves that dword
+/// unknown. An effect condition that names an applied effect has its id without any copy.
+fn refused_record<M: Memory>(
+    r: &mut Reader<M>,
+    probe: bool,
+    content_read: &Content,
+    (effect, definition, index): Refused,
+) -> Option<RefusedRecord> {
+    let modifier = content_read.definitions.get(&definition)?.modifiers.get(index)?;
+    let mut named = |pointer: u64, is_effect: bool| {
+        if pointer == 0 {
+            return Condition::default();
+        }
+        let applied = content_read.instances.get(&pointer).map(|(id, _)| *id);
+        let word = applied.or_else(|| {
+            let at = content(pointer).ok().filter(|_| probe)?;
+            r.scalar(at + 0x28, 4).ok().map(|word| word as u32)
+        });
+        Condition { present: true, word, applied: is_effect.then_some(applied.is_some()) }
+    };
+    let [trait_a, trait_b, effect_a, effect_b] = modifier.conditions;
+    Some(RefusedRecord {
+        effect,
+        index: index as u32,
+        kind: modifier.kind,
+        formula: modifier.formula,
+        value: modifier.value,
+        mode: modifier.mode,
+        flags: modifier.flags,
+        words: modifier.words,
+        traits: [named(trait_a, false), named(trait_b, false)],
+        effects: [named(effect_a, true), named(effect_b, true)],
+    })
 }
 
 fn pushed_total(records: &[u8], wanted: u32) -> f32 {
@@ -633,15 +741,19 @@ fn read_content<M: Memory>(
     buckets: &[u8],
     count: u32,
     hidden_mode: u32,
+    trace: &mut Trace,
 ) -> Result<(Vec<(u32, u64)>, Content), Uncovered> {
     let mut read = Content::default();
     let mut buffs = Vec::with_capacity(count.min(MAX_CAPACITY) as usize);
     let mut occupied = 0;
+    // What a pass that only compared had counted is not this walk's.
+    (trace.buffs, trace.definitions) = (0, 0);
     for bucket in buckets.chunks_exact(BUCKET) {
         let Some(instance) = occupant(r, profile, bucket)? else {
             continue;
         };
         occupied += 1;
+        trace.buffs = occupied;
         // The table has at most `MAX_CAPACITY` buckets, so this bound cannot be met; it is
         // here so that what is kept between passes is bounded by its own code.
         if occupied > MAX_CAPACITY {
@@ -654,8 +766,9 @@ fn read_content<M: Memory>(
         }
         let definition = u64_at(&applied, 0x60 - INSTANCE_FROM as usize)?;
         if !read.definitions.contains_key(&definition) {
-            let content = read_definition(r, definition)?;
+            let content = read_definition(r, definition, trace)?;
             read.definitions.insert(definition, content);
+            trace.definitions = read.definitions.len() as u32;
         }
         read.instances.insert(instance, (effect, definition));
         let known = read.definitions.get(&definition).ok_or(Uncovered::Integrity)?;
@@ -679,6 +792,7 @@ fn kept_content<M: Memory>(
     buckets: &[u8],
     hidden_mode: u32,
     kept: &Content,
+    trace: &mut Trace,
 ) -> Result<Option<Vec<(u32, u64)>>, Uncovered> {
     let mut compared = BTreeSet::new();
     let mut buffs = Vec::with_capacity(kept.instances.len());
@@ -686,6 +800,7 @@ fn kept_content<M: Memory>(
         let Some(instance) = occupant(r, profile, bucket)? else {
             continue;
         };
+        trace.buffs += 1;
         let Some(&(effect, definition)) = kept.instances.get(&instance) else {
             return Ok(None);
         };
@@ -695,6 +810,7 @@ fn kept_content<M: Memory>(
         if compared.insert(definition) && r.read::<DEFINITION_HEAD>(definition)? != known.head {
             return Ok(None);
         }
+        trace.definitions = compared.len() as u32;
         if shown(hidden_mode, known) {
             buffs.push((effect, definition));
         }
@@ -710,7 +826,7 @@ pub fn magic_find<M: Memory>(
     profile: &MagicFindProfile,
     context: u64,
 ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
-    pass(r, profile, context, None)
+    pass(r, profile, context, None, &mut Trace::default(), false)
 }
 
 /// [`magic_find`], reading the buffs' content whole only when `cache` cannot answer for it.
@@ -736,7 +852,29 @@ pub fn magic_find_cached<M: Memory>(
     cache: &mut MagicFindCache,
     now: Instant,
 ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
-    let result = pass(r, profile, context, Some((&mut *cache, now)));
+    let result = pass(r, profile, context, Some((&mut *cache, now)), &mut Trace::default(), false);
+    if result.is_err() {
+        cache.clear();
+    }
+    result
+}
+
+/// [`magic_find_cached`], leaving in `trace` what the pass saw on its way: the figures its
+/// bounds are judged by and, when it ends in [`Uncovered::Unsupported`], the record it refused.
+/// The value and the reason are the ones [`magic_find_cached`] gives, and so is every copy of a
+/// pass that ends in a value. A pass that refuses a record makes up to four more copies, of 4
+/// bytes each, for the dword that tells what each condition of that record names; they come
+/// out of the same budget, and one that fails changes nothing but that dword.
+pub fn magic_find_traced<M: Memory>(
+    r: &mut Reader<M>,
+    profile: &MagicFindProfile,
+    context: u64,
+    cache: &mut MagicFindCache,
+    now: Instant,
+    trace: &mut Trace,
+) -> Result<(MagicFind, (u64, u64)), Uncovered> {
+    *trace = Trace::default();
+    let result = pass(r, profile, context, Some((&mut *cache, now)), trace, true);
     if result.is_err() {
         cache.clear();
     }
@@ -772,6 +910,17 @@ impl CachedMagicFind {
         let mut cache = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         magic_find_cached(r, profile, context, &mut cache, Instant::now())
     }
+    /// One pass of [`magic_find_traced`], dated now.
+    pub fn read_traced<M: Memory>(
+        &self,
+        r: &mut Reader<M>,
+        profile: &MagicFindProfile,
+        context: u64,
+        trace: &mut Trace,
+    ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
+        let mut cache = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        magic_find_traced(r, profile, context, &mut cache, Instant::now(), trace)
+    }
     /// Forget everything the passes kept: the next one reads all the content.
     pub fn discard(&self) {
         self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
@@ -779,11 +928,15 @@ impl CachedMagicFind {
 }
 
 /// One pass. Without a cache, or with one that cannot answer, it reads all the content.
+/// `trace` is filled as the pass goes, whatever it ends in. `probe` lets a pass that refuses a
+/// record ask what its conditions name ([`refused_record`]); nothing else depends on it.
 fn pass<M: Memory>(
     r: &mut Reader<M>,
     profile: &MagicFindProfile,
     context: u64,
     mut cache: Option<(&mut MagicFindCache, Instant)>,
+    trace: &mut Trace,
+    probe: bool,
 ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
     context_checked(context)?;
     let b = profile.base;
@@ -826,6 +979,7 @@ fn pass<M: Memory>(
 
     // RVA 0x12C3030 returns 0 for an empty table without dereferencing it.
     let pushed_count = dword(&pushed_header, 12);
+    trace.pushed = pushed_count;
     if pushed_count > MAX_PUSHED {
         return Err(Uncovered::Bounds);
     }
@@ -855,6 +1009,7 @@ fn pass<M: Memory>(
     // RVA 0x12C33E0 returns no buff when the count is 0, whatever the table holds.
     let (capacity, count) = (dword(&table_header, 0), dword(&table_header, 4));
     let entries = qword(&table_header, 8);
+    (trace.capacity, trace.count) = (capacity, count);
     let buckets = if count == 0 {
         Vec::new()
     } else {
@@ -869,7 +1024,7 @@ fn pass<M: Memory>(
         Some((MagicFindCache { kept: Some(kept) }, now))
             if kept.stands(*now, b, context, &first, &buckets) =>
         {
-            kept_content(r, profile, &buckets, hidden_mode, &kept.content)?
+            kept_content(r, profile, &buckets, hidden_mode, &kept.content, trace)?
         }
         _ => None,
     };
@@ -879,19 +1034,29 @@ fn pass<M: Memory>(
             if let Some((cache, _)) = cache.as_mut() {
                 cache.clear();
             }
-            let (buffs, read) = read_content(r, profile, &buckets, count, hidden_mode)?;
+            let (buffs, read) = read_content(r, profile, &buckets, count, hidden_mode, trace)?;
             (buffs, Some(read))
         }
     };
-    let definitions = match (&read, &cache) {
-        (Some(read), _) => &read.definitions,
-        (None, Some((MagicFindCache { kept: Some(kept) }, _))) => &kept.content.definitions,
+    let content_read = match (&read, &cache) {
+        (Some(read), _) => read,
+        (None, Some((MagicFindCache { kept: Some(kept) }, _))) => &kept.content,
         // Not reachable: the buffs came from one of the two.
         (None, _) => return Err(Uncovered::Integrity),
     };
+    let definitions = &content_read.definitions;
+    // A refusal names its record, which goes to the trace before the pass ends without a value.
+    let mut buffs_of = |wanted: u32| {
+        buff_total(&buffs, definitions, wanted).map_err(|(reason, record)| {
+            if let Some(record) = record {
+                trace.refused = refused_record(r, probe, content_read, record);
+            }
+            reason
+        })
+    };
 
     let mut from_pushed = pushed_total(&pushed, MAGIC_FIND);
-    let mut from_buffs = buff_total(&buffs, definitions, MAGIC_FIND)?;
+    let mut from_buffs = buffs_of(MAGIC_FIND)?;
     // RewardCreatureAllBoon only counts while some applied buff has category 0.
     let boon = buffs.iter().any(|(_, definition)| {
         definitions
@@ -900,7 +1065,7 @@ fn pass<M: Memory>(
     });
     if boon {
         from_pushed += pushed_total(&pushed, MAGIC_FIND_BOON);
-        from_buffs += buff_total(&buffs, definitions, MAGIC_FIND_BOON)?;
+        from_buffs += buffs_of(MAGIC_FIND_BOON)?;
     }
 
     // The second look: the route again, with its identities, then the two tables. Of the

@@ -1038,13 +1038,15 @@ ran out, and `Bounds` that a pass asked for more than its byte budget. The one p
 not show is a cycle the client discarded because the game context changed during it: the
 lines stay those of the pass before, and its age goes on counting.
 
-Under **Reader diagnostics**, four more lines say what the cycles and the panel take, counted
-since the addon loaded:
+Under **Reader diagnostics**, six more lines say what the cycles and the panel take, and how
+the passes of the two readers ended, counted since the addon loaded:
 
 ```
 Pass times in µs, last cycle (max): threads 210 (max 1900); inventory 3400 (max 5200); wallet 300 (max 450); bags 150 (max 300); Magic Find 9000 (max 41000); whole cycle 13200 (max 48900)
 Captures: 1234 ok; 3 Changed; 1 ReadFailed; 0 Deadline; 0 Bounds; 12 other; epochs opened: 7
 Most own threads in a cycle: 61 / 128
+Bags passes: 1231 read; 16 not read; 3 Changed
+Magic Find passes: 371 read; 16 not read; 860 Unsupported; 3 Changed
 Panel frame in µs: mean 0.4, max 41.3, over 123456 frames (2345 computed)
 ```
 
@@ -1058,6 +1060,10 @@ Panel frame in µs: mean 0.4, max 41.3, over 123456 frames (2345 computed)
   character to read, a profile that does not match or another build. "Epochs opened" is how
   many times the source has started an epoch (a `live_open`), over all its connections.
 - **Most own threads**: against the 256 the reader stops at.
+- **Bags passes** and **Magic Find passes**: every pass of each reader by how it ended. "read"
+  is a figure, "not read" a cycle whose inventory capture failed before reaching the reader,
+  and each reason is named only once a pass has ended in it. The fraction of the time a line
+  of the panel had no figure of its own, and why, is these numbers.
 - **Panel frame**: what the panel's render callback takes, mean and longest, and how many of
   those frames had to compute the panel (see "What a frame of the panel costs").
 
@@ -1065,6 +1071,48 @@ They are the clock read around the passes the cycle already ran: no read of the 
 pass and no guard is added or moved for them. None of them is sent to the plugin, in `live1`
 or in `farm1`. They are there to answer in the game what has only been estimated outside it,
 and none of these numbers has been looked at in a running game yet.
+
+#### What the two readers leave in the log
+
+The Options window says why a line has no figure only while someone has it open. On 13
+October 2026 the panel's Magic Find had no figure for most of a session and nothing was left
+to say why. So the two readers write to the Nexus log (`addons/Nexus/Nexus.log`, channel
+"Tyrian Companion"), a line each time the outcome of a reader becomes another, and never a
+line per pass (`core/src/reader_log.rs`):
+
+```
+reader: Magic Find: read, first pass; total 363 = luck 300 + pushed 13 + buffs 50, boon no; bytes 20112/65536, reads 201, pass 1432 us; table 91/256, pushed 4, buffs 91, definitions 47, most records 5
+reader: Magic Find: Unsupported, after read for 60 passes (60 s); bytes 20112/65536, reads 201, pass 1432 us; table 92/256, pushed 4, buffs 92, definitions 47, most records 5
+reader: Magic Find record refused: effect 12345 record 2 kind 0x71 formula 6 value 100 (0x42c80000) mode 4 flags 0x0 words 0x0/0x7/0x0 trait+0x20 none trait+0x30 none effect+0x38 34567 not applied effect+0x40 none
+reader: Magic Find: read, after Unsupported for 1800 passes (1800 s); total 363 = …
+reader: Bags: not read, after read for 63 passes (60 s); capture Changed
+```
+
+- The outcome is `read`, `not read` or the reason, as the reader names it (`Unsupported`,
+  `Bounds`, `Deadline`, `Changed`…), followed by what it was before and for how many passes
+  and seconds. After it come what the pass cost (bytes of its budget, copies, microseconds)
+  and, for Magic Find, the figures its bounds are judged by, as far as the pass got: count
+  and capacity of the buff table, records the server pushed, buffs walked, definitions read
+  and the most records one definition declared (32 is the bound). `not read` says how the
+  capture before it ended.
+- **`record refused`** is the record that made a Magic Find pass end in `Unsupported`: the id
+  of the applied effect that carries it, its position in the definition, and every field the
+  game's own sum looks at. `mode` is the game mode it counts in (0 any, 1 not PvP, 2 PvP, 3
+  WvW, 4 PvE, 5 a flag of the map; read statically in the game's predicate at RVA
+  `0x12C09B0`, not seen in a running game). `trait+0x20` and `trait+0x30` are the two things the
+  game asks the local player for, `effect+0x38` and `effect+0x40` the two effects it asks the
+  buff table for; each is `none`, or the dword at `+0x28` of what it names (an effect keeps
+  its id there; `unread` if that copy failed), and for an effect whether it is applied. A
+  record is logged once for each different effect, mode, formula, flags and conditions, 32 at
+  most in one load.
+- A reader that changed outcome 256 times says so once and writes no more until the addon is
+  loaded again; the counters go on.
+
+The lines carry reasons, counts, effect ids and the figures the panel already paints: no
+address, no character or account name, nothing of the settings. For a refused record, and
+only then, the pass makes up to four more copies of 4 bytes, one for each thing the record
+names that is not an applied effect, out of the same budget; a copy that fails leaves that
+dword unknown and changes nothing else. Nothing of this goes to the plugin.
 
 | Dot | Means | Text |
 |---|---|---|
@@ -1361,7 +1409,13 @@ covers what does not need a running game:
   valid bytes waiting at the misplaced address, bucket hashes and node keys, unsupported
   records, stacking, the boon rule, concurrent changes, failed copies and both budgets, and
   the most buffs a Magic Find pass fits in its budget, with the first that is `Bounds`, in
-  tables of 512 and 256 buckets and three ways of holding content, now and at 0.8.1;
+  tables of 512 and 256 buckets and three ways of holding content, now and at 0.8.1; and the
+  trace a pass leaves for the log: the same value for the same copies as the pass without
+  one, the refused record with its fields and what its conditions name, the 8 bytes that
+  costs, a failed or misplaced copy of it, and the figure each bound is judged by;
+- the reader log (`reader_log`): a line when an outcome becomes another and none for a pass
+  that repeats it, the exact text of every line, a refused record once for each different
+  one and 32 at most, the cap of 256 changes, and the counters of passes by outcome;
 - live1 canonical wire fixtures, 512/513 cap, old-host negotiation, epochs/baselines, context
   equality, ACK isolation, source/storage failure, partial samples and bounded chunks, and
   `currencies:listed` rows: their order and chunking, a failed wallet read next to a valid

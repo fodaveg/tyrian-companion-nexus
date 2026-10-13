@@ -229,6 +229,11 @@ pub fn options_render(ui: &Ui) {
         for line in crate::inventory::counters().lines(shared.live_epochs_opened(), tyrian_companion_nexus_core::inventory::MAX_OWN_THREADS as u32) {
             ui.text_wrapped(line);
         }
+        // The passes of the bag reader and of the Magic Find reader by how they ended: what
+        // fraction of the time each had a figure, and for which reason it had none.
+        for line in crate::inventory::reader_tallies() {
+            ui.text_wrapped(line);
+        }
         let computed = PANEL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cache.computed();
         ui.text_wrapped(RENDER_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).line(computed));
         if let Some(context) = shared.live_context() {

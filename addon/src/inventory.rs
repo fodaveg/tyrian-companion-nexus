@@ -39,10 +39,11 @@ use tyrian_companion_nexus_core::inventory::{
     Reader, MAX_OWN_THREADS, MAX_SYSTEM_THREAD_ENTRIES,
 };
 use tyrian_companion_nexus_core::magic_find::{
-    self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile,
+    self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile, Trace,
 };
 use tyrian_companion_nexus_core::passive::Uncovered;
 use tyrian_companion_nexus_core::perf::{CycleTimes, ReaderCounters};
+use tyrian_companion_nexus_core::reader_log::ReaderLog;
 use tyrian_companion_nexus_core::verdict::{Attempt, Verdict};
 use tyrian_companion_nexus_core::wallet::{
     self, WalletCoverage, WalletError, WalletProfile, WalletSnapshot,
@@ -394,6 +395,15 @@ static COUNTERS: Mutex<ReaderCounters> = Mutex::new(ReaderCounters::new());
 pub fn counters() -> ReaderCounters {
     *COUNTERS.lock().unwrap_or_else(|p| p.into_inner())
 }
+/// How the bag and Magic Find passes have ended since the addon loaded, and what of it has
+/// gone to the log: a line when a reader's outcome becomes another, and each record a Magic
+/// Find pass refused, once (`reader_log`). Local, like the counters above.
+static READER_LOG: Mutex<ReaderLog> = Mutex::new(ReaderLog::new());
+/// The two lines of the Options window: the passes of each reader by how they ended.
+pub fn reader_tallies() -> [String; 2] {
+    let log = READER_LOG.lock().unwrap_or_else(|p| p.into_inner());
+    [log.bags.tally(), log.magic_find.tally()]
+}
 fn publish(d: Diagnostics) {
     *DIAGNOSTICS.lock().unwrap_or_else(|p| p.into_inner()) = d;
 }
@@ -470,11 +480,13 @@ impl NativeReader {
         let profile = verified.as_ref().ok_or(Uncovered::Guard)?;
         bags::bag_slots(reader, profile, context).map(|(slots, _owner)| slots)
     }
-    /// The Magic Find of the same context, guards verified once.
+    /// The Magic Find of the same context, guards verified once. `trace` is left with what the
+    /// pass saw on its way, for the log.
     fn magic_find<M: Memory>(
         &self,
         reader: &mut Reader<M>,
         context: u64,
+        trace: &mut Trace,
     ) -> Result<MagicFind, Uncovered> {
         let verified = match self.magic_find.get() {
             Some(verified) => verified,
@@ -485,7 +497,7 @@ impl NativeReader {
             },
         };
         let profile = verified.as_ref().ok_or(Uncovered::Guard)?;
-        MAGIC_FIND.read(reader, profile, context).map(|(value, _owner)| value)
+        MAGIC_FIND.read_traced(reader, profile, context, trace).map(|(value, _owner)| value)
     }
     /// The wallet of the context the inventory was just read from. Its guards are verified on
     /// the first cycle that reaches this point; every later cycle reuses that verdict.
@@ -668,6 +680,7 @@ impl NativeReader {
         let mut coverage = WalletCoverage::NotRead;
         let mut bag_coverage = BagCoverage::NotRead;
         let mut magic_find_coverage = MagicFindCoverage::NotRead;
+        let mut trace = Trace::default();
         let mut own = 0;
         let result = (|| {
             let pid = unsafe { GetCurrentProcessId() };
@@ -729,7 +742,7 @@ impl NativeReader {
                 ProcessMemory::timed(stop, extras, &magic_find_expired),
                 magic_find::MAX_BYTES,
             ));
-            magic_find_coverage = match self.magic_find(reader, context) {
+            magic_find_coverage = match self.magic_find(reader, context, &mut trace) {
                 Ok(value) => MagicFindCoverage::Read(value),
                 Err(error) => MagicFindCoverage::Unavailable(named(error, &magic_find_expired)),
             };
@@ -747,6 +760,29 @@ impl NativeReader {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .record(took, result.as_ref().err().copied(), ended >= deadline, own as u32);
+        // For the log: a line when the outcome of the bag pass or of the Magic Find pass is
+        // another than the cycle before's, and the record a Magic Find pass refused, once.
+        // Nothing is read for it here; the lock is released before anything is written.
+        let capture = result.as_ref().err().map(|error| match error {
+            ReadError::ReadFailed if ended >= deadline => "Deadline".to_string(),
+            other => format!("{other:?}"),
+        });
+        let spent = |used: Option<(usize, usize)>, took: Option<Duration>| {
+            let (bytes, reads) = used.unwrap_or((0, 0));
+            (bytes as u32, reads as u32, took)
+        };
+        let lines = READER_LOG.lock().unwrap_or_else(|p| p.into_inner()).cycle(
+            ended,
+            capture.as_deref(),
+            bag_coverage,
+            spent(bag_reader.as_ref().map(|r| (r.bytes, r.reads)), took.bags),
+            magic_find_coverage,
+            spent(magic_find_reader.as_ref().map(|r| (r.bytes, r.reads)), took.magic_find),
+            &trace,
+        );
+        for line in lines {
+            log::info!("{line}");
+        }
         publish(Diagnostics {
             threads: own as u32,
             bytes: reader.bytes as u32,
