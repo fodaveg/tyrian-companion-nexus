@@ -181,6 +181,14 @@ Version 0.8.8: after the plugin answers `source_conflict` (for example while a s
 hand is followed by one started by hand), the addon asks again with `live_open` after 5 s instead
 of 30 s. The protocol with the plugin does not change.
 
+Version 0.8.9 certifies the game's executable of 13 October 2026 (build 208574) in place of the
+one of 6 October, which the game no longer runs: until then every load ended in "unsupported game
+build". The reader writes to the Nexus log what the bag and Magic Find passes end in, a line when
+that changes, and counts them in Options. Magic Find accepts definitions of up to 256 records
+(it was 32), passes of 262144 bytes (65536) and a table of 1024 buckets (512): in a crowd it had no
+figure most of the time. It needs the plugin 0.6.57 or later, since an older one refuses the new
+executable's hash; the protocol does not change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
@@ -264,9 +272,14 @@ select those ranges, and the code that installs them refers to them. The functio
 inventory reader compares by address alone (the location, instance and quantity getters and
 the three conditional predicates) carry no digest and were read in the new file one by one.
 No field offset changed. What that does not give is a reading: **the live evidence quoted in
-this document was taken on the build of 6 October, and nothing has been read from a running
-game of this one.** The `live_open` frame carries the new hash, so the plugin has to accept
-it as well.
+the rest of this document was taken on the build of 6 October.** Of this build there is what
+the owner saw that same evening, 13 October 2026, on Fedora under Proton with the candidates
+of 0.8.9 and the plugin 0.6.57: the inventory was read and a session counted it, and the
+panel's Magic Find, once its three bounds were raised (see "Bag slots and Magic Find"), read
+without a break for the 4 minutes 20 seconds its log was watched (498, with 111 buffs of 76
+definitions in a table of 512 buckets, 59314 bytes a pass). The wallet and the bag slots
+were not looked at apart. The `live_open` frame carries the new hash, so the plugin has to
+accept it as well: 0.6.57 is the first that does.
 
 That verification starts on the first cycle and its answer is kept for the whole load only
 when it is final, which is whenever the file or its loaded image decides it: the certified
