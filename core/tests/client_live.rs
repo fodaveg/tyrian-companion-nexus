@@ -850,3 +850,86 @@ fn unload_cancels_pending_capture_without_sending_status_or_inventory_after_bye(
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(p.next()["type"], "bye");
 }
+
+/// The `hello`/`welcome` of [`Peer::auth`], with `mf_cap` announced before `live_cap` when
+/// `magic_find` is set, which is the order the plugin writes them in.
+fn auth_with_magic_find(p: &mut Peer, magic_find: bool) {
+    let hello = p.read();
+    assert_eq!(hello["type"], "hello");
+    p.send(json!({"v":3,"type":"welcome","server":SERVER,"nonce":NONCE,"heartbeatIntervalMs":100}));
+    if magic_find {
+        p.send(json!({"v":3,"type":"mf_cap","nonce":NONCE,"tag":"mf1"}));
+    }
+    p.send(json!({"v":3,"type":"live_cap","nonce":NONCE,"tag":"live1"}));
+}
+
+/// Every line but heartbeats for `window`, acknowledging each sample as stored so the channel
+/// keeps sampling once a second.
+fn pump(p: &mut Peer, epoch: &str, window: Duration) -> Vec<Value> {
+    let until = std::time::Instant::now() + window;
+    let mut lines = Vec::new();
+    while std::time::Instant::now() < until {
+        let line = p.sequenced();
+        if line["type"] == "live_end" {
+            p.ack(epoch, line["cursor"].as_u64().unwrap(), "stored");
+        }
+        if line["type"] != "heartbeat" {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+#[test]
+fn a_plugin_that_announces_mf1_gets_the_game_magic_find_and_its_loss_on_the_shared_sequence() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    host.magic_find.store(333, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    auth_with_magic_find(&mut p, true);
+    assert_eq!(p.next()["type"], "context");
+    let epoch = p.open();
+    // The capture that opened the epoch read the figure; it goes out right after `live_open`.
+    let mf = p.next();
+    assert_eq!(mf["type"], "mf_state", "{mf}");
+    assert_eq!(mf["tag"], "mf1");
+    assert_eq!(mf["mf"], 333);
+    assert!(mf["ageMs"].as_u64().unwrap() < 1_000, "{mf}");
+    let keys: Vec<&str> = mf.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["ageMs", "mf", "nonce", "seq", "tag", "type", "v"]);
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    p.ack(&epoch, 0, "stored");
+    // An unchanged figure is not repeated within the minute.
+    let quiet = pump(&mut p, &epoch, Duration::from_millis(2_500));
+    assert!(quiet.iter().all(|line| line["type"] != "mf_state"), "{quiet:?}");
+    // The reader loses coverage: the next line says `null`, never 0 and never the old figure.
+    host.magic_find.store(0, Ordering::Relaxed);
+    host.diagnostics.lock().unwrap().magic_find =
+        MagicFindCoverage::Unavailable(tyrian_companion_nexus_core::passive::Uncovered::Bounds);
+    let lost = pump(&mut p, &epoch, Duration::from_millis(5_500));
+    let states: Vec<&Value> = lost.iter().filter(|line| line["type"] == "mf_state").collect();
+    assert_eq!(states.len(), 1, "{lost:?}");
+    assert_eq!(states[0]["mf"], Value::Null);
+    handle.stop();
+}
+
+/// The cross with a plugin of 0.6.58 or earlier: it never announces `mf1`, and its parser closes
+/// the connection on an `mf_state`. The addon sends none, whatever the reader holds.
+#[test]
+fn a_plugin_that_never_announces_mf1_never_gets_an_mf_state() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (host, _state, handle) = start(&listener);
+    host.magic_find.store(333, Ordering::Relaxed);
+    let mut p = Peer::new(listener.accept().unwrap().0);
+    auth_with_magic_find(&mut p, false);
+    assert_eq!(p.next()["type"], "context");
+    let epoch = p.open();
+    p.ready(&epoch);
+    p.sample(&epoch, 0, 0);
+    p.ack(&epoch, 0, "stored");
+    let lines = pump(&mut p, &epoch, Duration::from_millis(6_500));
+    assert!(lines.iter().any(|line| line["type"] == "live_end"), "the channel kept sampling: {lines:?}");
+    assert!(lines.iter().all(|line| line["type"] != "mf_state"), "{lines:?}");
+    handle.stop();
+}

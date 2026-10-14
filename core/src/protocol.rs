@@ -360,6 +360,23 @@ pub fn build_price_sub_line(nonce: &str, seq: u64) -> Option<String> {
     })).ok()?)
 }
 
+/// The `mf1` line: the game's Magic Find (`total`, whole points, `None` written `null` when the
+/// reader has no figure) and `age_ms`, how old the cycle that said so is. Send it only on a
+/// connection whose plugin announced `mf_cap`: an older plugin closes the connection with
+/// `unexpected_message` on a type it never announced. A total above
+/// [`crate::magic_find_wire::MAX_TOTAL`] or an age above [`crate::magic_find_wire::MAX_AGE_MS`]
+/// gives no line.
+pub fn build_magic_find_line(nonce: &str, seq: u64, total: Option<u32>, age_ms: u64) -> Option<String> {
+    use crate::magic_find_wire::{MAGIC_FIND_TAG, MAX_AGE_MS, MAX_TOTAL};
+    if total.is_some_and(|total| total > MAX_TOTAL) || age_ms > MAX_AGE_MS {
+        return None;
+    }
+    finish_line(serde_json::to_string(&serde_json::json!({
+        "v": PROTOCOL_VERSION, "type": "mf_state", "nonce": nonce, "seq": seq, "tag": MAGIC_FIND_TAG,
+        "mf": total, "ageMs": age_ms
+    })).ok()?)
+}
+
 /// The plugin's answer to an accepted `hello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
@@ -497,6 +514,8 @@ pub enum ServerLine {
     FarmingState(FarmingState),
     PriceCapability(String),
     PriceState(PriceState),
+    /// `mf_cap` with the `mf1` tag: the plugin takes the game's Magic Find on this connection.
+    MagicFindCapability(String),
     Live(crate::live::Reply),
     Error(ErrorCode),
     /// `v` is greater than [`PROTOCOL_VERSION`]: ask for an update once, interpret nothing.
@@ -576,6 +595,7 @@ pub fn parse_server_line(line: &str) -> ServerLine {
         "farming_state" => parse_farming_state(line, &record).map(ServerLine::FarmingState),
         "price_cap" => parse_price_cap(line, &record).map(ServerLine::PriceCapability),
         "price_state" => parse_price_state(line, &record).map(ServerLine::PriceState),
+        "mf_cap" => parse_magic_find_cap(line, &record).map(ServerLine::MagicFindCapability),
         "live_cap" | "live_ready" | "live_ack" => crate::live::parse_reply(kind, line).map(ServerLine::Live),
         _ => return ServerLine::Ignored,
     };
@@ -602,6 +622,14 @@ fn parse_price_cap(line: &str, record: &Map<String, Value>) -> Option<String> {
     let cap: FarmingCapability = serde_json::from_str(line).ok()?;
     // Any other tag, `price1` included, is discarded: no subscription follows and nothing closes.
     if cap.v != 3 || cap.kind != "price_cap" || cap.tag != PRICE_TAG { return None; }
+    as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS && *nonce == cap.nonce)
+}
+
+fn parse_magic_find_cap(line: &str, record: &Map<String, Value>) -> Option<String> {
+    if !has_exact_keys(record, &["v", "type", "nonce", "tag"]) { return None; }
+    let cap: FarmingCapability = serde_json::from_str(line).ok()?;
+    // Another tag is a later contract this addon cannot speak: dropped, nothing closes.
+    if cap.v != 3 || cap.kind != "mf_cap" || cap.tag != crate::magic_find_wire::MAGIC_FIND_TAG { return None; }
     as_wire_id(record.get("nonce")).filter(|nonce| nonce.len() == INSTANCE_CHARS && *nonce == cap.nonce)
 }
 

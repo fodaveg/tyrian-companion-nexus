@@ -26,6 +26,7 @@ pub mod instance;
 pub mod inventory;
 pub mod live;
 pub mod magic_find;
+pub mod magic_find_wire;
 pub mod obsidian_launch;
 pub mod panel;
 pub mod passive;

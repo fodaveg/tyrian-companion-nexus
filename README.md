@@ -478,9 +478,9 @@ and `::magic_find`), each as a value or as "no coverage" with one closed reason.
 the Labyrinth panel paints them in its "Slots" and "MF" lines, before the plugin's figures,
 and Options shows each reader's last pass (see "Labyrinth farming panel").
 
-**Neither is on the wire in this version.** The inventory sample that goes out is unchanged,
-its `free_slots` stays `None`, and no frame carries Magic Find: the plugin does not receive
-what the addon reads. Sending them is pending, and needs the protocol to say how.
+**Bag slots are not on the wire.** The inventory sample that goes out is unchanged and its
+`free_slots` stays `None`. **Magic Find goes to the plugin since 0.8.11, and only to a plugin
+that asks for it** (`mf1`, below); no inventory frame carries it.
 
 The game stores neither number. It computes both when it paints, from stored inputs, and the
 reader repeats that arithmetic without calling anything.
@@ -622,6 +622,47 @@ That is one account, one character, one game session and one executable. It does
 drop, a bag change, another launch of the game or native Windows. **It is not a run of this
 DLL**: these two readers have only been exercised against fixtures, and the used-positions
 count was not part of the probes at all.
+
+### Magic Find to the plugin (`mf1`, since 0.8.11)
+
+The plugin's «En vivo» panel shows the Magic Find of the game, buffs included, when the addon
+sends it, and the account's otherwise (David, 14 October 2026). The feed is
+`core/src/magic_find_wire.rs`; the fixture shared byte for byte with the plugin is
+`core/tests/fixtures/mf1.json` (`src/alerts/__fixtures__/mf1.json` there).
+
+Negotiation goes the way of `farm1` and `price2`: on a v3 connection the plugin announces
+
+```json
+{"v":3,"type":"mf_cap","nonce":"AQEBAQEBAQEBAQEBAQEBAQ","tag":"mf1"}
+```
+
+and only after that, on that connection, does the addon send `mf_state` on the shared outgoing
+sequence:
+
+```json
+{"ageMs":12,"mf":333,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","seq":4,"tag":"mf1","type":"mf_state","v":3}
+```
+
+Exactly those seven keys. `mf` is the reader's total rounded to the nearest whole point (the
+figure the panel paints, which may show a tenth), from 0 to 100000, or `null` when the last
+cycle had no coverage: never a partial sum and never a 0 that was not read. `ageMs` is how old
+the cycle that said so was when the line was written (at most 600000). Nothing that names a
+character, an account or a map goes with it, and neither do the three addends.
+
+| Combination | Result |
+|---|---|
+| Addon 0.8.11 with a plugin that announces `mf1` | `mf_state` after the capture that changed the figure |
+| Addon 0.8.11 with plugin 0.6.58 or earlier | No `mf_cap`, so no `mf_state`: that plugin closes the connection on a type it never announced |
+| Addon 0.8.10 or earlier with a plugin that announces `mf1` | `mf_cap` is a type it does not know and ignores without closing; the plugin keeps the account's figure |
+| Another `mf_cap` tag, an extra key, a nonce that is not this connection's, a v2 connection | Not taken: no `mf_state`, nothing closes |
+
+When: after a capture whose context held (the same figure the panel takes), as a line after the
+sample's last line and never inside its batch. A line goes out when the figure changes, again
+every 60 s while it holds, and never more than one per 5 s, so a figure that flickers between a
+value and no coverage costs one line per 5 s. A figure no capture has confirmed for 30 s (the
+channel stopped sampling: a conflict, an unsupported build, a long loading screen) is sent as
+`null`, and so is leaving gameplay for character select. A `null` is not repeated, and nothing
+is sent before the first figure. The plugin lets a figure go two minutes after its reading.
 
 ## Layout
 
@@ -1521,6 +1562,15 @@ covers what does not need a running game:
   one that failed, the lines Options shows, the frame's mean in tenths of a microsecond, and
   every `live_open` counted as one epoch opened. The clock readings themselves are taken in
   the Windows adapter and are not tested;
+- the `mf1` feed (`core/src/magic_find_wire.rs`, `core/tests/magic_find_wire.rs`): the total
+  rounded to whole points and anything that is not a figure sent as `null`, nothing before
+  `mf_cap`, nothing to retract before a first figure, one line per change at most every 5 s,
+  an unchanged figure again after a minute, `null` after 30 s without a capture and at
+  character select, and both lines byte for byte against the fixture shared with the plugin.
+  On the real loop (`core/tests/client_live.rs`): with `mf_cap`, the figure right after the
+  capture that read it and a single `null` when the reader loses coverage; without it, the
+  plugin of 0.6.58, no `mf_state` at all while the channel samples. The figure of a running
+  game has not been seen on the wire;
 
 - every line the addon sends, byte for byte against the SPEC's own example lines, and every
   rule the plugin enforces on them (exact keys, the 512-byte cap, canonical `instance`, the

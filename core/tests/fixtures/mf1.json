@@ -1,0 +1,8 @@
+{
+  "contract": "Tyrian mf1 2026-10-14",
+  "frames": [
+    {"v":3,"type":"mf_cap","nonce":"AQEBAQEBAQEBAQEBAQEBAQ","tag":"mf1"},
+    {"ageMs":12,"mf":333,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","seq":4,"tag":"mf1","type":"mf_state","v":3},
+    {"ageMs":0,"mf":null,"nonce":"AQEBAQEBAQEBAQEBAQEBAQ","seq":9,"tag":"mf1","type":"mf_state","v":3}
+  ]
+}

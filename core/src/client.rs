@@ -46,7 +46,7 @@ use crate::framer::{FramedLine, LineFramer};
 use crate::game_context::{ContextTracker, MumbleSnapshot};
 use crate::obsidian_launch::{should_launch, FirstConnectOutcome, LaunchApp, ObsidianLaunchOutcome};
 use crate::protocol::{
-    build_alert_ack_line, build_bye_line, build_context_line, build_farming_sub_line, build_heartbeat_line, build_price_sub_line, build_hello_line, is_usable_token,
+    build_alert_ack_line, build_bye_line, build_context_line, build_farming_sub_line, build_heartbeat_line, build_magic_find_line, build_price_sub_line, build_hello_line, is_usable_token,
     parse_server_line, ByeReason, ErrorCode, GameContext, ServerLine, Welcome, TOKEN_MISSING_MESSAGE,
     TOKEN_REJECTED_MESSAGE, UPDATE_ADDON_MESSAGE, UPDATE_PLUGIN_MESSAGE,
 };
@@ -177,6 +177,8 @@ pub struct Session {
     contexts_sent: u64,
     live_allowed: bool,
     live: crate::live::Channel,
+    /// The game's Magic Find for the plugin, once it announced `mf1` on this connection.
+    magic_find: crate::magic_find_wire::Feed,
 }
 
 impl Session {
@@ -194,6 +196,7 @@ impl Session {
             contexts_sent: 0,
             live_allowed: true,
             live: crate::live::Channel::new(),
+            magic_find: crate::magic_find_wire::Feed::new(),
         }
     }
 
@@ -254,6 +257,16 @@ impl Session {
     pub fn subscribe_price(&mut self, now: Instant) -> Option<String> {
         if self.next_seq > crate::live::MAX_SAFE { return None; }
         let line = build_price_sub_line(&self.nonce, self.next_seq)?;
+        self.take_seq(now);
+        Some(line)
+    }
+
+    /// The `mf_state` line the Magic Find feed owes the plugin now, if any, on the shared
+    /// sequence. Nothing on a connection whose plugin did not announce `mf1`.
+    pub fn magic_find_line(&mut self, now: Instant) -> Option<String> {
+        if self.next_seq > crate::live::MAX_SAFE { return None; }
+        let due = self.magic_find.due(now)?;
+        let line = build_magic_find_line(&self.nonce, self.next_seq, due.total, due.age_ms)?;
         self.take_seq(now);
         Some(line)
     }
@@ -710,6 +723,10 @@ fn serve(
                 // forgotten, so that this cycle reads and finds everything again.
                 if session.contexts_sent != contexts_sent {
                     host.discard_cycle();
+                    // Character select: the next figure, if any, is another character's.
+                    if context.state == crate::protocol::GameState::CharacterSelect {
+                        session.magic_find.absent(now);
+                    }
                 }
                 state.set_live_context(context.clone());
                 let ctx = session.last_context_seq.unwrap_or(0);
@@ -749,6 +766,8 @@ fn serve(
                             } else {
                                 // Only now: the context was the same before and after the cycle.
                                 state.set_inventory_diagnostics(diagnostics, captured_at);
+                                // The same figure the panel takes from those diagnostics.
+                                session.magic_find.observe(&diagnostics.magic_find, captured_at);
                                 let opened = session.live.epochs_opened();
                                 frames.extend(session.live.capture(sample, ctx, captured_at));
                                 // For the Options window only: how often the source starts an epoch.
@@ -765,6 +784,10 @@ fn serve(
                     if sending_started.elapsed() >= crate::live::RESPONSE_TIMEOUT {
                         return end.because(CloseReason::Timeout);
                     }
+                    if let Err(error) = stream.write_all(line.as_bytes()) { return end.because(CloseReason::Io(error.kind())); }
+                }
+                // After the sample's last line, never inside its batch.
+                if let Some(line) = session.magic_find_line(Instant::now()) {
                     if let Err(error) = stream.write_all(line.as_bytes()) { return end.because(CloseReason::Io(error.kind())); }
                 }
             }
@@ -848,6 +871,15 @@ fn handle_line(
         }
         ServerLine::PriceState(reading) => {
             if session.is_some() { state.accept_price(reading, Instant::now()); }
+        }
+        ServerLine::MagicFindCapability(nonce) => {
+            let Some(session) = session.as_mut() else { return None };
+            // Only for this connection's nonce, and only on v3, where `mf_state` exists.
+            let accepted = session.live_allowed && nonce == session.nonce;
+            log::info!("capability: magic find offered, accepted {}", if accepted { "yes" } else { "no" });
+            if accepted {
+                session.magic_find.enable();
+            }
         }
         ServerLine::Live(reply) => {
             let Some(session) = session.as_mut() else { return None; };
