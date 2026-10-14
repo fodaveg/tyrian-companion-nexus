@@ -928,8 +928,16 @@ fn magic_find_text(figure: Option<&str>, from_plugin: bool, english: bool) -> St
 /// Rounded to tenths with a cast, on purpose: `f64::round` makes the Windows DLL import a
 /// rounding function from the C runtime, and its import table is meant not to grow.
 pub fn points(value: f32) -> String {
+    tenths_text(tenths(value))
+}
+
+/// A value in tenths of a point, rounded as [`points`] writes it.
+fn tenths(value: f32) -> i64 {
     let scaled = f64::from(value) * 10.0;
-    let tenths = if scaled >= 0.0 { (scaled + 0.5) as i64 } else { (scaled - 0.5) as i64 };
+    if scaled >= 0.0 { (scaled + 0.5) as i64 } else { (scaled - 0.5) as i64 }
+}
+
+fn tenths_text(tenths: i64) -> String {
     // `unsigned_abs`: the cast saturates, and the lowest i64 has no positive of its own.
     let (sign, tenths) = (if tenths < 0 { "-" } else { "" }, tenths.unsigned_abs());
     if tenths % 10 == 0 {
@@ -939,9 +947,15 @@ pub fn points(value: f32) -> String {
     }
 }
 
-/// Two amounts of percentage points differ by something the panel would write.
+/// `now` is written lower than `before`: compared as the tenths [`points`] writes, so that two
+/// amounts painted the same are never a fall.
 fn lower(now: f32, before: f32) -> bool {
-    before - now >= 0.05
+    tenths(before) > tenths(now)
+}
+
+/// The size of a fall as the difference of the two figures the panel writes.
+fn fall_text(now: f32, before: f32) -> String {
+    tenths_text(tenths(before).saturating_sub(tenths(now)))
 }
 
 /// Magic Find.
@@ -984,7 +998,7 @@ fn magic_find_cell(input: &PanelInput<'_>, source: Source, taken: Option<Taken<M
         // The session's highest is kept by `advance`; here it is only compared with.
         let peak = peak.as_ref().filter(|peak| lower(read.total, peak.total));
         if let Some(peak) = peak {
-            let fall = points(peak.total - read.total);
+            let fall = fall_text(read.total, peak.total);
             tooltip.push(if english {
                 format!("Down {fall} points from the session peak ({}%)", points(peak.total))
             } else {

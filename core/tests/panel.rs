@@ -497,6 +497,25 @@ fn another_session_is_noticed_without_a_starting_frame() {
     assert_eq!(panel.at(10, bags(41, 160), verified(300, 30.0, 3.0)).magic_find.tone, Tone::Normal);
 }
 
+/// A fall is a fall of what the panel writes, in tenths of a point: two totals that are painted
+/// the same are not a drop, and the size of a drop is the difference of the two painted figures.
+#[test]
+fn a_fall_is_compared_on_the_figures_the_panel_writes() {
+    // 100.04 and 99.99 are both written `100`: nothing to warn about.
+    let mut panel = Follow::new(Case::sketch());
+    panel.at(0, bags(41, 160), verified(100, 0.04, 0.0));
+    let same = panel.at(5, bags(41, 160), verified(99, 0.99, 0.0)).magic_find;
+    assert_eq!((same.text.as_str(), same.tone), ("MF: 100%", Tone::Normal), "{same:?}");
+    assert!(!has(&same, "Bajó"), "{same:?}");
+    // 100.04 against 99.94: written `100` and `99.9`, a fall of 0.1.
+    let fell = panel.at(10, bags(41, 160), verified(99, 0.94, 0.0)).magic_find;
+    assert_eq!((fell.text.as_str(), fell.tone), ("MF: 99.9%", Tone::Warning), "{fell:?}");
+    assert!(has(&fell, "Bajó 0.1 puntos respecto al máximo de la sesión (100%)"), "{fell:?}");
+    // 100.04 against 99.851: `100` and `99.9`; the raw difference rounds to 0.2, the painted one is 0.1.
+    let painted = panel.at(15, bags(41, 160), verified(99, 0.851, 0.0)).magic_find;
+    assert!(has(&painted, "Bajó 0.1 puntos respecto al máximo de la sesión (100%)"), "{painted:?}");
+}
+
 /// The reader's output stays `Read` until another cycle replaces it, so in the first frame of a
 /// session it can still be a reading of up to five seconds before: of the game as it was then,
 /// not of this session. It is painted, as the last thing the reader verified, and it is not the
