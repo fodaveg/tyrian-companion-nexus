@@ -1410,6 +1410,44 @@ fn the_rate_notes_are_its_tooltip_and_its_warning() {
     assert!(has(&none, "No reading"));
 }
 
+/// The ETA line is for a session that is still going and has a goal to reach: after the goal or
+/// the session it would say "not available yet" about something that will never come.
+#[test]
+fn the_eta_line_is_only_there_while_there_is_something_to_wait_for() {
+    let eta_lines = |cell: &Cell| cell.tooltip.iter().filter(|line| line.contains("ETA") || line.contains("Quedan") || line.contains("Cuenta atrás")).count();
+    let with_goal = |phase: &'static str, progress: i32, goal: &'static str, target: i32| {
+        Case::measuring()
+            .with_farming(|frame| {
+                frame["phase"] = json!(phase);
+                frame["goal"] = json!(goal);
+                frame["target"] = json!(target);
+                frame["progress"] = json!(progress);
+            })
+            .view(false)
+            .bags
+    };
+    // Still going: the line is there, with or without a figure.
+    for phase in ["active", "starting"] {
+        for goal in ["bags", "duration"] {
+            let cell = with_goal(phase, 10, goal, 1000);
+            assert_eq!(eta_lines(&cell), 1, "{phase} {goal}: {cell:?}");
+        }
+    }
+    // Not measuring any more, or the goal reached: gone.
+    for phase in ["complete", "abandoned", "idle", "stopping", "provisional", "error"] {
+        for goal in ["bags", "duration"] {
+            let cell = with_goal(phase, 10, goal, 1000);
+            assert_eq!(eta_lines(&cell), 0, "{phase} {goal}: {cell:?}");
+            assert!(has(&cell, "Objetivo:"), "the goal itself stays: {cell:?}");
+        }
+    }
+    for goal in ["bags", "duration"] {
+        let cell = with_goal("active", 1000, goal, 1000);
+        assert_eq!(eta_lines(&cell), 0, "{goal}: {cell:?}");
+        assert!(has(&cell, "Objetivo alcanzado"), "{cell:?}");
+    }
+}
+
 #[test]
 fn the_bags_tooltip_keeps_what_left_the_panel() {
     let plain = Case::measuring().view(false).bags;
@@ -1433,7 +1471,8 @@ fn the_bags_tooltip_keeps_what_left_the_panel() {
         })
         .view(true)
         .bags;
-    assert!(has(&reached, "Goal: 0:28:36 / 0:28:20") && has(&reached, "Goal reached") && has(&reached, "Countdown unavailable"), "{reached:?}");
+    // Nothing is left to count down once the goal is reached.
+    assert!(has(&reached, "Goal: 0:28:36 / 0:28:20") && has(&reached, "Goal reached") && !has(&reached, "Countdown unavailable"), "{reached:?}");
     // The net at close: named always, a warning only when it came out lower than observed.
     let same = Case::measuring().with_farming(|frame| { frame["phase"] = json!("complete"); frame["net"] = json!(143); }).view(false).bags;
     assert!(has(&same, "Bolsas netas al cierre: 143"));

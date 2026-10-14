@@ -652,15 +652,19 @@ fn bags_cell(view: &FarmingView, english: bool) -> Cell {
         };
         let unit = if reading.goal == Goal::Bags { tr(english, " bolsas", " bags") } else { "" };
         tooltip.push(format!("{}: {progress} / {target}{unit}", tr(english, "Objetivo", "Goal")));
-        if matches!((reading.progress, reading.target), (Some(progress), Some(target)) if target > 0 && progress >= target) {
+        let reached = matches!((reading.progress, reading.target), (Some(progress), Some(target)) if target > 0 && progress >= target);
+        if reached {
             tooltip.push(tr(english, "Objetivo alcanzado", "Goal reached").to_string());
         }
-        tooltip.push(match (view.eta(), reading.goal) {
-            (Some(eta), Goal::Duration) => format!("{} {}", tr(english, "Quedan", "Time left:"), duration(eta)),
-            (Some(eta), _) => format!("{} {}", tr(english, "Quedan aprox.", "Approx. time left:"), duration(eta)),
-            (None, Goal::Duration) => tr(english, "Cuenta atrás no disponible", "Countdown unavailable").to_string(),
-            (None, _) => tr(english, "ETA aún no disponible", "ETA not available yet").to_string(),
-        });
+        // Only a session still going towards a goal has a time left to tell, or to not know yet.
+        if !reached && matches!(reading.phase, Phase::Active | Phase::Starting) {
+            tooltip.push(match (view.eta(), reading.goal) {
+                (Some(eta), Goal::Duration) => format!("{} {}", tr(english, "Quedan", "Time left:"), duration(eta)),
+                (Some(eta), _) => format!("{} {}", tr(english, "Quedan aprox.", "Approx. time left:"), duration(eta)),
+                (None, Goal::Duration) => tr(english, "Cuenta atrás no disponible", "Countdown unavailable").to_string(),
+                (None, _) => tr(english, "ETA aún no disponible", "ETA not available yet").to_string(),
+            });
+        }
     }
     if let Some(net) = reading.net {
         tooltip.push(format!("{}: {net}", tr(english, "Bolsas netas al cierre", "Net bags at close")));
