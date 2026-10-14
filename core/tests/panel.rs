@@ -1446,7 +1446,8 @@ fn the_stack_says_a_dash_and_why_in_every_state_without_a_price() {
         (price(Some(&price_frame("idle")), Duration::ZERO), Status::Connected, Tone::Muted, Tone::Normal, "El precio se lee durante una sesión"),
         (price(Some(&price_frame("idle")), Duration::from_secs(40)), Status::Connected, Tone::Muted, Tone::Normal, "El precio se lee durante una sesión"),
         (price(Some(&price_frame("stale")), Duration::ZERO), Status::Connected, Tone::Warning, Tone::Warning, "Precio caducado (hace 21 min)"),
-        (price(Some(&price_frame("ok")), Duration::from_secs(15)), Status::Connected, Tone::Muted, Tone::Normal, "Precio aún sin leer"),
+        (price(Some(&price_frame("stale")), Duration::from_secs(40)), Status::Connected, Tone::Warning, Tone::Warning, "Precio caducado (hace 21 min)"),
+        (price(Some(&price_frame("ok")), Duration::from_secs(15)), Status::Connected, Tone::Warning, Tone::Warning, "Precio caducado (hace 21 min)"),
     ];
     for (price, connection, tone, label_tone, why) in rows {
         let mut case = Case::measuring();
@@ -1468,6 +1469,31 @@ fn the_stack_says_a_dash_and_why_in_every_state_without_a_price() {
     let view = case.view(true);
     assert_eq!((view.buy.text.as_str(), view.buy.tone), (NO_DATA, Tone::Muted));
     assert!(has(&view.buy, "No quote") && has(&view.stack_label, "No quote"));
+}
+
+/// An `ok` price that stops being renewed while the connection stays up is an old price, and
+/// says so with its age, not "not read yet": it was read, a while ago.
+#[test]
+fn an_ok_price_that_stops_renewing_says_it_expired_and_how_old_it_is() {
+    let mut young = price_frame("ok");
+    young["age"] = json!(5);
+    // (price view, what the tooltip says in Spanish, in English)
+    let rows = [
+        (price(Some(&young), Duration::from_secs(20)), "Precio caducado (hace 25 s)", "Price expired (25 s ago)"),
+        (price(Some(&price_frame("ok")), Duration::from_secs(60)), "Precio caducado (hace 22 min)", "Price expired (22 min ago)"),
+    ];
+    for (price, es, en) in rows {
+        let mut case = Case::measuring();
+        case.price = price;
+        for (english, why) in [(false, es), (true, en)] {
+            let view = case.view(english);
+            assert_eq!((view.buy.text.as_str(), view.sell.text.as_str()), (NO_DATA, NO_DATA), "{why}");
+            assert_eq!((view.buy.tone, view.sell.tone, view.stack_label.tone), (Tone::Warning, Tone::Warning, Tone::Warning), "{why}");
+            for cell in [&view.stack_label, &view.buy, &view.sell] {
+                assert!(has(cell, why) && !has(cell, "sin leer") && !has(cell, "not read yet"), "{why}: {cell:?}");
+            }
+        }
+    }
 }
 
 #[test]

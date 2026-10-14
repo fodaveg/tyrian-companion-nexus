@@ -677,6 +677,16 @@ fn bags_cell(view: &FarmingView, english: bool) -> Cell {
     cell(reading.observed.map_or_else(|| NO_DATA.to_string(), |observed| observed.to_string()), tone, tooltip)
 }
 
+/// How old a price is, in the unit the player can read it in: seconds under a minute, else
+/// whole minutes.
+fn age_text(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds / 60)
+    }
+}
+
 /// The right column: label, highest buy order and lowest sell offer for a stack of 250, gross.
 /// Figures only from a fresh `ok` reading; every other state says `—` and why in the tooltip,
 /// and so does one side alone without a quote.
@@ -693,17 +703,27 @@ fn stack_cells(input: &PanelInput<'_>, english: bool) -> (Cell, Cell, Cell) {
     } else if idle {
         (Some(tr(english, "El precio se lee durante una sesión", "The price is read during a session").to_string()), Tone::Muted)
     } else {
-        match reading.map(|reading| reading.st) {
-            None | Some(PriceStatus::Pending | PriceStatus::Idle) => {
-                (Some(tr(english, "Precio aún sin leer", "Price not read yet").to_string()), Tone::Muted)
-            }
-            Some(PriceStatus::Stale) => {
-                let text = match view.age.or(reading.and_then(|reading| reading.age).map(|age| age as u64)) {
-                    Some(age) if english => format!("Price expired ({} min ago)", age / 60),
-                    Some(age) => format!("Precio caducado (hace {} min)", age / 60),
+        // A reading that was taken but is no longer renewed (the feed's own `stale`, or an `ok`
+        // not refreshed within the TTL while the connection is up) is an old price, not one
+        // that was never read. `Pending` and `Idle` carry no price, so they are never old.
+        let taken = view.reading.as_ref().map(|reading| reading.st);
+        let expired = match taken {
+            Some(PriceStatus::Stale) => true,
+            Some(PriceStatus::Ok) => !view.fresh,
+            _ => false,
+        };
+        match taken {
+            _ if expired => {
+                let age = view.age.or(view.reading.as_ref().and_then(|reading| reading.age).map(|age| age as u64));
+                let text = match age {
+                    Some(age) if english => format!("Price expired ({} ago)", age_text(age)),
+                    Some(age) => format!("Precio caducado (hace {})", age_text(age)),
                     None => tr(english, "Precio caducado", "Price expired").to_string(),
                 };
                 (Some(text), Tone::Warning)
+            }
+            None | Some(PriceStatus::Pending | PriceStatus::Idle | PriceStatus::Stale) => {
+                (Some(tr(english, "Precio aún sin leer", "Price not read yet").to_string()), Tone::Muted)
             }
             Some(PriceStatus::Ok) if figures.is_some_and(|reading| reading.sell.is_none() && reading.list.is_none()) => {
                 (Some(tr(english, "Sin cotización", "No quote").to_string()), Tone::Muted)
