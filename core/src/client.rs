@@ -387,7 +387,8 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             state.set_live_status(crate::live::LiveStatus::Unavailable);
         }
         if lasted.is_some() {
-            log::info!("disconnected from the Tyrian Companion plugin");
+            let reason = end.reason.as_ref().map_or_else(|| "unknown".to_string(), ToString::to_string);
+            log::info!("disconnected from the Tyrian Companion plugin reason={reason}");
         }
         record_connection(&mut backoff, lasted);
         if state.status() == Status::Connected {
@@ -462,6 +463,47 @@ struct ConnectionEnd {
     welcomed_at: Option<Instant>,
     /// The `error` the plugin closed it with, if any.
     error: Option<ErrorCode>,
+    /// Why it ended, as one short closed value for the log. `None` only for a connection that
+    /// never opened.
+    reason: Option<CloseReason>,
+}
+
+/// Why a connection ended. Its `Display` is the `reason=` of the disconnection line: a closed
+/// vocabulary, with no token, nonce, name or path in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CloseReason {
+    /// The plugin closed the socket without an `error`.
+    Eof,
+    /// A read or a write on the socket failed.
+    Io(ErrorKind),
+    /// No `welcome`, or no answer to the live negotiation, in time.
+    Timeout,
+    /// The plugin sent an `error` and closed it.
+    ServerCode(String),
+    /// The addon closed it: unload or the game exiting.
+    Shutdown,
+    /// The addon gave the session up on its own (sequence exhausted, live lines refused).
+    SessionEnded,
+}
+
+impl std::fmt::Display for CloseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Eof => f.write_str("eof"),
+            Self::Io(kind) => write!(f, "io_error({kind:?})"),
+            Self::Timeout => f.write_str("timeout"),
+            Self::ServerCode(code) => write!(f, "server_code({code})"),
+            Self::Shutdown => f.write_str("shutdown"),
+            Self::SessionEnded => f.write_str("session_ended"),
+        }
+    }
+}
+
+impl ConnectionEnd {
+    fn because(mut self, reason: CloseReason) -> Self {
+        self.reason = Some(reason);
+        self
+    }
 }
 
 /// Runs one connection until it ends, for any reason: the plugin closes it (with or without an
@@ -477,8 +519,12 @@ fn serve(
 ) -> ConnectionEnd {
     let mut end = ConnectionEnd::default();
     let _ = stream.set_nodelay(true);
-    if stream.set_write_timeout(Some(READ_POLL_INTERVAL)).is_err() || stream.write_all(hello.as_bytes()).is_err() || stream.set_read_timeout(Some(READ_POLL_INTERVAL)).is_err() {
-        return end;
+    let setup = stream
+        .set_write_timeout(Some(READ_POLL_INTERVAL))
+        .and_then(|()| stream.write_all(hello.as_bytes()))
+        .and_then(|()| stream.set_read_timeout(Some(READ_POLL_INTERVAL)));
+    if let Err(error) = setup {
+        return end.because(CloseReason::Io(error.kind()));
     }
     let started = Instant::now();
     let mut framer = LineFramer::new();
@@ -495,15 +541,16 @@ fn serve(
                 }
             }
             let _ = stream.shutdown(Shutdown::Both);
-            return end;
+            return end.because(CloseReason::Shutdown);
         }
 
         match stream.read(&mut buffer) {
-            Ok(0) => return end,
+            Ok(0) => return end.because(CloseReason::Eof),
             Ok(read) => {
                 let mut outgoing = Vec::new();
                 for line in framer.push(&buffer[..read]) {
                     if let Some(error) = handle_line(line, &mut session, state, host, &mut outgoing) {
+                        end.reason = Some(CloseReason::ServerCode(error.as_str().to_string()));
                         end.error = Some(error);
                         return end;
                     }
@@ -511,13 +558,13 @@ fn serve(
                 // The acks go out before the next context or heartbeat, in the order they took
                 // their `seq`.
                 for line in outgoing {
-                    if stream.write_all(line.as_bytes()).is_err() {
-                        return end;
+                    if let Err(error) = stream.write_all(line.as_bytes()) {
+                        return end.because(CloseReason::Io(error.kind()));
                     }
                 }
             }
             Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(_) => return end,
+            Err(error) => return end.because(CloseReason::Io(error.kind())),
         }
 
         match session.as_mut() {
@@ -525,14 +572,15 @@ fn serve(
                 end.welcomed_at.get_or_insert_with(Instant::now);
                 if session.next_seq > crate::live::MAX_SAFE || session.live.timed_out(Instant::now()) {
                     state.set_live_status(crate::live::LiveStatus::Unavailable);
-                    return end;
+                    let reason = if session.next_seq > crate::live::MAX_SAFE { CloseReason::SessionEnded } else { CloseReason::Timeout };
+                    return end.because(reason);
                 }
                 let reading = host.read_game();
                 let now = Instant::now();
                 let context = tracker.observe(now, reading.is_gameplay, reading.mumble.as_ref());
                 let contexts_sent = session.contexts_sent;
                 if let Some(line) = session.next_outgoing(now, &context) {
-                    if stream.write_all(line.as_bytes()).is_err() { return end; }
+                    if let Err(error) = stream.write_all(line.as_bytes()) { return end.because(CloseReason::Io(error.kind())); }
                 }
                 // A `context` line went out: the game context is not the one the last line of
                 // this session said (a change of map or character seen between two cycles, or
@@ -574,7 +622,7 @@ fn serve(
                                 // and the panel would take them, dated with this cycle, for a
                                 // reading of the one it has, and for its highest of the session.
                                 if let Some(line) = session.next_outgoing(captured_at, &after) {
-                                    if stream.write_all(line.as_bytes()).is_err() { return end; }
+                                    if let Err(error) = stream.write_all(line.as_bytes()) { return end.because(CloseReason::Io(error.kind())); }
                                 }
                             } else {
                                 // Only now: the context was the same before and after the cycle.
@@ -588,15 +636,18 @@ fn serve(
                     }
                 }
                 state.set_live_status(session.live.status);
-                let Some(lines) = session.live_lines(frames, Instant::now()) else { return end; };
+                let Some(lines) = session.live_lines(frames, Instant::now()) else { return end.because(CloseReason::SessionEnded); };
                 let sending_started = Instant::now();
                 for line in lines {
-                    if sending_started.elapsed() >= crate::live::RESPONSE_TIMEOUT || stream.write_all(line.as_bytes()).is_err() { return end; }
+                    if sending_started.elapsed() >= crate::live::RESPONSE_TIMEOUT {
+                        return end.because(CloseReason::Timeout);
+                    }
+                    if let Err(error) = stream.write_all(line.as_bytes()) { return end.because(CloseReason::Io(error.kind())); }
                 }
             }
             None if started.elapsed() > WELCOME_TIMEOUT => {
                 log::warn!("no welcome from the plugin within {} s; reconnecting", WELCOME_TIMEOUT.as_secs());
-                return end;
+                return end.because(CloseReason::Timeout);
             }
             None => {}
         }
@@ -713,6 +764,15 @@ mod tests {
 
     fn gameplay(map_id: u32) -> GameContext {
         GameContext { state: GameState::Gameplay, map_id: Some(map_id), character: Some("Astra Uno".into()) }
+    }
+
+    #[test]
+    fn a_close_reason_reads_as_one_short_closed_value() {
+        assert_eq!(CloseReason::Eof.to_string(), "eof");
+        assert_eq!(CloseReason::Io(ErrorKind::ConnectionReset).to_string(), "io_error(ConnectionReset)");
+        assert_eq!(CloseReason::Timeout.to_string(), "timeout");
+        assert_eq!(CloseReason::ServerCode("auth_rejected".into()).to_string(), "server_code(auth_rejected)");
+        assert_eq!(CloseReason::Shutdown.to_string(), "shutdown");
     }
 
     #[test]
