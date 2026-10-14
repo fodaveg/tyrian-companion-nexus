@@ -257,7 +257,8 @@ impl Session {
     /// Serialize an entire bounded batch before advancing the shared TCP sequence.
     /// A framing/numbering failure sends none of the batch.
     fn live_lines(&mut self, frames: Vec<crate::live::Frame>, now: Instant) -> Option<Vec<String>> {
-        if frames.len() > 82 { return None; }
+        // begin + at most 512 row chunks + end: the plugin's LIVE_INGAME_MAX_PARTS.
+        if frames.len() > 2 + 512 { return None; }
         let mut lines = Vec::with_capacity(frames.len());
         let mut bytes = 0;
         for (offset, frame) in frames.into_iter().enumerate() {
@@ -868,5 +869,27 @@ mod tests {
         session.next_outgoing(start, &gameplay(50)).unwrap();
         assert_eq!(session.next_outgoing(start + Duration::from_millis(50), &gameplay(50)), None);
         assert!(session.next_outgoing(start + MIN_HEARTBEAT_INTERVAL, &gameplay(50)).is_some());
+    }
+
+    #[test]
+    fn a_sample_of_640_objects_and_110_currencies_goes_out_whole() {
+        use crate::inventory::InventorySnapshot;
+        use crate::live::snapshot_frames;
+        use crate::wallet::WalletSnapshot;
+        let start = Instant::now();
+        let mut session = Session::new(welcome(5000), start);
+        let snapshot = InventorySnapshot {
+            owner: (1, 2),
+            quantities: (1..=640u32).map(|id| (id, 1)).collect(),
+            unknown: 0,
+            positions: 640,
+            free_slots: None,
+            wallet: WalletSnapshot::checked((3, 4), (1..=110u32).map(|id| (id, 1)).collect()),
+        };
+        let frames = snapshot_frames("AgICAgICAgICAgICAgICAg", 0, 0, 0, &snapshot).unwrap();
+        assert!(frames.len() > 82, "the sample must exceed the old cap: {}", frames.len());
+        let count = frames.len();
+        let lines = session.live_lines(frames, start).expect("the whole sample must be framed");
+        assert_eq!(lines.len(), count);
     }
 }
