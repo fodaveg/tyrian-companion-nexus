@@ -198,6 +198,13 @@ client and the readers, the first 12 hex digits of the DLL's SHA-256 and the exe
 None of them carries a path, name, token or nonce. It needs the plugin 0.6.57 or later; the
 protocol does not change.
 
+Version 0.8.11 sends the Magic Find the addon reads in the game, buffs included, to a plugin
+that asks for it (`mf1`), so the plugin's «En vivo» panel can show it instead of the account's:
+the total in whole points, or nothing when the reader has no figure, never a partial one. It
+goes out when the figure changes, again every minute, at most once every 5 seconds, and no
+name, account or map goes with it. A plugin that does not announce `mf1` (0.6.58 and earlier)
+gets nothing new and works as before; see "Magic Find to the plugin (`mf1`, since 0.8.11)".
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
