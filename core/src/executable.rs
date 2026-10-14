@@ -77,7 +77,55 @@ pub enum Step<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Build {
     Certified,
-    Other,
+    /// Another build. Its digest when it was decided by hashing the file, `None` when it was
+    /// decided by size alone, before a byte was read.
+    Other(Option<[u8; 32]>),
+}
+
+/// The first 12 hex digits of a SHA-256: enough to tell one binary from another in a log line.
+pub fn short_digest(digest: &[u8; 32]) -> String {
+    hex(digest)[..12].to_string()
+}
+
+/// A size in MiB with one decimal, as the log writes it.
+fn mib(bytes: u64) -> String {
+    let tenths = bytes.saturating_mul(10) / (1024 * 1024);
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+/// The log line for an executable the hash decided: which build, the first 12 hex digits of its
+/// SHA-256, its size in MiB and how long the hash took. No path and no name of the file.
+pub fn decided_line(build: Build, bytes: u64, took: Duration) -> String {
+    let (which, digest) = match build {
+        Build::Certified => ("certified", BUILD_SHA256[..12].to_string()),
+        Build::Other(Some(digest)) => ("other build", short_digest(&digest)),
+        Build::Other(None) => return size_line(bytes),
+    };
+    format!("game executable: {which}, sha256 {digest}, {} MiB, hashed in {} ms", mib(bytes), took.as_millis())
+}
+
+/// The log line for the addon's own DLL: its version label and what the file really is, by the
+/// first 12 hex digits of its SHA-256, so that a development binary carrying a release's label
+/// can be told apart. No path.
+pub fn addon_line(version: &str, digest: &[u8; 32], bytes: u64, took: Duration) -> String {
+    format!(
+        "addon build: v{version}, sha256 {}, {} MiB, hashed in {} ms",
+        short_digest(digest),
+        mib(bytes),
+        took.as_millis()
+    )
+}
+
+/// The log line for an executable decided by its size alone: it was not hashed, so there is no
+/// digest to give.
+pub fn size_line(bytes: u64) -> String {
+    format!("game executable: other build by size, {} MiB, not hashed", mib(bytes))
+}
+
+/// The log line for a verification the system failed: the kind of the first failure of this load
+/// and how many there have been.
+pub fn failure_line(first: &str, count: u32) -> String {
+    format!("game executable: verification failed, first failure {first}, {count} so far")
 }
 
 /// What tells the file the hash began on from another one in its place: its size and when it
@@ -115,7 +163,7 @@ impl<F: HashedFile> Hashing<F> {
     pub fn start(mut file: F) -> Result<Self, Step<Build>> {
         let Some(before) = file.stamp() else { return Err(Step::Failed) };
         if !size_in_range(before.len) {
-            return Err(Step::Decided(Build::Other));
+            return Err(Step::Decided(Build::Other(None)));
         }
         Ok(Self { file, before, hashed: 0 })
     }
@@ -147,7 +195,7 @@ impl<F: HashedFile> Hashing<F> {
         }
         match self.file.finish() {
             Some(digest) if hex(&digest) == BUILD_SHA256 => Step::Decided(Build::Certified),
-            Some(_) => Step::Decided(Build::Other),
+            Some(digest) => Step::Decided(Build::Other(Some(digest))),
             None => Step::Failed,
         }
     }
@@ -336,7 +384,7 @@ mod tests {
             file.len = len;
             // Even a hash that would say "certified": it is never asked.
             file.certified = true;
-            assert!(matches!(Hashing::start(file), Err(Step::Decided(Build::Other))), "{len}");
+            assert!(matches!(Hashing::start(file), Err(Step::Decided(Build::Other(None)))), "{len}");
         }
         // The largest that is hashed is hashed.
         let mut largest = File::of(contents(10));
@@ -346,7 +394,11 @@ mod tests {
 
     #[test]
     fn the_digest_decides_which_build_it_is() {
-        assert_eq!(whole(File::of(contents(12_345))), Step::Decided(Build::Other));
+        // Another build carries the digest that said so, for the log.
+        assert_eq!(
+            whole(File::of(contents(12_345))),
+            Step::Decided(Build::Other(Some(crate::sha256::sha256(&contents(12_345)))))
+        );
         let mut certified = File::of(contents(12_345));
         certified.certified = true;
         assert_eq!(whole(certified), Step::Decided(Build::Certified));
@@ -375,7 +427,7 @@ mod tests {
         };
         // 41 reads of 1000 bytes and the one that finds the end: fourteen slices of three.
         assert_eq!((slices, hashing.hashed()), (14, 40_500));
-        assert_eq!(outcome, Step::Decided(Build::Other));
+        assert_eq!(outcome, Step::Decided(Build::Other(Some(crate::sha256::sha256(&data)))));
         assert_eq!(hashing.file.fed, data, "every byte once, in order");
         assert_eq!(hashing.file.reads, 42);
         // The same digest as in one go.
@@ -404,7 +456,33 @@ mod tests {
         }
         assert_eq!((hashing.hashed(), hashing.file.reads), (0, 0));
         // And it is still good for the rest.
-        assert_eq!(hashing.advance(|| false), Step::Decided(Build::Other));
+        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Other(Some(_)))));
+    }
+
+    /// The lines say which build, 12 hex digits, MiB and time; by size alone there is no digest.
+    /// None carries a path or a name: only what the arguments are.
+    #[test]
+    fn the_executable_lines_give_the_build_a_short_digest_the_size_and_the_time() {
+        let digest = crate::sha256::sha256(b"abc");
+        assert_eq!(short_digest(&digest), "ba7816bf8f01");
+        let ninety_mib = 90 * 1024 * 1024 + 512 * 1024;
+        assert_eq!(
+            decided_line(Build::Other(Some(digest)), ninety_mib, Duration::from_millis(4120)),
+            "game executable: other build, sha256 ba7816bf8f01, 90.5 MiB, hashed in 4120 ms"
+        );
+        assert_eq!(
+            decided_line(Build::Certified, 4_324_864, Duration::from_millis(37)),
+            format!("game executable: certified, sha256 {}, 4.1 MiB, hashed in 37 ms", &BUILD_SHA256[..12])
+        );
+        // Decided by size: no digest and no time, whatever the caller passes.
+        let by_size = "game executable: other build by size, 0.0 MiB, not hashed";
+        assert_eq!(decided_line(Build::Other(None), 0, Duration::from_secs(9)), by_size);
+        assert_eq!(size_line(MAX_BYTES + 1), "game executable: other build by size, 128.0 MiB, not hashed");
+        assert_eq!(
+            addon_line("0.8.8", &digest, 2 * 1024 * 1024 + 300_000, Duration::from_millis(9)),
+            "addon build: v0.8.8, sha256 ba7816bf8f01, 2.2 MiB, hashed in 9 ms"
+        );
+        assert_eq!(failure_line("open", 3), "game executable: verification failed, first failure open, 3 so far");
     }
 
     /// What the system fails to do is not an answer about the file: not even with a hash

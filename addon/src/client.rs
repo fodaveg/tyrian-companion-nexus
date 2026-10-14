@@ -95,6 +95,11 @@ impl Host for NexusHost {
         watch.is_exiting()
     }
 
+    /// Hashes this DLL for the log, on the connection thread and not in `load`.
+    fn started(&self, client_version: &str) {
+        crate::log_own_build(client_version);
+    }
+
     fn open_app(&self, app: LaunchApp) -> ObsidianLaunchOutcome {
         obsidian_launch::open_app(app)
     }

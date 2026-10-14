@@ -143,6 +143,10 @@ pub trait Host: Send + 'static {
     /// evidence that allows a `bye` with `game_exit`; it can go back to `false` after a cancelled
     /// close, and the loop then connects again.
     fn game_exiting(&self) -> bool;
+    /// Called once, on the connection thread, as the loop starts and before anything else: the
+    /// place for work the load itself must not do, such as hashing the addon's own file for the
+    /// log. A host with nothing to do at that point does nothing.
+    fn started(&self, _client_version: &str) {}
     /// Tries to open or focus `app` (the player's choice, Obsidian or Hebra). Called at most
     /// once per load, only when
     /// [`obsidian_launch::should_launch`](crate::obsidian_launch::should_launch) says so (see
@@ -330,8 +334,13 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
     let mut halted_at: Option<u64> = None;
     // Whether the first-connect-of-this-load decision has already run, whatever it decided.
     let mut obsidian_launch_decided = false;
+    let mut stats = Stats::new(Instant::now());
+    host.started(&config.client_version);
 
     while !stop.load(Ordering::Relaxed) {
+        if let Some(line) = stats.tick(Instant::now(), state.live_status()) {
+            log::info!("{line}");
+        }
         if host.game_exiting() {
             // The `bye game_exit` has gone out (or there was no connection to send it on).
             // Reconnecting now would only bring the presence back for the last milliseconds.
@@ -377,9 +386,16 @@ pub fn run(state: &SharedState, host: &dyn Host, config: &ClientConfig, stop: &A
             }
         }
         let end = match connect_result {
-            Ok(stream) => serve(stream, &hello, state, host, &mut tracker, stop),
-            Err(_) => ConnectionEnd::default(),
+            Ok(stream) => {
+                stats.connections = stats.connections.saturating_add(1);
+                serve(stream, &hello, state, host, &mut tracker, &mut stats, stop)
+            }
+            Err(_) => {
+                stats.connect_failures = stats.connect_failures.saturating_add(1);
+                ConnectionEnd::default()
+            }
         };
+        stats.end_connection(end.reason.as_ref());
         // How long it lived after its `welcome`, if it got one.
         let lasted = end.welcomed_at.map(|welcomed_at| welcomed_at.elapsed());
         state.disconnect_farming();
@@ -500,6 +516,103 @@ impl std::fmt::Display for CloseReason {
     }
 }
 
+impl CloseReason {
+    /// The position of this reason's kind in [`CLOSE_KINDS`], whatever its detail.
+    fn kind(&self) -> usize {
+        match self {
+            Self::Eof => 0,
+            Self::Io(_) => 1,
+            Self::Timeout => 2,
+            Self::ServerCode(_) => 3,
+            Self::Shutdown => 4,
+            Self::SessionEnded => 5,
+        }
+    }
+}
+
+/// The kinds of [`CloseReason`], in the order the counters line writes them.
+const CLOSE_KINDS: [&str; 6] = ["eof", "io_error", "timeout", "server_code", "shutdown", "session_ended"];
+
+/// How often the counters line is written. Checked on the passes the loop makes anyway: there
+/// is no thread or timer for it.
+const STATS_INTERVAL: Duration = Duration::from_secs(600);
+
+/// What this load's client loop has done, for one log line every [`STATS_INTERVAL`]. Counts
+/// only: nothing of the connections' content, no name, path, token or nonce.
+#[derive(Debug)]
+struct Stats {
+    next_due: Instant,
+    connections: u64,
+    connect_failures: u64,
+    closed: [u64; CLOSE_KINDS.len()],
+    /// The samples of the connections already over.
+    live_done: crate::live::LiveCounts,
+    /// The samples of the connection going on.
+    live_now: crate::live::LiveCounts,
+}
+
+impl Stats {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_due: now + STATS_INTERVAL,
+            connections: 0,
+            connect_failures: 0,
+            closed: [0; CLOSE_KINDS.len()],
+            live_done: crate::live::LiveCounts::default(),
+            live_now: crate::live::LiveCounts::default(),
+        }
+    }
+
+    /// A connection ended: counts how, and adds its samples to the totals.
+    fn end_connection(&mut self, reason: Option<&CloseReason>) {
+        if let Some(reason) = reason {
+            let slot = &mut self.closed[reason.kind()];
+            *slot = slot.saturating_add(1);
+        }
+        self.live_done.sent = self.live_done.sent.saturating_add(self.live_now.sent);
+        self.live_done.confirmed = self.live_done.confirmed.saturating_add(self.live_now.confirmed);
+        self.live_done.rejected = self.live_done.rejected.saturating_add(self.live_now.rejected);
+        self.live_now = crate::live::LiveCounts::default();
+    }
+
+    /// The line to log when [`STATS_INTERVAL`] has passed since the last one (or since the
+    /// start), and the next is then due a whole interval later.
+    fn tick(&mut self, now: Instant, live: crate::live::LiveStatus) -> Option<String> {
+        if now < self.next_due {
+            return None;
+        }
+        self.next_due = now + STATS_INTERVAL;
+        Some(self.line(live))
+    }
+
+    fn line(&self, live: crate::live::LiveStatus) -> String {
+        let closed: Vec<String> =
+            CLOSE_KINDS.iter().zip(self.closed).map(|(kind, count)| format!("{kind} {count}")).collect();
+        format!(
+            "stats: connections {} (connect failures {}), closed [{}]; samples sent {}, confirmed {}, rejected {}; live {}",
+            self.connections,
+            self.connect_failures,
+            closed.join(", "),
+            self.live_done.sent.saturating_add(self.live_now.sent),
+            self.live_done.confirmed.saturating_add(self.live_now.confirmed),
+            self.live_done.rejected.saturating_add(self.live_now.rejected),
+            live.label()
+        )
+    }
+}
+
+/// The line logged when the `welcome` is accepted: the protocol version the plugin spoke (`v`
+/// of the line, `None` if it did not carry one), the heartbeat it asked for and whether the live
+/// channel can be negotiated on it. The farming, price and live capabilities come as lines of
+/// their own after it and are logged as they arrive.
+fn welcome_line(protocol: Option<u64>, heartbeat_ms: u64, live_allowed: bool) -> String {
+    let protocol = protocol.map_or_else(|| "unknown".to_string(), |v| format!("v{v}"));
+    format!(
+        "welcome: protocol {protocol}, heartbeat {heartbeat_ms} ms, live {}",
+        if live_allowed { "negotiable" } else { "not offered" }
+    )
+}
+
 impl ConnectionEnd {
     fn because(mut self, reason: CloseReason) -> Self {
         self.reason = Some(reason);
@@ -516,6 +629,7 @@ fn serve(
     state: &SharedState,
     host: &dyn Host,
     tracker: &mut ContextTracker,
+    stats: &mut Stats,
     stop: &AtomicBool,
 ) -> ConnectionEnd {
     let mut end = ConnectionEnd::default();
@@ -533,6 +647,9 @@ fn serve(
     let mut buffer = [0u8; 1024];
 
     loop {
+        if let Some(line) = stats.tick(Instant::now(), state.live_status()) {
+            log::info!("{line}");
+        }
         let exiting = host.game_exiting();
         if stop.load(Ordering::Relaxed) || exiting {
             if let Some(session) = session.as_mut() {
@@ -550,7 +667,11 @@ fn serve(
             Ok(read) => {
                 let mut outgoing = Vec::new();
                 for line in framer.push(&buffer[..read]) {
-                    if let Some(error) = handle_line(line, &mut session, state, host, &mut outgoing) {
+                    let error = handle_line(line, &mut session, state, host, &mut outgoing);
+                    if let Some(session) = session.as_ref() {
+                        stats.live_now = session.live.counts();
+                    }
+                    if let Some(error) = error {
                         end.reason = Some(CloseReason::ServerCode(error.as_str().to_string()));
                         end.error = Some(error);
                         return end;
@@ -637,6 +758,7 @@ fn serve(
                     }
                 }
                 state.set_live_status(session.live.status);
+                stats.live_now = session.live.counts();
                 let Some(lines) = session.live_lines(frames, Instant::now()) else { return end.because(CloseReason::SessionEnded); };
                 let sending_started = Instant::now();
                 for line in lines {
@@ -680,7 +802,9 @@ fn handle_line(
                 let mut new = Session::new(welcome, Instant::now());
                 new.live.set_conflict_retry(state.live_conflict_retry());
                 // Welcome's public DTO stays backward compatible; live is v3-only on the wire.
-                new.live_allowed = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|r|r["v"].as_u64()) == Some(3);
+                let protocol = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|r| r["v"].as_u64());
+                new.live_allowed = protocol == Some(3);
+                log::info!("{}", welcome_line(protocol, new.heartbeat_interval.as_millis() as u64, new.live_allowed));
                 *session = Some(new);
                 state.set_status(Status::Connected);
                 log::info!("connected to the Tyrian Companion plugin on 127.0.0.1:{}", state.port());
@@ -701,7 +825,9 @@ fn handle_line(
         }
         ServerLine::FarmingCapability(nonce) => {
             let Some(session) = session.as_mut() else { return None };
-            if state.enable_farming(&nonce) {
+            let accepted = state.enable_farming(&nonce);
+            log::info!("capability: farming offered, accepted {}", if accepted { "yes" } else { "no" });
+            if accepted {
                 if let Some(line) = session.subscribe_farming(Instant::now()) {
                     outgoing.push(line);
                 }
@@ -712,7 +838,9 @@ fn handle_line(
         }
         ServerLine::PriceCapability(nonce) => {
             let Some(session) = session.as_mut() else { return None };
-            if state.enable_price(&nonce) {
+            let accepted = state.enable_price(&nonce);
+            log::info!("capability: price offered, accepted {}", if accepted { "yes" } else { "no" });
+            if accepted {
                 if let Some(line) = session.subscribe_price(Instant::now()) {
                     outgoing.push(line);
                 }
@@ -723,6 +851,9 @@ fn handle_line(
         }
         ServerLine::Live(reply) => {
             let Some(session) = session.as_mut() else { return None; };
+            if matches!(reply, crate::live::Reply::Capability { .. }) {
+                log::info!("capability: live offered, negotiable {}", if session.live_allowed { "yes" } else { "no" });
+            }
             if session.live_allowed && !session.live.accept(reply, &session.nonce, Instant::now()) {
                 state.set_live_status(session.live.status);
                 return Some(ErrorCode::Unknown("live_storage_unavailable".into()));
@@ -774,6 +905,42 @@ mod tests {
         assert_eq!(CloseReason::Timeout.to_string(), "timeout");
         assert_eq!(CloseReason::ServerCode("auth_rejected".into()).to_string(), "server_code(auth_rejected)");
         assert_eq!(CloseReason::Shutdown.to_string(), "shutdown");
+    }
+
+    #[test]
+    fn the_welcome_line_says_the_protocol_the_heartbeat_and_whether_live_is_on_offer() {
+        assert_eq!(welcome_line(Some(3), 5000, true), "welcome: protocol v3, heartbeat 5000 ms, live negotiable");
+        assert_eq!(welcome_line(Some(2), 5000, false), "welcome: protocol v2, heartbeat 5000 ms, live not offered");
+        assert_eq!(welcome_line(None, 100, false), "welcome: protocol unknown, heartbeat 100 ms, live not offered");
+    }
+
+    #[test]
+    fn the_counters_line_is_due_every_ten_minutes_and_counts_each_way_a_connection_ended() {
+        use crate::live::{LiveCounts, LiveStatus};
+        let start = Instant::now();
+        let mut stats = Stats::new(start);
+        assert_eq!(stats.tick(start + Duration::from_secs(599), LiveStatus::Waiting), None);
+        assert_eq!(
+            stats.tick(start + Duration::from_secs(600), LiveStatus::NotNegotiated).as_deref(),
+            Some("stats: connections 0 (connect failures 0), closed [eof 0, io_error 0, timeout 0, server_code 0, shutdown 0, session_ended 0]; samples sent 0, confirmed 0, rejected 0; live not_negotiated")
+        );
+        // The next one is a whole interval after the one just written.
+        assert_eq!(stats.tick(start + Duration::from_secs(1199), LiveStatus::Waiting), None);
+        stats.connections = 3;
+        stats.connect_failures = 7;
+        stats.live_now = LiveCounts { sent: 10, confirmed: 9, rejected: 0 };
+        stats.end_connection(Some(&CloseReason::Io(ErrorKind::ConnectionReset)));
+        stats.end_connection(Some(&CloseReason::ServerCode("auth_rejected".into())));
+        stats.end_connection(Some(&CloseReason::Eof));
+        stats.end_connection(Some(&CloseReason::Eof));
+        stats.end_connection(None);
+        stats.live_now = LiveCounts { sent: 4, confirmed: 2, rejected: 1 };
+        let line = stats.tick(start + Duration::from_secs(1200), LiveStatus::Measuring).unwrap();
+        assert_eq!(
+            line,
+            "stats: connections 3 (connect failures 7), closed [eof 2, io_error 1, timeout 0, server_code 1, shutdown 0, session_ended 0]; samples sent 14, confirmed 11, rejected 1; live measuring"
+        );
+        assert!(!line.contains('/') && !line.contains('\\'), "no path in it: {line}");
     }
 
     #[test]

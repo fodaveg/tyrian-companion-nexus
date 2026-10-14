@@ -134,6 +134,69 @@ fn load() {
     }
 }
 
+/// Writes one line with the first 12 hex digits of this DLL's SHA-256 and the version it
+/// claims, so a development binary with a release's label can be told apart (13 October 2026: a
+/// build labelled v0.8.8 was not). Called by the connection thread as it starts, never by `load`
+/// or a render callback: it reads the whole file. A failure is one closed word in the log and
+/// nothing else; no path is ever written.
+#[cfg(windows)]
+pub(crate) fn log_own_build(version: &str) {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+
+    /// A file larger than this is not a DLL of this addon; it is not read.
+    const MAX_DLL_BYTES: u64 = 64 * 1024 * 1024;
+
+    let started = std::time::Instant::now();
+    let mut module = HMODULE::default();
+    // Safety: asks the loader which module holds this very function; the refcount is not
+    // touched, so nothing has to be released.
+    let found = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(log_own_build as usize as *const u16),
+            &mut module,
+        )
+    };
+    if found.is_err() {
+        log::warn!("addon build: could not hash the DLL (module)");
+        return;
+    }
+    let mut path = [0u16; 32768];
+    // Safety: OS module metadata, copied into a buffer of this size.
+    let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+    if length == 0 || length >= path.len() {
+        log::warn!("addon build: could not hash the DLL (path)");
+        return;
+    }
+    let path = OsString::from_wide(&path[..length]);
+    let bytes = match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.len() <= MAX_DLL_BYTES => std::fs::read(&path),
+        _ => Err(std::io::ErrorKind::InvalidData.into()),
+    };
+    match bytes {
+        Ok(bytes) => {
+            let digest = tyrian_companion_nexus_core::sha256::sha256(&bytes);
+            log::info!(
+                "{}",
+                tyrian_companion_nexus_core::executable::addon_line(
+                    version,
+                    &digest,
+                    bytes.len() as u64,
+                    started.elapsed()
+                )
+            );
+        }
+        Err(_) => log::warn!("addon build: could not hash the DLL (read)"),
+    }
+}
+
 #[cfg(windows)]
 fn unload() {
     log::info!("Tyrian Companion addon unloading");

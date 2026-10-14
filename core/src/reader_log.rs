@@ -23,6 +23,8 @@ use crate::passive::Uncovered;
 /// on every pass would otherwise write a line a second for as long as the game is open; past
 /// this many it says so once and stops, and the counters go on.
 pub const MAX_CHANGES: u32 = 256;
+/// How often the counters of both readers are written to the log.
+pub const TALLY_INTERVAL: Duration = Duration::from_secs(600);
 /// How many different refused records are logged in one load.
 pub const MAX_RECORDS: usize = 32;
 
@@ -172,6 +174,8 @@ pub struct ReaderLog {
     pub magic_find: Track,
     pub bags: Track,
     records: Vec<RecordKey>,
+    /// When the next counters line is due; set by the first cycle.
+    tally_due: Option<Instant>,
 }
 impl Default for ReaderLog {
     fn default() -> Self {
@@ -180,7 +184,18 @@ impl Default for ReaderLog {
 }
 impl ReaderLog {
     pub const fn new() -> Self {
-        Self { magic_find: Track::new("Magic Find"), bags: Track::new("Bags"), records: Vec::new() }
+        Self { magic_find: Track::new("Magic Find"), bags: Track::new("Bags"), records: Vec::new(), tally_due: None }
+    }
+
+    /// The counters of both readers as one line, every [`TALLY_INTERVAL`] counted from the first
+    /// cycle: the same figures the Options window shows, for a session nobody was watching.
+    fn tally_line(&mut self, now: Instant) -> Option<String> {
+        let due = *self.tally_due.get_or_insert(now + TALLY_INTERVAL);
+        if now < due {
+            return None;
+        }
+        self.tally_due = Some(now + TALLY_INTERVAL);
+        Some(format!("reader: tally: {}; {}", self.bags.tally(), self.magic_find.tally()))
     }
 
     /// The line for a record a Magic Find pass refused, the first time that record is seen and
@@ -218,6 +233,7 @@ impl ReaderLog {
         if magic_find == MagicFindCoverage::Unavailable(Uncovered::Unsupported) {
             lines.extend(trace.refused.as_ref().and_then(|record| self.refused(record)));
         }
+        lines.extend(self.tally_line(now));
         lines
     }
 }
@@ -503,6 +519,24 @@ mod tests {
         );
         assert_eq!(log.bags.tally(), "Bags passes: 63 read; 1 not read");
         assert_eq!(log.magic_find.tally(), "Magic Find passes: 60 read; 1 not read; 1 Bounds; 2 Unsupported");
+    }
+
+    #[test]
+    fn the_counters_of_both_readers_are_logged_every_ten_minutes_from_the_first_cycle() {
+        let start = Instant::now();
+        let mut log = ReaderLog::new();
+        let slots = BagSlots { capacity: 414, occupied: 313, free: 101, bag_slots: 16, bags: 16 };
+        let bag_cost = (6012, 55, Some(Duration::from_micros(310)));
+        let mut cycle = |at: Instant| log.cycle(at, None, BagCoverage::Read(slots), bag_cost, read(), SPENT, &trace());
+        assert_eq!(cycle(start).len(), 2, "the first cycle writes its two first-pass lines and no counters");
+        assert!(cycle(start + Duration::from_secs(599)).is_empty());
+        assert_eq!(
+            cycle(start + Duration::from_secs(600)),
+            ["reader: tally: Bags passes: 3 read; 0 not read; Magic Find passes: 3 read; 0 not read"]
+        );
+        // The next is due a whole interval later.
+        assert!(cycle(start + Duration::from_secs(1199)).is_empty());
+        assert_eq!(cycle(start + Duration::from_secs(1200)).len(), 1);
     }
 
     #[test]

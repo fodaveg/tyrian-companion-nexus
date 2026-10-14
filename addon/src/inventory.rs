@@ -250,10 +250,31 @@ impl HashedFile for Executable {
 /// fails after that.
 enum Check {
     Unstarted,
-    Hashing(Hashing<Executable>),
+    /// The hash under way and the time its slices have taken so far, for the log line.
+    Hashing(Hashing<Executable>, Duration),
     Certified,
 }
 static CHECK: Mutex<Check> = Mutex::new(Check::Unstarted);
+
+/// The first kind of failure of verifying the executable in this load and how many there have
+/// been. The system's failures are retried [`VERIFY_RETRY`] later, so this is counted and
+/// logged only when the count reaches a power of two, not on every retry.
+static VERIFY_FAILURES: Mutex<(Option<&'static str>, u32)> = Mutex::new((None, 0));
+
+/// Counts a failure of `kind` (`module`, `open`, `stat`, `hash` or `image`) and says it in the
+/// log at the 1st, 2nd, 4th, 8th... one. Returns what `verify` returns for it.
+fn verification_failed(kind: &'static str) -> Attempt<Option<NativeReader>, Unverified> {
+    let (first, count) = {
+        let mut failures = VERIFY_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
+        let first = *failures.0.get_or_insert(kind);
+        failures.1 = failures.1.saturating_add(1);
+        (first, failures.1)
+    };
+    if count.is_power_of_two() {
+        log::warn!("{}", executable::failure_line(first, count));
+    }
+    Attempt::Failed(Unverified::Failed)
+}
 
 /// What the Magic Find passes keep between cycles: the content of the applied buffs, read whole
 /// at most every `magic_find::MAX_CONTENT_AGE` and verified by its headers on the passes
@@ -283,7 +304,7 @@ static SEARCH: Mutex<ContextSearch> = Mutex::new(ContextSearch::new());
 pub fn release_executable() {
     discard_cycle();
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
-    if matches!(*check, Check::Hashing(_)) {
+    if matches!(*check, Check::Hashing(..)) {
         *check = Check::Unstarted;
     }
 }
@@ -312,39 +333,52 @@ static READER: Verdict<Option<NativeReader>, Unverified> = Verdict::new(VERIFY_R
 fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<NativeReader>, Unverified> {
     // Safety: OS module metadata; no game function is resolved or called.
     let Ok(module) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else {
-        return Attempt::Failed(Unverified::Failed);
+        return verification_failed("module");
     };
     let mut check = CHECK.lock().unwrap_or_else(|p| p.into_inner());
     if matches!(*check, Check::Unstarted) {
-        let Some(file) = Executable::open(module) else {
-            return Attempt::Failed(Unverified::Failed);
+        let Some(mut file) = Executable::open(module) else {
+            return verification_failed("open");
         };
+        // Only for the log line of a verdict by size: a metadata call, no read of the file.
+        let size = file.stamp().map_or(0, |stamp| stamp.len);
         match Hashing::start(file) {
-            Ok(hashing) => *check = Check::Hashing(hashing),
+            Ok(hashing) => *check = Check::Hashing(hashing, Duration::ZERO),
             // Its size alone: not the certified build, and no byte of it was read.
-            Err(Step::Decided(_)) => return Attempt::Settled(None),
-            Err(_) => return Attempt::Failed(Unverified::Failed),
+            Err(Step::Decided(_)) => {
+                log::info!("{}", executable::size_line(size));
+                return Attempt::Settled(None);
+            }
+            Err(_) => return verification_failed("stat"),
         }
     }
-    if let Check::Hashing(hashing) = &mut *check {
-        let until = Instant::now() + executable::SLICE;
+    if let Check::Hashing(hashing, spent) = &mut *check {
+        let began = Instant::now();
+        let until = began + executable::SLICE;
         let step = hashing.advance(|| interrupted() || Instant::now() >= until);
+        *spent += began.elapsed();
         match step {
             Step::Unfinished => return Attempt::Unfinished(Unverified::Pending),
-            Step::Decided(Build::Certified) => *check = Check::Certified,
-            Step::Decided(Build::Other) => {
-                *check = Check::Unstarted;
-                return Attempt::Settled(None);
+            // The digest is the one the hash already gave: the file is not hashed again.
+            Step::Decided(build) => {
+                log::info!("{}", executable::decided_line(build, hashing.hashed(), *spent));
+                match build {
+                    Build::Certified => *check = Check::Certified,
+                    Build::Other(_) => {
+                        *check = Check::Unstarted;
+                        return Attempt::Settled(None);
+                    }
+                }
             }
             Step::Failed => {
                 *check = Check::Unstarted;
-                return Attempt::Failed(Unverified::Failed);
+                return verification_failed("hash");
             }
         }
     }
     match NativeReader::of_image(module.0 as u64, stop) {
         Step::Decided(reader) => Attempt::Settled(reader),
-        _ => Attempt::Failed(Unverified::Failed),
+        _ => verification_failed("image"),
     }
 }
 

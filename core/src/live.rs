@@ -7,6 +7,7 @@ use crate::wallet::WalletSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -144,6 +145,50 @@ impl LiveStatus {
     pub fn is_sampling(self) -> bool {
         matches!(self, Self::Waiting | Self::Measuring | Self::Partial)
     }
+    /// The status as the log writes it: a closed vocabulary, one word each.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotNegotiated => "not_negotiated",
+            Self::Waiting => "waiting",
+            Self::Measuring => "measuring",
+            Self::Partial => "partial",
+            Self::UnsupportedBuild => "unsupported_build",
+            Self::Unavailable => "unavailable",
+            Self::Conflict => "conflict",
+            Self::StorageUnavailable => "storage_unavailable",
+        }
+    }
+}
+
+/// How many changes of status are logged in one load, all connections together; the same cap the
+/// readers' changes have.
+const MAX_STATUS_LINES: u32 = crate::reader_log::MAX_CHANGES;
+static STATUS_LINES: AtomicU32 = AtomicU32::new(0);
+
+/// The line for a change of status, with the reason that caused it. Reasons are the closed
+/// words of the protocol (`source_conflict`, `unsupported_build`, `not_gameplay`,
+/// `storage_unavailable`, `read_failed`...): no name, path, epoch or nonce goes into one.
+/// `logged` is how many lines were written before this one: past the cap there is none, and
+/// the one that reaches it says there will be no more.
+pub fn status_change_line(from: LiveStatus, to: LiveStatus, reason: &str, logged: u32) -> Option<String> {
+    match logged {
+        n if n < MAX_STATUS_LINES => Some(format!("live: {} -> {} ({reason})", from.label(), to.label())),
+        n if n == MAX_STATUS_LINES => Some(format!(
+            "live: {MAX_STATUS_LINES} status changes logged, no more until the addon is loaded again"
+        )),
+        _ => None,
+    }
+}
+
+/// What a channel has done with its samples; the client loop adds them up across connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveCounts {
+    /// Samples handed to the wire, waiting for their ACK.
+    pub sent: u64,
+    /// Samples the plugin stored.
+    pub confirmed: u64,
+    /// Samples the plugin answered with anything but `stored`.
+    pub rejected: u64,
 }
 
 #[derive(Debug)]
@@ -173,11 +218,26 @@ pub struct Channel {
     conflict_retry: Option<Duration>,
     /// How many epochs this channel has declared with a `live_open`. Local diagnostics only.
     opened: u64,
+    counts: LiveCounts,
     pub status: LiveStatus,
 }
 impl Channel {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Samples sent, confirmed and rejected by this channel. Local diagnostics only.
+    pub fn counts(&self) -> LiveCounts {
+        self.counts
+    }
+    /// Changes the status and, when it is another, writes one line to the log with the reason.
+    fn set_status(&mut self, to: LiveStatus, reason: &str) {
+        let from = std::mem::replace(&mut self.status, to);
+        if from != to {
+            let logged = STATUS_LINES.fetch_add(1, Ordering::Relaxed);
+            if let Some(line) = status_change_line(from, to, reason, logged) {
+                log::info!("{line}");
+            }
+        }
     }
     /// Replace the wait between `live_open` retries after a conflict; `None` restores the default.
     pub fn set_conflict_retry(&mut self, wait: Option<Duration>) {
@@ -199,7 +259,7 @@ impl Channel {
             Reply::Capability { nonce: n } if n == nonce => {
                 self.enabled = true;
                 if self.status == LiveStatus::NotNegotiated {
-                    self.status = LiveStatus::Waiting;
+                    self.set_status(LiveStatus::Waiting, "live_cap");
                 }
             }
             Reply::Ready {
@@ -217,15 +277,17 @@ impl Channel {
                         self.epoch = None;
                         self.next_capture =
                             Some(now + self.conflict_retry.unwrap_or(CONFLICT_RETRY_INTERVAL));
-                        self.status = LiveStatus::Conflict;
+                        self.set_status(LiveStatus::Conflict, "source_conflict");
                     } else {
                         self.blocked = true;
                         self.epoch = None;
-                        self.status = if status == "unsupported_build" {
+                        let to = if status == "unsupported_build" {
                             LiveStatus::UnsupportedBuild
                         } else {
                             LiveStatus::Unavailable
                         };
+                        // `status` is one of the two words `parse_reply` lets through here.
+                        self.set_status(to, &status);
                     }
                 }
             }
@@ -241,28 +303,32 @@ impl Channel {
                     .filter(|e| e.id == epoch && e.cursor == cursor && e.waiting_ack)
                 {
                     if status != "stored" {
-                        self.status = if status == "storage_unavailable" {
+                        self.counts.rejected = self.counts.rejected.saturating_add(1);
+                        let to = if status == "storage_unavailable" {
                             LiveStatus::StorageUnavailable
                         } else {
                             LiveStatus::Conflict
                         };
+                        // `status` is `storage_unavailable` or `not_owner`.
+                        self.set_status(to, &status);
                         return false;
                     }
                     e.waiting_ack = false;
-                    self.status = if e.partial {
-                        LiveStatus::Partial
+                    self.counts.confirmed = self.counts.confirmed.saturating_add(1);
+                    let (to, reason) = if e.partial {
+                        (LiveStatus::Partial, "stored_partial")
                     } else {
-                        LiveStatus::Measuring
+                        (LiveStatus::Measuring, "stored")
                     };
-                    if e.partial {
+                    let (partial, next) = (e.partial, e.cursor.checked_add(1).filter(|next| *next <= MAX_SAFE));
+                    if partial {
                         self.epoch = None;
-                    } else if let Some(next) =
-                        e.cursor.checked_add(1).filter(|next| *next <= MAX_SAFE)
-                    {
+                    } else if let Some(next) = next {
                         e.cursor = next;
                     } else {
                         self.epoch = None;
                     }
+                    self.set_status(to, reason);
                 }
             }
             _ => {}
@@ -311,6 +377,7 @@ impl Channel {
         e.waiting_ack = true;
         e.sent_at = now;
         e.partial = snapshot.unknown != 0;
+        self.counts.sent = self.counts.sent.saturating_add(1);
         Some(frames)
     }
     /// Capture errors invalidate the whole epoch. Unknown quantities preserve known IDs in a
@@ -355,7 +422,7 @@ impl Channel {
                 sent_at: now,
                 partial: false,
             });
-            self.status = LiveStatus::Waiting;
+            self.set_status(LiveStatus::Waiting, "epoch_opened");
             return vec![frame];
         }
         let e = self.epoch.as_mut().unwrap();
@@ -380,6 +447,7 @@ impl Channel {
         e.waiting_ack = true;
         e.sent_at = now;
         e.partial = snapshot.unknown != 0;
+        self.counts.sent = self.counts.sent.saturating_add(1);
         frames
     }
     /// The source has been getting ready to sample for longer than it keeps quiet about
@@ -403,12 +471,13 @@ impl Channel {
         };
         self.epoch = None;
         let epoch = self.last_declared_epoch.as_deref().map(Arc::from);
-        self.status = if error == ReadError::UnsupportedBuild {
+        let to = if error == ReadError::UnsupportedBuild {
             self.blocked = true;
             LiveStatus::UnsupportedBuild
         } else {
             LiveStatus::Unavailable
         };
+        self.set_status(to, reason);
         if self.reason == Some(reason) {
             return vec![];
         }
@@ -427,7 +496,7 @@ impl Channel {
             return vec![];
         }
         self.reason = Some("not_gameplay");
-        self.status = LiveStatus::Unavailable;
+        self.set_status(LiveStatus::Unavailable, "not_gameplay");
         vec![Frame::Status {
             epoch: self.last_declared_epoch.as_deref().map(Arc::from),
             reason: "not_gameplay",
@@ -745,4 +814,53 @@ pub fn frame_line(frame: Frame, nonce: &str, seq: u64) -> Option<String> {
     }
     line.push(b'\n');
     String::from_utf8(line).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_status_change_line_names_both_statuses_and_the_reason() {
+        assert_eq!(
+            status_change_line(LiveStatus::Measuring, LiveStatus::Conflict, "source_conflict", 0).as_deref(),
+            Some("live: measuring -> conflict (source_conflict)")
+        );
+        assert_eq!(
+            status_change_line(LiveStatus::Waiting, LiveStatus::UnsupportedBuild, "unsupported_build", 3).as_deref(),
+            Some("live: waiting -> unsupported_build (unsupported_build)")
+        );
+        assert_eq!(
+            status_change_line(LiveStatus::Measuring, LiveStatus::StorageUnavailable, "storage_unavailable", 3).as_deref(),
+            Some("live: measuring -> storage_unavailable (storage_unavailable)")
+        );
+    }
+
+    #[test]
+    fn status_lines_stop_at_the_cap_with_one_line_that_says_so() {
+        let line = |logged| status_change_line(LiveStatus::Waiting, LiveStatus::Measuring, "stored", logged);
+        assert!(line(MAX_STATUS_LINES - 1).unwrap().starts_with("live: waiting -> measuring"));
+        assert_eq!(
+            line(MAX_STATUS_LINES).as_deref(),
+            Some("live: 256 status changes logged, no more until the addon is loaded again")
+        );
+        assert_eq!(line(MAX_STATUS_LINES + 1), None);
+    }
+
+    #[test]
+    fn every_status_has_a_distinct_one_word_label() {
+        let all = [
+            LiveStatus::NotNegotiated,
+            LiveStatus::Waiting,
+            LiveStatus::Measuring,
+            LiveStatus::Partial,
+            LiveStatus::UnsupportedBuild,
+            LiveStatus::Unavailable,
+            LiveStatus::Conflict,
+            LiveStatus::StorageUnavailable,
+        ];
+        let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label()).collect();
+        assert_eq!(labels.len(), all.len());
+        assert!(labels.iter().all(|l| l.chars().all(|c| c.is_ascii_lowercase() || c == '_')));
+    }
 }
