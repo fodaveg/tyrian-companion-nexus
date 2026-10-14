@@ -59,6 +59,9 @@ fn every_nullable_metric_is_int32_and_nonnegative_except_net() {
     for key in ["elapsed", "observed", "lo", "hi", "age", "slots", "slotAge", "target", "progress", "eta", "mf", "net"] {
         for valid in [Value::Null, json!(0), json!(i32::MAX)] {
             let mut value = frame(); value[key] = valid;
+            // The band is checked for order apart (`a_rate_band_is_ordered_when_it_has_both_ends`).
+            if key == "lo" { value["hi"] = json!(i32::MAX); }
+            if key == "hi" { value["lo"] = json!(0); }
             reading(&value);
         }
         for invalid in [json!(2_147_483_648i64), json!(-2_147_483_649i64), json!(1.5), json!("1"), json!([]), json!({}), json!(true)] {
@@ -70,6 +73,18 @@ fn every_nullable_metric_is_int32_and_nonnegative_except_net() {
     }
     let mut value = frame(); value["net"] = json!(i32::MIN);
     assert_eq!(reading(&value).net, Some(i32::MIN));
+}
+
+#[test]
+fn a_rate_band_is_ordered_when_it_has_both_ends() {
+    for (lo, hi) in [(json!(480), json!(480)), (json!(480), json!(481)), (json!(480), Value::Null), (Value::Null, json!(10)), (Value::Null, Value::Null)] {
+        let mut value = frame(); value["lo"] = lo; value["hi"] = hi;
+        reading(&value);
+    }
+    for (lo, hi) in [(560, 480), (1, 0), (i32::MAX, 0)] {
+        let mut value = frame(); value["lo"] = json!(lo); value["hi"] = json!(hi);
+        assert_discard(&value);
+    }
 }
 
 #[test]

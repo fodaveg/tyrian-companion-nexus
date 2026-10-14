@@ -80,6 +80,8 @@ impl FarmingState {
             && [self.elapsed, self.observed, self.lo, self.hi, self.age, self.slots,
                 self.slot_age, self.target, self.progress, self.eta, self.mf]
                 .iter().all(|number| number.is_none_or(|number| number >= 0))
+            // A band with both ends is ordered: an inverted one would be painted as one number.
+            && !matches!((self.lo, self.hi), (Some(lo), Some(hi)) if lo > hi)
     }
 }
 
