@@ -100,7 +100,8 @@ impl MumbleSnapshot {
 }
 
 /// Keeps what one reading alone cannot tell: when gameplay was last seen, and the last character
-/// name that read cleanly.
+/// name that read cleanly (kept across torn reads only; a name that reads but fails sanitising
+/// clears it).
 #[derive(Debug, Default)]
 pub struct ContextTracker {
     last_gameplay_at: Option<Instant>,
@@ -123,8 +124,11 @@ impl ContextTracker {
     ///   link still holds the last map, and reporting it would claim a map nobody is on.
     pub fn observe(&mut self, now: Instant, is_gameplay: Option<bool>, mumble: Option<&MumbleSnapshot>) -> GameContext {
         let mumble = mumble.filter(|snapshot| snapshot.has_game_data());
-        if let Some(name) = mumble.and_then(|snapshot| snapshot.character.as_deref()).and_then(sanitize_character_name) {
-            self.last_character = Some(name);
+        // A name that did not read at all (a torn copy) keeps the last one. A name that read but is
+        // not acceptable belongs to another character: reporting the one before would attribute
+        // the new character's readings (bags, Magic Find) to it, so it is reported as unknown.
+        if let Some(raw) = mumble.and_then(|snapshot| snapshot.character.as_deref()) {
+            self.last_character = sanitize_character_name(raw);
         }
         let map_id = mumble.and_then(|snapshot| sanitize_map_id(snapshot.map_id));
         let character = mumble.and(self.last_character.clone());
@@ -232,6 +236,19 @@ mod tests {
         assert_eq!(torn.character, None);
         let context = tracker.observe(now, Some(true), Some(&torn));
         assert_eq!(context.character.as_deref(), Some("Astra Uno"));
+    }
+
+    #[test]
+    fn a_new_name_that_does_not_sanitise_is_unknown_not_the_previous_character() {
+        let mut tracker = ContextTracker::new();
+        let now = Instant::now();
+        tracker.observe(now, Some(true), Some(&in_labyrinth()));
+        let other = r#"{"name":"Bad\u0007Name"}"#;
+        let snapshot = MumbleSnapshot::from_bytes(&link(1202, "Guild Wars 2", other, 866)).unwrap();
+        assert!(snapshot.character.is_some());
+        assert_eq!(tracker.observe(now, Some(true), Some(&snapshot)).character, None);
+        let torn = MumbleSnapshot::from_bytes(&link(1203, "Guild Wars 2", r#"{"name":"Ast"#, 866)).unwrap();
+        assert_eq!(tracker.observe(now, Some(true), Some(&torn)).character, None);
     }
 
     #[test]
