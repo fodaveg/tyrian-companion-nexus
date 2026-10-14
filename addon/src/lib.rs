@@ -160,7 +160,7 @@ pub(crate) fn log_own_build(version: &str) {
     let found = unsafe {
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            PCWSTR(log_own_build as usize as *const u16),
+            PCWSTR(log_own_build as *const () as usize as *const u16),
             &mut module,
         )
     };
