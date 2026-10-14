@@ -917,6 +917,26 @@ fn pushed_table_sums_only_its_type_and_must_be_sorted_and_bounded() {
     assert_eq!(read(m), Err(Uncovered::Bounds));
 }
 
+/// A pushed value that is not finite never reaches a total, whatever its kind: every record is
+/// checked before any is summed, so a NaN cannot become a peak nor an infinity a fall. The
+/// fullest table at the largest accepted value still sums to a finite figure.
+#[test]
+fn no_pushed_value_can_make_a_total_that_is_not_finite() {
+    for kind in [MAGIC_FIND, MAGIC_FIND_BOON, 14, 126] {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 10_000.5] {
+            let mut m = empty();
+            m.push(kind, value);
+            assert_eq!(read(m), Err(Uncovered::Bounds), "{kind} {value}");
+        }
+    }
+    let mut m = empty();
+    for _ in 0..MAX_PUSHED {
+        m.push(MAGIC_FIND, 10_000.0);
+    }
+    let full = read(m).unwrap();
+    assert!(full.total.is_finite() && full.pushed.is_finite(), "{full:?}");
+}
+
 #[test]
 fn unsupported_magic_find_record_is_no_coverage_never_a_partial_total() {
     let base = record(MAGIC_FIND, 50.0);
