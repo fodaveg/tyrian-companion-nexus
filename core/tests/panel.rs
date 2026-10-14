@@ -996,10 +996,10 @@ fn without_a_character_in_a_map_the_panel_does_not_say_that_a_capture_failed() {
         assert!(has(held, "Última lectura hace 1 s") && has(held, "Lectura del addon: no hay personaje en un mapa"), "{held:?}");
         assert!(!has(held, "captura falló") && !has(held, "sin muestreo"), "{held:?}");
     }
-    // A long stay at character select: the source cannot measure while the session needs it,
-    // as before, and what the tooltips give as the reason is still the true one.
+    // A long stay at character select or on a loading screen: nothing failed, so the status
+    // stays as it was however long it lasts, and the tooltips still give the true reason.
     let lasting = panel.at(8, BagCoverage::NotRead, MagicFindCoverage::NotRead);
-    assert_eq!((lasting.status_dot, lasting.status.text.as_str(), lasting.status.tone), (Tone::Warning, "Midiendo", Tone::Warning));
+    assert_eq!((lasting.status_dot, lasting.status.text.as_str(), lasting.status.tone), (Tone::Good, "Midiendo", Tone::Normal));
     assert!(has(&lasting.status, "No hay personaje en un mapa") && !has(&lasting.status, "captura falló"), "{:?}", lasting.status);
     assert_eq!((lasting.slots.text.as_str(), lasting.magic_find.text.as_str()), ("Huecos: 63 libres", "MF: 333% parcial"));
     for cell in [&lasting.slots, &lasting.magic_find] {

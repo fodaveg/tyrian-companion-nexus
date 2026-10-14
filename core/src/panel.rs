@@ -1083,7 +1083,9 @@ fn status_cell(input: &PanelInput<'_>, readings: &Readings, english: bool) -> (T
         tone = Tone::Warning;
     }
     let source_down = matches!(input.live, LiveStatus::NotNegotiated | LiveStatus::UnsupportedBuild | LiveStatus::Unavailable | LiveStatus::Conflict | LiveStatus::StorageUnavailable);
-    if measuring && source_down && !capture_failed_briefly {
+    // No character in a map is not a source that is down: nothing failed, however long it lasts.
+    let no_character = matches!(readings.source, Source::Live { gap: Some(Gap::NoCharacter) });
+    if measuring && source_down && !capture_failed_briefly && !no_character {
         tone = Tone::Warning;
     }
     source(&mut tooltip);
