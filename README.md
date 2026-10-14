@@ -205,6 +205,14 @@ goes out when the figure changes, again every minute, at most once every 5 secon
 name, account or map goes with it. A plugin that does not announce `mf1` (0.6.58 and earlier)
 gets nothing new and works as before; see "Magic Find to the plugin (`mf1`, since 0.8.11)".
 
+Version 0.8.12 fixes what an audit of the panel found. A long stay at character select or a
+loading screen no longer paints the status as a failure; a price that stops renewing reads as
+expired with its age instead of "not read yet"; a Magic Find drop is judged on the tenths the
+panel writes, so two equal figures never warn; a `farm1` frame whose rate band is inverted is
+discarded; the bags tooltip drops the ETA line once the goal is reached or the session is over.
+A character name that reads but fails sanitising is now unknown instead of the previous
+character, so the panel resets bags and Magic Find on that change. The protocol does not change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
