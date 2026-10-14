@@ -189,6 +189,15 @@ that changes, and counts them in Options. Magic Find accepts definitions of up t
 figure most of the time. It needs the plugin 0.6.57 or later, since an older one refuses the new
 executable's hash; the protocol does not change.
 
+Version 0.8.10 lets a live sample use the 512 row chunks the plugin accepts: past 640 rows (82
+frames) the addon ended the connection and reconnected in a loop without the plugin ever getting
+the sample. The disconnection line in the Nexus log now says why the connection ended
+(`reason=eof|io_error(<kind>)|timeout|server_code(<code>)|shutdown|session_ended`), and the log
+gains lines for live status changes, the welcome and its capabilities, ten-minute counters of the
+client and the readers, the first 12 hex digits of the DLL's SHA-256 and the executable verdict.
+None of them carries a path, name, token or nonce. It needs the plugin 0.6.57 or later; the
+protocol does not change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
