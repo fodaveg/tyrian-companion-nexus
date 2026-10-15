@@ -8,9 +8,11 @@
 //! What ties production to the audit is `fixtures/magic_find_profile.json`:
 //! `tyrian-companion/docs/audit/loot-mf-probe/profile.json` at the commit "accept game content
 //! pointers at their observed alignment in the Magic Find probe" (sha256 `8992928d…6cebbf`), as
-//! the recertification of 2026-10-13 carried it to the game's build of that day (its
-//! `recertified` key, and `docs/audit/2026-10-13-recertification-build-208574.json`). The file in
-//! that repository still describes the build of 2026-10-06. It holds digests only, and that
+//! the recertification of 2026-10-13 carried it to the game's build of that day
+//! (`docs/audit/2026-10-13-recertification-build-208574.json`) and that of 2026-10-15 to the
+//! build of 15 October, which keeps every range at the same RVA with the same bytes (its
+//! `recertified` key, and `docs/audit/2026-10-15-recertification-build-208704.json`). The file
+//! in that repository still describes the build of 2026-10-06. It holds digests only, and that
 //! repository's `check_profile_offline.py`, run over this fixture, compares each of its 19
 //! digests and 12 slots with the installed executable.
 //! `production_constants_are_the_audited_profile` requires `GUARDS`, `SLOTS`, the vtables and

@@ -347,6 +347,17 @@ fn wrong_build_and_invalid_ranges_cannot_read() {
         BuildProfile::checked("bad", BASE, 0x2c49000),
         Err(ReadError::UnsupportedBuild)
     ));
+    // One executable is certified at a time: the builds of 6 and 13 October 2026 no longer
+    // are, although the second has every audited range at the same RVA with the same bytes.
+    for previous in [
+        "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+        "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb",
+    ] {
+        assert!(matches!(
+            BuildProfile::checked(previous, BASE, 0x2c49000),
+            Err(ReadError::UnsupportedBuild)
+        ));
+    }
     let mut r = Reader::new(fixture(570));
     assert!(r.read::<8>(1).is_err());
     assert!(r.read::<8>(u64::MAX - 1).is_err());

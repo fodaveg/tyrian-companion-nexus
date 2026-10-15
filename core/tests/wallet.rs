@@ -2,11 +2,13 @@
 //!
 //! `fixtures/wallet_profile.json` is the audited profile of
 //! `tyrian-companion/docs/audit/loot-wallet-probe/profile.json` (commit f821362) as the
-//! recertification of 2026-10-13 carried it to the game's build of that day (its `recertified`
-//! key, and `docs/audit/2026-10-13-recertification-build-208574.json`): its guard bytes are what
-//! the certified executable holds at those RVAs, and differ from the audited ones only in the
-//! rel32 fields that moved with the code. The file in that repository still describes the
-//! build of 2026-10-06. Its `scope` text predates the live comparison of 2026-10-07, which found
+//! recertification of 2026-10-13 carried it to the game's build of that day
+//! (`docs/audit/2026-10-13-recertification-build-208574.json`) and that of 2026-10-15 to the
+//! build of 15 October (its `recertified` key, and
+//! `docs/audit/2026-10-15-recertification-build-208704.json`): its guard bytes are what the
+//! certified executable holds at those RVAs, and differ from the audited ones only in the rel32
+//! fields that moved with the code on 13 October; on 15 October none moved. The file in that
+//! repository still describes the build of 2026-10-06. Its `scope` text predates the live comparison of 2026-10-07, which found
 //! the native keys to be the public currency IDs.
 use serde_json::Value;
 use std::collections::BTreeMap;

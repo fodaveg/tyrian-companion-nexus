@@ -1,9 +1,10 @@
 //! Passive, bounded inventory interpretation for one certified GW2 build.
 //!
 //! Addresses here are RVAs/field offsets, never session pointers. The route and the field
-//! offsets come from the 2026-10-06 proof; the RVAs are those of the game's build of 13 October
-//! 2026, to which the static recertification of that day carried them
-//! (`docs/audit/2026-10-13-recertification-build-208574.json`). In this module and in `bags`,
+//! offsets come from the 2026-10-06 proof; the RVAs are those the static recertification of
+//! 13 October 2026 carried them to (`docs/audit/2026-10-13-recertification-build-208574.json`),
+//! which the game's build of 15 October 2026 keeps byte for byte
+//! (`docs/audit/2026-10-15-recertification-build-208704.json`). In this module and in `bags`,
 //! `wallet` and `magic_find`, every RVA and every digest belongs to that one executable.
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
@@ -16,7 +17,7 @@ use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const BUILD_SHA256: &str = "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb";
+pub const BUILD_SHA256: &str = "960c3e454847525993eb3266845ee37377511b8039635a7fbad6fd5592cb61ba";
 pub const PROFILE: &str = "owned-bags-v3";
 pub const TLS_INDEX_RVA: u64 = 0x28155c0;
 pub const MAX_POSITIONS: u32 = 640;

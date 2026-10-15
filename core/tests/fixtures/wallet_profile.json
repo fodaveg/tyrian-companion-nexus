@@ -1,6 +1,6 @@
 {
   "scope": "candidate_wallet_probe_only; native/API key mapping unproven",
-  "binary_sha256": "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb",
+  "binary_sha256": "960c3e454847525993eb3266845ee37377511b8039635a7fbad6fd5592cb61ba",
   "image_size": 46436352,
   "currency_id": 45,
   "currency_name": "Magia vol\u00e1til",
@@ -49,9 +49,15 @@
     }
   ],
   "recertified": {
-    "from_binary_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
-    "date": "2026-10-13",
-    "method": "Static, over the file on disk only. Every guarded range was found again in the new file and its old bytes rebuilt from the new ones by moving back the rel32 fields, the image-relative displacements and the jump table entries; each rebuilt range hashes to the digest audited for the old build. Vtables are the only places in .rdata whose slots select those ranges, and the code that installs them refers to them.",
-    "live_value_proven": false
+    "from_binary_sha256": "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb",
+    "date": "2026-10-15",
+    "method": "Static, over the file on disk only. The new file has the layout of the build of 2026-10-13, and every guarded range, slot and link is at the same RVA with the same bytes: each range hashes to the digest of that build, so no byte moved and none had to be rebuilt. The vtables hold the same functions at the same RVAs.",
+    "live_value_proven": false,
+    "previous": {
+      "from_binary_sha256": "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
+      "date": "2026-10-13",
+      "method": "Static, over the file on disk only. Every guarded range was found again in the new file and its old bytes rebuilt from the new ones by moving back the rel32 fields, the image-relative displacements and the jump table entries; each rebuilt range hashes to the digest audited for the old build. Vtables are the only places in .rdata whose slots select those ranges, and the code that installs them refers to them.",
+      "live_value_proven": false
+    }
   }
 }
