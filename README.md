@@ -213,6 +213,12 @@ discarded; the bags tooltip drops the ETA line once the goal is reached or the s
 A character name that reads but fails sanitising is now unknown instead of the previous
 character, so the panel resets bags and Magic Find on that change. The protocol does not change.
 
+Version 0.8.13 certifies the game's executable of 15 October 2026 (build 208704) in place of the
+one of 13 October, which the game no longer runs: until then every load ended in "unsupported
+game build". Every range, vtable and RVA the readers rely on is the same as on 13 October; only
+the executable's hash is new. It needs the plugin 0.7.3 or later, since an older one refuses the
+new executable's hash; the protocol does not change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
