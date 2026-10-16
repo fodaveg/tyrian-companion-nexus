@@ -37,6 +37,7 @@ use tyrian_companion_nexus_core::inventory::{
     BuildProfile, Memory, ReadError, Reader, 
 };
 use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
+use tyrian_companion_nexus_core::layout::Layout;
 use tyrian_companion_nexus_core::magic_find::*;
 use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
@@ -46,7 +47,6 @@ use tyrian_companion_nexus_core::wallet::currency_hash;
 mod field_by_field;
 
 const BASE: u64 = 0x140000000;
-const IMAGE: u64 = 0x2c49000;
 const CTX: u64 = 0x200000;
 const CHAR_CONTEXT: u64 = 0x210000;
 const CHARACTER: u64 = 0x220000;
@@ -120,6 +120,8 @@ fn record(kind: u32, value: f32) -> Record {
 #[derive(Default, Clone)]
 struct Fixture {
     bytes: BTreeMap<u64, u8>,
+    /// Where a whole 8-byte value was put: the only places a pointer of the fixture can be.
+    words: std::collections::BTreeSet<u64>,
     heap: u64,
     remainder: u64,
     capacity: u32,
@@ -134,6 +136,9 @@ struct Fixture {
 }
 impl Fixture {
     fn put(&mut self, address: u64, value: u64, size: usize) {
+        if size == 8 {
+            self.words.insert(address);
+        }
         for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
             self.bytes.insert(address + i as u64, *byte);
         }
@@ -347,7 +352,7 @@ fn standard() -> (Fixture, (u64, u64, u64)) {
     standard_at(4)
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, &Layout::CERTIFIED).unwrap()
 }
 /// Guards and one whole pass through the same budgeted reader, as the addon's first cycle does.
 fn run(m: Fixture) -> (Result<MagicFind, Uncovered>, usize) {
@@ -1048,15 +1053,20 @@ fn changes_between_the_two_passes_reject() {
 fn production_constants_are_the_audited_profile() {
     let audited: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/magic_find_profile.json")).unwrap();
+    // The certified layout, and the guards and slots it places, are the audited profile.
+    let l = &Layout::CERTIFIED;
+    let certified = guards_of(l);
+    assert_eq!(certified, GUARDS);
+    assert_eq!(slots_of(l), SLOTS);
     for (name, value) in [
-        ("char_context_vtable", CHAR_CONTEXT_VTABLE),
-        ("character_vtable", CHARACTER_VTABLE),
-        ("character_agent_vtable", CHARACTER_AGENT_VTABLE),
-        ("combatant_vtable", COMBATANT_VTABLE),
-        ("player_vtable", PLAYER_VTABLE),
-        ("player_stats_vtable", PLAYER_STATS_VTABLE),
-        ("buff_manager_vtable", BUFF_MANAGER_VTABLE),
-        ("buff_node_vtable", BUFF_NODE_VTABLE),
+        ("char_context_vtable", l.char_context_vtable),
+        ("character_vtable", l.character_vtable),
+        ("character_agent_vtable", l.character_agent_vtable),
+        ("combatant_vtable", l.combatant_vtable),
+        ("player_vtable", l.player_vtable),
+        ("player_stats_vtable", l.player_stats_vtable),
+        ("buff_manager_vtable", l.buff_manager_vtable),
+        ("buff_node_vtable", l.buff_node_vtable),
         ("magic_find_modifier", MAGIC_FIND as u64),
         ("magic_find_boon_modifier", MAGIC_FIND_BOON as u64),
         ("content_pointer_remainder", tyrian_companion_nexus_core::passive::CONTENT_REMAINDER),
@@ -1068,23 +1078,23 @@ fn production_constants_are_the_audited_profile() {
     assert_eq!(audited["constant_formula"].as_u64(), Some(6));
     assert_eq!(with_record(record(MAGIC_FIND, 50.0)).map(|value| value.total), Ok(387.0));
     let guards = audited["guards"].as_array().unwrap();
-    assert_eq!(guards.len(), GUARDS.len());
-    for (expected, guard) in guards.iter().zip(GUARDS) {
+    assert_eq!(guards.len(), certified.len());
+    for (expected, guard) in guards.iter().zip(certified) {
         assert_eq!(expected["name"].as_str(), Some(guard.name));
         assert_eq!(expected["rva"].as_u64(), Some(guard.rva), "{}", guard.name);
         assert_eq!(expected["size"].as_u64(), Some(guard.size as u64), "{}", guard.name);
         assert_eq!(expected["sha256"].as_str(), Some(guard.sha256), "{}", guard.name);
     }
     let slots = audited["slots"].as_array().unwrap();
-    assert_eq!(slots.len(), SLOTS.len());
-    for (expected, (vtable, slot, target)) in slots.iter().zip(SLOTS) {
+    assert_eq!(slots.len(), slots_of(l).len());
+    for (expected, (vtable, slot, target)) in slots.iter().zip(slots_of(l)) {
         let name = expected["target"].as_str().unwrap();
         let table = audited[expected["vtable"].as_str().unwrap()].as_u64();
         assert_eq!(table, Some(vtable), "{name}");
         assert_eq!(expected["slot"].as_u64(), Some(slot), "{name}");
         assert_eq!(expected["target_rva"].as_u64(), Some(target), "{name}");
         // Every slot selects code that is itself guarded by digest.
-        assert!(GUARDS.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
+        assert!(certified.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
     }
 }
 
@@ -1997,4 +2007,42 @@ fn a_pass_that_ends_on_a_bound_leaves_the_figure_the_bound_is_judged_by() {
     let (value, trace, ..) = traced(&held, &mut m);
     assert_eq!(value, Err(Uncovered::Bounds));
     assert_eq!(trace, Trace { pushed: MAX_PUSHED + 1, ..Trace::default() });
+}
+
+#[path = "support/moved_build.rs"]
+mod moved_build;
+
+/// A build whose code and vtables moved ([`moved_build`]) is read with its own layout exactly as
+/// the certified build is read with `Layout::CERTIFIED`: guards where the layout places them,
+/// with the same digests, the slots, the route and the buff nodes' class, and the same value
+/// from the same copies, whole or cached. With the certified layout the moved bytes fail at the
+/// first guard.
+#[test]
+fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
+    let layout = moved_build::layout();
+    let guards: Vec<Guard> = guards_of(layout)
+        .iter()
+        .zip(synthetic_guards())
+        .map(|(moved, certified)| Guard { sha256: certified.sha256, ..*moved })
+        .collect();
+    let read_with = |m: Fixture, profile: BuildProfile, guards: &[Guard]| {
+        let mut reader = Reader::bounded(m, MAX_BYTES);
+        let verified = MagicFindProfile::verified_against(&mut reader, profile, guards);
+        let result = verified.and_then(|verified| {
+            let mut cache = MagicFindCache::new();
+            let now = Instant::now();
+            let whole = magic_find_cached(&mut reader, &verified, CTX, &mut cache, now)?;
+            let cached = magic_find_cached(&mut reader, &verified, CTX, &mut cache, now)?;
+            Ok((whole.0, cached.0, cache.is_empty()))
+        });
+        (result, reader.reads, reader.bytes)
+    };
+    for m in [standard().0, live_shape(20.0), live_shape(50.0)] {
+        let certified = read_with(m.clone(), profile(), &synthetic_guards());
+        assert!(certified.0.is_ok(), "{certified:?}");
+        let moved = Fixture { bytes: moved_build::bytes(&m.bytes, &m.words), ..m.clone() };
+        let profile = BuildProfile::checked(BASE, layout).unwrap();
+        assert_eq!(read_with(moved.clone(), profile, &guards), certified);
+        assert_eq!(read(moved), Err(Uncovered::Guard));
+    }
 }

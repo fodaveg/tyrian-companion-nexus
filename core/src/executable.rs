@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::certificate::{Certificate, Collector, CERTIFICATE, GAME};
 use crate::inventory::{BuildProfile, Memory, ReadError, Reader};
+use crate::layout::Layout;
 use crate::live::RESPONSE_TIMEOUT;
 use crate::sha256::hex;
 
@@ -232,21 +233,30 @@ pub fn size_in_range(len: u64) -> bool {
 
 /// The profile of the image loaded at `base`, for a process whose executable file holds the
 /// certificate: `Some` when its header is the one the file says (an AMD64 PE32+ image of the
-/// certified size), `None` when it is not.
+/// size of the layout the readers will read it with), `None` when it is not.
 ///
 /// The header is in memory for as long as the process lives and does not change, so a header
 /// that is not the expected one is as final as a digest that is not. Only a copy that failed
 /// says nothing about it.
 pub fn image_profile<M: Memory>(reader: &mut Reader<M>, base: u64) -> Step<Option<BuildProfile>> {
-    match header(reader, base) {
+    // The readers read the certified layout: the only one a file can hold today, since the
+    // certificate checks every RVA of it at its fixed place. Batch 2 of the relocation plan
+    // (`docs/audit/2026-10-16-relocation-study/README.md`, §8) plugs in here: the layout its
+    // resolver gives for the file that was hashed replaces `Layout::CERTIFIED`, and nothing
+    // below this line changes for it.
+    match header(reader, base, &Layout::CERTIFIED) {
         Ok(profile) => Step::Decided(Some(profile)),
         Err(ReadError::ReadFailed) => Step::Failed,
         Err(_) => Step::Decided(None),
     }
 }
 
-/// An AMD64 PE32+ image with room for the fields the profile reads.
-fn header<M: Memory>(reader: &mut Reader<M>, base: u64) -> Result<BuildProfile, ReadError> {
+/// An AMD64 PE32+ image of the size `layout` gives, with room for the fields the profile reads.
+fn header<M: Memory>(
+    reader: &mut Reader<M>,
+    base: u64,
+    layout: &'static Layout,
+) -> Result<BuildProfile, ReadError> {
     if reader.read::<2>(base)? != *b"MZ" {
         return Err(ReadError::UnsupportedBuild);
     }
@@ -259,10 +269,10 @@ fn header<M: Memory>(reader: &mut Reader<M>, base: u64) -> Result<BuildProfile, 
         return Err(ReadError::UnsupportedBuild);
     }
     let image_size = reader.scalar(base + pe + 24 + 56, 4)?;
-    if image_size != u64::from(crate::certificate::IMAGE_SIZE) {
+    if image_size != layout.image_size {
         return Err(ReadError::UnsupportedBuild);
     }
-    BuildProfile::checked(base, image_size)
+    BuildProfile::checked(base, layout)
 }
 
 #[cfg(test)]
@@ -575,6 +585,25 @@ mod tests {
             damage(&mut bytes);
             assert_eq!(check(bytes, true), Step::Decided(None), "{what}");
         }
+    }
+
+    /// The loaded image must have the size of the layout it is read with, not the certified
+    /// one: with a layout of another size, that size is the one accepted and the certified one
+    /// is refused.
+    #[test]
+    fn the_image_size_is_the_layout_s() {
+        let layout: &'static Layout = Box::leak(Box::new(Layout {
+            image_size: Layout::CERTIFIED.image_size + 0x1000,
+            ..Layout::CERTIFIED
+        }));
+        let read = |bytes: Vec<u8>| {
+            header(&mut Reader::new(Image { bytes, readable: true }), BASE, layout)
+                .map(|profile| (profile.base, profile.layout.image_size))
+        };
+        let mut larger = certified();
+        larger[PE + 80..PE + 84].copy_from_slice(&(layout.image_size as u32).to_le_bytes());
+        assert_eq!(read(larger), Ok((BASE, layout.image_size)));
+        assert_eq!(read(certified()).err(), Some(ReadError::UnsupportedBuild));
     }
 
     /// A copy that fails, or that the adapter refuses because its time ran out, is not an

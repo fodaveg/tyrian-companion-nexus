@@ -14,17 +14,20 @@
 //! not been compared in game yet. As in `wallet`, vtables and getters are compared, never
 //! invoked, and any doubt rejects the whole sample: free slots are then unknown, never zero.
 
-use crate::inventory::{BuildProfile, Memory, Reader, MAX_POSITIONS, TLS_INDEX_RVA};
+use crate::inventory::{BuildProfile, Memory, Reader, MAX_POSITIONS};
+use crate::layout::Layout;
 use crate::passive::{
     content, context_checked, dword, heap, identity, object, qword, table, verify, Guard,
     Uncovered,
 };
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
-pub const CHARACTER_AGENT_VTABLE: u64 = 0x2161250;
-pub const INVENTORY_VTABLE: u64 = 0x2163228;
+// The vtables of the certified build, for the tests that fix them against the audit. The reader
+// takes them from its profile's layout, never from here.
+pub const CHAR_CONTEXT_VTABLE: u64 = Layout::CERTIFIED.char_context_vtable;
+pub const CHARACTER_AGENT_VTABLE: u64 = Layout::CERTIFIED.character_agent_vtable;
+pub const INVENTORY_VTABLE: u64 = Layout::CERTIFIED.inventory_vtable;
 /// `ItCliBag`: the class the item factory (RVA `0x13C7923`) builds for definition type 3.
-pub const BAG_ITEM_VTABLE: u64 = 0x225de68;
+pub const BAG_ITEM_VTABLE: u64 = Layout::CERTIFIED.bag_item_vtable;
 /// `CHAR_INVENTORY_BAGS_MAX` and `CHAR_INVENTORY_BAG_MAX_SIZE` of this build.
 pub const BAGS: usize = 16;
 pub const BAG_SIZE_MAX: u32 = 32;
@@ -44,98 +47,108 @@ const BAG_SIZE_MIN: u32 = 1;
 /// at run time.
 pub const MAX_BYTES: usize = 16_384;
 
-/// The getters of the route and the three counter methods, by the digest of their bytes.
-pub const GUARDS: [Guard; 12] = [
-    Guard {
-        name: "controlled_character_getter",
-        rva: 0x11b4f10,
-        size: 29,
-        sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
-    },
-    Guard {
-        name: "character_inventory_getter",
-        rva: 0x11d7f60,
-        size: 70,
-        sha256: "12edfab95716e429e1d8f6d5878c4aa57e53e1d87a2c7fbfc080ae7cbd21647f",
-    },
-    Guard {
-        name: "inventory_owner_getter",
-        rva: 0x45de30,
-        size: 5,
-        sha256: "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107",
-    },
-    Guard {
-        name: "bag_slot_count_getter",
-        rva: 0x11eed90,
-        size: 7,
-        sha256: "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b",
-    },
-    Guard {
-        name: "bag_getter",
-        rva: 0x12913f0,
-        size: 72,
-        sha256: "47c8e28fb4ed3ccd1506da0d63905194e3da2d67e87b806a600bd3d11cf8eced",
-    },
-    Guard {
-        name: "bag_size_getter",
-        rva: 0x1291440,
-        size: 133,
-        sha256: "e054565f4fd7d4e99cf9170cebe37842aaf80619131e799a3defbc9c67c220cc",
-    },
-    Guard {
-        name: "slot_validity",
-        rva: 0x12915d0,
-        size: 148,
-        sha256: "a85a558be74a0dd3cb112e51769194faba3a6788fd59ea4e053726e7c534e396",
-    },
-    Guard {
-        name: "free_slots_getter",
-        rva: 0x11eef30,
-        size: 59,
-        sha256: "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a",
-    },
-    Guard {
-        name: "used_slots_getter",
-        rva: 0x11eef70,
-        size: 60,
-        sha256: "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d",
-    },
-    Guard {
-        name: "capacity_getter",
-        rva: 0x11eefb0,
-        size: 103,
-        sha256: "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342",
-    },
-    Guard {
-        name: "item_definition_getter",
-        rva: 0x13c4930,
-        size: 61,
-        sha256: "f430638166c7ed4e47aed1717abbed7cc30ffe92c7714a7a9e66648c0fbca7ef",
-    },
-    Guard {
-        name: "capacity_counter_text",
-        rva: 0x6a29d0,
-        size: 136,
-        sha256: "2e39a5e22e8a6ea2e8f214ae1715088732885d31bed67f0b246b18620f7af850",
-    },
-];
-/// Vtable, slot and the guarded code that slot must select.
-pub const SLOTS: [(u64, u64, u64); 10] = [
-    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4f10),
-    (CHARACTER_AGENT_VTABLE, 0xc8, 0x11d7f60),
-    (INVENTORY_VTABLE, 0x220, 0x45de30),
-    (INVENTORY_VTABLE, 0x138, 0x12913f0),
-    (INVENTORY_VTABLE, 0x140, 0x1291440),
-    (INVENTORY_VTABLE, 0x148, 0x11eed90),
-    (INVENTORY_VTABLE, 0x1e0, 0x11eef30),
-    (INVENTORY_VTABLE, 0x1e8, 0x11eef70),
-    (INVENTORY_VTABLE, 0x1f0, 0x11eefb0),
-    (BAG_ITEM_VTABLE, 0x8, 0x13c4930),
-];
-// `BuildProfile::checked` only accepts an image that reaches the TLS index, which lies beyond
-// every address this module reads inside the executable.
-const _: () = assert!(BAG_ITEM_VTABLE + 0x10 <= TLS_INDEX_RVA);
-const _: () = assert!(INVENTORY_VTABLE + 0x228 <= TLS_INDEX_RVA);
+/// The getters of the route and the three counter methods, by the digest of their bytes, where
+/// `layout` places them. The digests are those of the certified build's code.
+pub const fn guards_of(l: &Layout) -> [Guard; 12] {
+    [
+        Guard {
+            name: "controlled_character_getter",
+            rva: l.controlled_character_getter,
+            size: 29,
+            sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
+        },
+        Guard {
+            name: "character_inventory_getter",
+            rva: l.character_inventory_getter,
+            size: 70,
+            sha256: "12edfab95716e429e1d8f6d5878c4aa57e53e1d87a2c7fbfc080ae7cbd21647f",
+        },
+        Guard {
+            name: "inventory_owner_getter",
+            rva: l.inventory_owner_getter,
+            size: 5,
+            sha256: "cce27efcd9ca6b4ac178564623ce7ed65d6bd9654f5dd661f5d3dfda6cfe8107",
+        },
+        Guard {
+            name: "bag_slot_count_getter",
+            rva: l.bag_slot_count_getter,
+            size: 7,
+            sha256: "0a2a4a82e58c44dee59c4f6ae11b0670102f94daba8668d05c1e0876334a5c8b",
+        },
+        Guard {
+            name: "bag_getter",
+            rva: l.bag_getter,
+            size: 72,
+            sha256: "47c8e28fb4ed3ccd1506da0d63905194e3da2d67e87b806a600bd3d11cf8eced",
+        },
+        Guard {
+            name: "bag_size_getter",
+            rva: l.bag_size_getter,
+            size: 133,
+            sha256: "e054565f4fd7d4e99cf9170cebe37842aaf80619131e799a3defbc9c67c220cc",
+        },
+        Guard {
+            name: "slot_validity",
+            rva: l.slot_validity,
+            size: 148,
+            sha256: "a85a558be74a0dd3cb112e51769194faba3a6788fd59ea4e053726e7c534e396",
+        },
+        Guard {
+            name: "free_slots_getter",
+            rva: l.free_slots_getter,
+            size: 59,
+            sha256: "a2be789b4f0a47ba795672184770efe43f40f27df46e7fd29635e09a2ba8392a",
+        },
+        Guard {
+            name: "used_slots_getter",
+            rva: l.used_slots_getter,
+            size: 60,
+            sha256: "00b5744bc9e50c1364b05b0c47eddf31ddd1abf36845dc7cb948775e128b839d",
+        },
+        Guard {
+            name: "capacity_getter",
+            rva: l.capacity_getter,
+            size: 103,
+            sha256: "a42aa2dae8d1baae211cce3e124bf1acbb2681681106a1a38918009ba0bc4342",
+        },
+        Guard {
+            name: "item_definition_getter",
+            rva: l.item_definition_getter,
+            size: 61,
+            sha256: "f430638166c7ed4e47aed1717abbed7cc30ffe92c7714a7a9e66648c0fbca7ef",
+        },
+        Guard {
+            name: "capacity_counter_text",
+            rva: l.capacity_counter_text,
+            size: 136,
+            sha256: "2e39a5e22e8a6ea2e8f214ae1715088732885d31bed67f0b246b18620f7af850",
+        },
+    ]
+}
+/// Vtable, slot and the guarded code that slot must select, where `layout` places the vtables
+/// and the code; the slots are fixed.
+pub const fn slots_of(l: &Layout) -> [(u64, u64, u64); 10] {
+    [
+        (l.char_context_vtable, 0x68, l.controlled_character_getter),
+        (l.character_agent_vtable, 0xc8, l.character_inventory_getter),
+        (l.inventory_vtable, 0x220, l.inventory_owner_getter),
+        (l.inventory_vtable, 0x138, l.bag_getter),
+        (l.inventory_vtable, 0x140, l.bag_size_getter),
+        (l.inventory_vtable, 0x148, l.bag_slot_count_getter),
+        (l.inventory_vtable, 0x1e0, l.free_slots_getter),
+        (l.inventory_vtable, 0x1e8, l.used_slots_getter),
+        (l.inventory_vtable, 0x1f0, l.capacity_getter),
+        (l.bag_item_vtable, 0x8, l.item_definition_getter),
+    ]
+}
+/// The guards and slots of the certified build, for the tests that fix them against the audit.
+pub const GUARDS: [Guard; 12] = guards_of(&Layout::CERTIFIED);
+pub const SLOTS: [(u64, u64, u64); 10] = slots_of(&Layout::CERTIFIED);
+// `BuildProfile::checked` only accepts a layout whose image reaches the TLS index, which lies
+// beyond every address this module reads inside the executable ([`Layout::validate`] checks it
+// for any layout; these are the two that bound this module's slots in the certified one).
+const _: () = assert!(Layout::CERTIFIED.bag_item_vtable + 0x10 <= Layout::CERTIFIED.tls_index);
+const _: () = assert!(Layout::CERTIFIED.inventory_vtable + 0x228 <= Layout::CERTIFIED.tls_index);
 
 /// What the inventory window's counter shows, recomputed from stored inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,25 +179,27 @@ pub enum BagCoverage {
 #[derive(Debug, Clone, Copy)]
 pub struct BagProfile {
     base: u64,
+    layout: &'static Layout,
 }
 impl BagProfile {
     pub fn verified<M: Memory>(
         r: &mut Reader<M>,
         profile: BuildProfile,
     ) -> Result<Self, Uncovered> {
-        Self::build(r, profile, &GUARDS)
+        Self::build(r, profile, &guards_of(profile.layout))
     }
     /// For this crate's fixtures only; the addon calls [`Self::verified`] and nothing else.
     /// Fixtures carry no bytes of the game, so they stand for the executable with guard
-    /// contents and digests of their own. The ranges must still be exactly the audited ones:
-    /// an empty, shorter or shifted list is refused before anything is read.
+    /// contents and digests of their own. The ranges must still be exactly the audited ones,
+    /// where the profile's layout places them: an empty, shorter or shifted list is refused
+    /// before anything is read.
     #[doc(hidden)]
     pub fn verified_against<M: Memory>(
         r: &mut Reader<M>,
         profile: BuildProfile,
         guards: &[Guard],
     ) -> Result<Self, Uncovered> {
-        if !crate::passive::same_ranges(guards, &GUARDS) {
+        if !crate::passive::same_ranges(guards, &guards_of(profile.layout)) {
             return Err(Uncovered::Guard);
         }
         Self::build(r, profile, guards)
@@ -195,14 +210,23 @@ impl BagProfile {
         guards: &[Guard],
     ) -> Result<Self, Uncovered> {
         verify(r, profile.base, guards, |_, _| {})?;
-        Ok(Self { base: profile.base })
+        Ok(Self {
+            base: profile.base,
+            layout: profile.layout,
+        })
     }
 }
 
 /// One equipped bag: item -> definition -> bag payload -> size, the hops of RVA `0x1291440`.
-fn bag_size<M: Memory>(r: &mut Reader<M>, base: u64, item: u64) -> Result<u32, Uncovered> {
+/// `vtable` is the layout's `ItCliBag`.
+fn bag_size<M: Memory>(
+    r: &mut Reader<M>,
+    base: u64,
+    item: u64,
+    vtable: u64,
+) -> Result<u32, Uncovered> {
     let item = heap(item)?;
-    identity(r, item, base + BAG_ITEM_VTABLE)?;
+    identity(r, item, base + vtable)?;
     let definition = content(r.scalar(item + 0x40, 8)?)?;
     let record: [u8; 16] = r.read(definition + 0x28)?;
     if dword(&record, 4) != BAG_ITEM_TYPE {
@@ -225,14 +249,14 @@ pub fn bag_slots<M: Memory>(
     context: u64,
 ) -> Result<(BagSlots, (u64, u64)), Uncovered> {
     context_checked(context)?;
-    let b = profile.base;
+    let (b, l) = (profile.base, profile.layout);
     let char_context = object(r, context + 0x98)?;
-    identity(r, char_context, b + CHAR_CONTEXT_VTABLE)?;
+    identity(r, char_context, b + l.char_context_vtable)?;
     let character = object(r, char_context + 0x98)?;
-    identity(r, character + 8, b + CHARACTER_AGENT_VTABLE)?;
+    identity(r, character + 8, b + l.character_agent_vtable)?;
     let inventory = object(r, character + 0x3f0)?;
-    identity(r, inventory, b + INVENTORY_VTABLE)?;
-    for (vtable, slot, target) in SLOTS {
+    identity(r, inventory, b + l.inventory_vtable)?;
+    for (vtable, slot, target) in slots_of(l) {
         identity(r, b + vtable + slot, b + target)?;
     }
     if r.scalar(character + 0x178, 4)? & 0x10 == 0 {
@@ -251,7 +275,7 @@ pub fn bag_slots<M: Memory>(
     for index in 0..bag_slots as usize {
         let item = qword(&list, index * 8);
         if item != 0 {
-            capacity += bag_size(r, b, item)?;
+            capacity += bag_size(r, b, item, l.bag_item_vtable)?;
             bags += 1;
         }
     }
@@ -271,12 +295,12 @@ pub fn bag_slots<M: Memory>(
         .filter(|entry| entry.iter().any(|byte| *byte != 0))
         .count() as u32;
     if r.scalar(context + 0x98, 8)? != char_context
-        || r.scalar(char_context, 8)? != b + CHAR_CONTEXT_VTABLE
+        || r.scalar(char_context, 8)? != b + l.char_context_vtable
         || r.scalar(char_context + 0x98, 8)? != character
-        || r.scalar(character + 8, 8)? != b + CHARACTER_AGENT_VTABLE
+        || r.scalar(character + 8, 8)? != b + l.character_agent_vtable
         || r.scalar(character + 0x178, 4)? & 0x10 == 0
         || r.scalar(character + 0x3f0, 8)? != inventory
-        || r.scalar(inventory, 8)? != b + INVENTORY_VTABLE
+        || r.scalar(inventory, 8)? != b + l.inventory_vtable
         || r.scalar(inventory + 0x70, 8)? != character
         || r.scalar(inventory + 0x440, 4)? as u32 != bag_slots
         || r.read::<{ 8 * BAGS }>(inventory + 0x380)? != list

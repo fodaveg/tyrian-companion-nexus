@@ -10,19 +10,23 @@
 //! missing coverage, never a zero balance, so nothing here invents one. Any doubt rejects the
 //! whole wallet sample, and that rejection never touches the inventory sample of the same cycle.
 
-use crate::inventory::{BuildProfile, Memory, ReadError, Reader, MAX_POINTER, TLS_INDEX_RVA};
+use crate::inventory::{BuildProfile, Memory, ReadError, Reader, MAX_POINTER};
+use crate::layout::Layout;
 use crate::sha256::{hex, sha256};
 use std::collections::BTreeMap;
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
+// The RVAs of the certified build, for the tests that fix them against the audit. The reader
+// takes them from its profile's layout, never from here.
+pub const CHAR_CONTEXT_VTABLE: u64 = Layout::CERTIFIED.char_context_vtable;
 /// Slot `0x70` of the character context's vtable: `mov rax,[rcx+0xA0]; ret`.
-pub const CHAR_CONTEXT_GETTER: u64 = 0x498900;
-pub const CHARACTER_VTABLE: u64 = 0x215e9d8;
+pub const CHAR_CONTEXT_GETTER: u64 = Layout::CERTIFIED.local_player_getter;
+/// The wallet's character is the local player.
+pub const CHARACTER_VTABLE: u64 = Layout::CERTIFIED.player_vtable;
 /// Slot `0x250` of the wallet character's vtable: `lea rax,[rcx+0x1878]; ret`.
-pub const CHARACTER_WALLET_GETTER: u64 = 0x11bb070;
-pub const CURRENCY_MANAGER_VTABLE: u64 = 0x2173178;
+pub const CHARACTER_WALLET_GETTER: u64 = Layout::CERTIFIED.character_wallet_getter;
+pub const CURRENCY_MANAGER_VTABLE: u64 = Layout::CERTIFIED.currency_manager_vtable;
 /// Slot 0 of the currency manager's vtable, the balance getter the wallet list calls by ID.
-pub const BALANCE_GETTER: u64 = 0x12722a0;
+pub const BALANCE_GETTER: u64 = Layout::CERTIFIED.balance_getter;
 
 /// The map's capacity must be a power of two in `1..=MAX_CAPACITY`.
 pub const MAX_CAPACITY: u32 = 4096;
@@ -45,47 +49,53 @@ pub struct Guard {
     pub sha256: &'static str,
 }
 const HASH_TABLE: &str = "hash_table";
-/// The two route getters, the balance getter, the open-addressing lookup and its 256-DWORD table.
-pub const GUARDS: [Guard; 5] = [
-    Guard {
-        name: "local_character",
-        rva: CHAR_CONTEXT_GETTER,
-        size: 8,
-        sha256: "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
-    },
-    Guard {
-        name: "wallet_manager",
-        rva: CHARACTER_WALLET_GETTER,
-        size: 8,
-        sha256: "c203d880264ebf1b4f76b9fea85fe724b261855c6a7c80a705f2176e816eea1d",
-    },
-    Guard {
-        name: "balance_getter",
-        rva: BALANCE_GETTER,
-        size: 80,
-        sha256: "083b4b0fa2e89c842b05e661289ba3d3376e51ad7feade6031ca927e1073b5ef",
-    },
-    Guard {
-        name: "hash_lookup",
-        rva: 0x2397f0,
-        size: 296,
-        sha256: "c0c92b06913be7e76211d3b0b20cc397d17e7767a528d46f71ecbbae7b3e75a4",
-    },
-    Guard {
-        name: HASH_TABLE,
-        rva: 0x1b90df0,
-        size: 1024,
-        sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
-    },
-];
+/// The two route getters, the balance getter, the open-addressing lookup and its 256-DWORD table,
+/// where `layout` places them. The digests are those of the certified build's bytes.
+pub const fn guards_of(l: &Layout) -> [Guard; 5] {
+    [
+        Guard {
+            name: "local_character",
+            rva: l.local_player_getter,
+            size: 8,
+            sha256: "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
+        },
+        Guard {
+            name: "wallet_manager",
+            rva: l.character_wallet_getter,
+            size: 8,
+            sha256: "c203d880264ebf1b4f76b9fea85fe724b261855c6a7c80a705f2176e816eea1d",
+        },
+        Guard {
+            name: "balance_getter",
+            rva: l.balance_getter,
+            size: 80,
+            sha256: "083b4b0fa2e89c842b05e661289ba3d3376e51ad7feade6031ca927e1073b5ef",
+        },
+        Guard {
+            name: "hash_lookup",
+            rva: l.hash_lookup,
+            size: 296,
+            sha256: "c0c92b06913be7e76211d3b0b20cc397d17e7767a528d46f71ecbbae7b3e75a4",
+        },
+        Guard {
+            name: HASH_TABLE,
+            rva: l.hash_table,
+            size: 1024,
+            sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
+        },
+    ]
+}
+/// The guards of the certified build, for the tests that fix them against the audit.
+pub const GUARDS: [Guard; 5] = guards_of(&Layout::CERTIFIED);
 /// The audited key (volatile magic) and its hash, checked against the table the guard yields.
 pub const PROFILE_KEY: u32 = 45;
 pub const PROFILE_KEY_HASH: u32 = 0xc0da_54d6;
-// `BuildProfile::checked` only accepts an image that reaches the TLS index, which lies beyond
-// every address this module reads inside the executable.
-const _: () = assert!(CURRENCY_MANAGER_VTABLE + 8 <= TLS_INDEX_RVA);
-const _: () = assert!(CHARACTER_VTABLE + 0x258 <= TLS_INDEX_RVA);
-const _: () = assert!(0x1b90df0 + 1024 <= TLS_INDEX_RVA);
+// `BuildProfile::checked` only accepts a layout whose image reaches the TLS index, which lies
+// beyond every address this module reads inside the executable ([`Layout::validate`] checks it
+// for any layout; these are the three that bound this module in the certified one).
+const _: () = assert!(Layout::CERTIFIED.currency_manager_vtable + 8 <= Layout::CERTIFIED.tls_index);
+const _: () = assert!(Layout::CERTIFIED.player_vtable + 0x258 <= Layout::CERTIFIED.tls_index);
+const _: () = assert!(Layout::CERTIFIED.hash_table + 1024 <= Layout::CERTIFIED.tls_index);
 
 /// Closed reasons for a wallet without coverage; no address, key or OS error reaches the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +189,7 @@ pub fn currency_hash(key: u32, table: &[u32; 256]) -> u32 {
 #[derive(Debug, Clone)]
 pub struct WalletProfile {
     base: u64,
+    layout: &'static Layout,
     table: [u32; 256],
 }
 impl WalletProfile {
@@ -187,7 +198,7 @@ impl WalletProfile {
         profile: BuildProfile,
     ) -> Result<Self, WalletError> {
         let mut table = [0u32; 256];
-        for guard in &GUARDS {
+        for guard in &guards_of(profile.layout) {
             let mut bytes = vec![0u8; guard.size];
             r.read_into(profile.base + guard.rva, &mut bytes)?;
             if hex(&sha256(&bytes)) != guard.sha256 {
@@ -204,6 +215,7 @@ impl WalletProfile {
         }
         Ok(Self {
             base: profile.base,
+            layout: profile.layout,
             table,
         })
     }
@@ -249,16 +261,16 @@ pub fn wallet_snapshot<M: Memory>(
     if !(0x10000..=MAX_POINTER - 0x198).contains(&context) || context & 7 != 0 {
         return Err(WalletError::Bounds);
     }
-    let b = profile.base;
+    let (b, l) = (profile.base, profile.layout);
     let char_context = object(r, context + 0x98)?;
-    identity(r, char_context, b + CHAR_CONTEXT_VTABLE)?;
-    identity(r, b + CHAR_CONTEXT_VTABLE + 0x70, b + CHAR_CONTEXT_GETTER)?;
+    identity(r, char_context, b + l.char_context_vtable)?;
+    identity(r, b + l.char_context_vtable + 0x70, b + l.local_player_getter)?;
     let character = object(r, char_context + 0xa0)?;
-    identity(r, character, b + CHARACTER_VTABLE)?;
-    identity(r, b + CHARACTER_VTABLE + 0x250, b + CHARACTER_WALLET_GETTER)?;
+    identity(r, character, b + l.player_vtable)?;
+    identity(r, b + l.player_vtable + 0x250, b + l.character_wallet_getter)?;
     let manager = character + 0x1878;
-    identity(r, manager, b + CURRENCY_MANAGER_VTABLE)?;
-    identity(r, b + CURRENCY_MANAGER_VTABLE, b + BALANCE_GETTER)?;
+    identity(r, manager, b + l.currency_manager_vtable)?;
+    identity(r, b + l.currency_manager_vtable, b + l.balance_getter)?;
     let header: [u8; 16] = r.read(manager + 8)?;
     let capacity = dword(&header, 0);
     let count = dword(&header, 4);
@@ -285,9 +297,9 @@ pub fn wallet_snapshot<M: Memory>(
     }
     if r.scalar(context + 0x98, 8)? != char_context
         || r.scalar(char_context + 0xa0, 8)? != character
-        || r.scalar(char_context, 8)? != b + CHAR_CONTEXT_VTABLE
-        || r.scalar(character, 8)? != b + CHARACTER_VTABLE
-        || r.scalar(manager, 8)? != b + CURRENCY_MANAGER_VTABLE
+        || r.scalar(char_context, 8)? != b + l.char_context_vtable
+        || r.scalar(character, 8)? != b + l.player_vtable
+        || r.scalar(manager, 8)? != b + l.currency_manager_vtable
         || r.read::<16>(manager + 8)? != header
     {
         return Err(WalletError::Changed);

@@ -18,6 +18,7 @@ use tyrian_companion_nexus_core::inventory::{
     BuildProfile, Memory, ReadError, Reader, 
 };
 use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
+use tyrian_companion_nexus_core::layout::Layout;
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 use tyrian_companion_nexus_core::wallet::*;
 const BASE: u64 = 0x140000000;
@@ -60,6 +61,8 @@ fn hash(key: u32) -> u32 {
 #[derive(Default, Clone)]
 struct Fixture {
     bytes: BTreeMap<u64, u8>,
+    /// Where a whole 8-byte value was put: the only places a pointer of the fixture can be.
+    words: std::collections::BTreeSet<u64>,
     capacity: u32,
     forbidden: Vec<Range<u64>>,
     fail: Option<u64>,
@@ -69,6 +72,9 @@ struct Fixture {
 }
 impl Fixture {
     fn put(&mut self, address: u64, value: u64, size: usize) {
+        if size == 8 {
+            self.words.insert(address);
+        }
         for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
             self.bytes.insert(address + i as u64, *byte);
         }
@@ -132,7 +138,7 @@ impl Memory for Fixture {
     }
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, &Layout::CERTIFIED).unwrap()
 }
 /// A certified image, a whole route and a map holding exactly `balances`.
 fn fixture(capacity: u32, balances: &[(u32, u32)]) -> Fixture {
@@ -180,23 +186,27 @@ fn read(m: Fixture) -> Result<WalletSnapshot, WalletError> {
 #[test]
 fn constants_guard_digests_and_key_hashes_match_the_audited_profile() {
     assert_eq!(AUDITED["binary_sha256"].as_str(), Some(REFERENCE_BUILD_SHA256));
-    assert_eq!(AUDITED["image_size"].as_u64(), Some(IMAGE));
+    // The certified layout, and the guards it places, are the audited profile.
+    let l = &Layout::CERTIFIED;
+    assert_eq!(guards_of(l), GUARDS);
+    assert_eq!(AUDITED["image_size"].as_u64(), Some(l.image_size));
+    assert_eq!(IMAGE, l.image_size);
     for (name, value) in [
-        ("char_context_vtable", CHAR_CONTEXT_VTABLE),
-        ("char_context_getter", CHAR_CONTEXT_GETTER),
-        ("character_vtable", CHARACTER_VTABLE),
-        ("character_wallet_getter", CHARACTER_WALLET_GETTER),
-        ("currency_manager_vtable", CURRENCY_MANAGER_VTABLE),
-        ("balance_getter", BALANCE_GETTER),
+        ("char_context_vtable", l.char_context_vtable),
+        ("char_context_getter", l.local_player_getter),
+        ("character_vtable", l.player_vtable),
+        ("character_wallet_getter", l.character_wallet_getter),
+        ("currency_manager_vtable", l.currency_manager_vtable),
+        ("balance_getter", l.balance_getter),
         ("currency_id", PROFILE_KEY as u64),
         ("currency_hash", PROFILE_KEY_HASH as u64),
     ] {
         assert_eq!(AUDITED[name].as_u64(), Some(value), "{name}");
     }
     let audited = AUDITED["guards"].as_array().unwrap();
-    assert_eq!(audited.len(), GUARDS.len());
+    assert_eq!(audited.len(), guards_of(l).len());
     let mut total = 0;
-    for (expected, guard) in audited.iter().zip(GUARDS) {
+    for (expected, guard) in audited.iter().zip(guards_of(l)) {
         assert_eq!(expected["name"].as_str(), Some(guard.name));
         assert_eq!(expected["rva"].as_u64(), Some(guard.rva), "{}", guard.name);
         assert_eq!(expected["size"].as_u64(), Some(guard.size as u64));
@@ -524,4 +534,29 @@ fn largest_listable_wallet_fits_the_wallet_budget_and_a_smaller_budget_fails_clo
         WalletProfile::verified(&mut r, profile()).err(),
         Some(WalletError::Bounds)
     );
+}
+
+#[path = "support/moved_build.rs"]
+mod moved_build;
+
+/// A build whose code and vtables moved ([`moved_build`]) is read with its own layout exactly as
+/// the certified build is read with `Layout::CERTIFIED`: the audited guard bytes where the
+/// layout places them, the same balances, from the same copies. With the certified layout the
+/// moved bytes fail at the first guard.
+#[test]
+fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
+    let balances: Vec<(u32, u32)> = LIVE_IDS.iter().map(|id| (*id, id * 37)).collect();
+    let m = fixture(128, &balances);
+    let read_with = |m: Fixture, profile: BuildProfile| {
+        let mut r = Reader::bounded(m, MAX_BYTES);
+        let result = WalletProfile::verified(&mut r, profile)
+            .and_then(|verified| wallet_snapshot(&mut r, &verified, CTX));
+        (result, r.reads, r.bytes)
+    };
+    let certified = read_with(m.clone(), profile());
+    assert_eq!(certified.0.as_ref().map(|wallet| wallet.balances().len()), Ok(55));
+    let moved = Fixture { bytes: moved_build::bytes(&m.bytes, &m.words), ..m.clone() };
+    let moved_profile = BuildProfile::checked(BASE, moved_build::layout()).unwrap();
+    assert_eq!(read_with(moved.clone(), moved_profile), certified);
+    assert_eq!(read(moved), Err(WalletError::Guard));
 }

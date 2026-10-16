@@ -42,7 +42,8 @@
 //! do not. [`magic_find`] keeps nothing and has no such window. The addon reads through
 //! [`CachedMagicFind`], which also forgets everything when the client discards a cycle.
 
-use crate::inventory::{BuildProfile, Memory, Reader, TLS_INDEX_RVA};
+use crate::inventory::{BuildProfile, Memory, Reader};
+use crate::layout::Layout;
 use crate::passive::{
     content, context_checked, dword, heap, identity, object, qword, table, verify, Guard,
     Uncovered,
@@ -51,15 +52,17 @@ use crate::wallet::currency_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const CHAR_CONTEXT_VTABLE: u64 = 0x215dfc8;
-pub const CHARACTER_VTABLE: u64 = 0x2160be0;
-pub const CHARACTER_AGENT_VTABLE: u64 = 0x2161250;
-pub const COMBATANT_VTABLE: u64 = 0x2161518;
-pub const PLAYER_VTABLE: u64 = 0x215e9d8;
-pub const PLAYER_STATS_VTABLE: u64 = 0x21691b8;
-pub const BUFF_MANAGER_VTABLE: u64 = 0x21841a8;
+// The vtables of the certified build, for the tests that fix them against the audit. The reader
+// takes them from its profile's layout, never from here.
+pub const CHAR_CONTEXT_VTABLE: u64 = Layout::CERTIFIED.char_context_vtable;
+pub const CHARACTER_VTABLE: u64 = Layout::CERTIFIED.character_vtable;
+pub const CHARACTER_AGENT_VTABLE: u64 = Layout::CERTIFIED.character_agent_vtable;
+pub const COMBATANT_VTABLE: u64 = Layout::CERTIFIED.combatant_vtable;
+pub const PLAYER_VTABLE: u64 = Layout::CERTIFIED.player_vtable;
+pub const PLAYER_STATS_VTABLE: u64 = Layout::CERTIFIED.player_stats_vtable;
+pub const BUFF_MANAGER_VTABLE: u64 = Layout::CERTIFIED.buff_manager_vtable;
 /// Installed by the table node constructor (RVA `0x12C23A0`); 91 of 91 nodes in the live run.
-pub const BUFF_NODE_VTABLE: u64 = 0x2184160;
+pub const BUFF_NODE_VTABLE: u64 = Layout::CERTIFIED.buff_node_vtable;
 /// `RewardCreatureAll` and `RewardCreatureAllBoon` in the client's modifier name table.
 pub const MAGIC_FIND: u32 = 0x71;
 pub const MAGIC_FIND_BOON: u32 = 0x72;
@@ -136,141 +139,150 @@ const DEFINITION_HEAD: usize = 0x30;
 pub const MAX_CONTENT_AGE: Duration = Duration::from_secs(30);
 
 /// The route getters, the widget's case, the modifier sum and its helpers, and the hash table.
-pub const GUARDS: [Guard; 19] = [
-    Guard {
-        name: "local_player_getter",
-        rva: 0x498900,
-        size: 8,
-        sha256: "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
-    },
-    Guard {
-        name: "controlled_character_getter",
-        rva: 0x11b4f10,
-        size: 29,
-        sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
-    },
-    Guard {
-        name: "player_by_id_getter",
-        rva: 0x11b77f0,
-        size: 25,
-        sha256: "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086",
-    },
-    Guard {
-        name: "player_stats_getter",
-        rva: 0x11bb1c0,
-        size: 8,
-        sha256: "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e",
-    },
-    Guard {
-        name: "account_luck_level_getter",
-        rva: 0x402b80,
-        size: 4,
-        sha256: "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635",
-    },
-    Guard {
-        name: "combatant_cast",
-        rva: 0x11d74b0,
-        size: 14,
-        sha256: "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf",
-    },
-    Guard {
-        name: "buff_manager_getter",
-        rva: 0x400100,
-        size: 8,
-        sha256: "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b",
-    },
-    Guard {
-        name: "is_player",
-        rva: 0x11d9be0,
-        size: 24,
-        sha256: "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e",
-    },
-    Guard {
-        name: "player_id_getter",
-        rva: 0x11d84e0,
-        size: 54,
-        sha256: "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891",
-    },
-    Guard {
-        name: "modifier_value",
-        rva: 0x12c2f60,
-        size: 129,
-        sha256: "a581f4a80d24c21f359d6b3ee8a93183db4cc533230c6de1b68188aa553cb7e1",
-    },
-    Guard {
-        name: "pushed_modifier_sum",
-        rva: 0x12c3030,
-        size: 212,
-        sha256: "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88",
-    },
-    Guard {
-        name: "buff_iterator",
-        rva: 0x12c33e0,
-        size: 188,
-        sha256: "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18",
-    },
-    Guard {
-        name: "buff_filter",
-        rva: 0x12c4e30,
-        size: 142,
-        sha256: "7b44974ea06ed7f392fde2572356338fde9dc4eba4922634d480716d6a20abce",
-    },
-    Guard {
-        name: "buff_lookup",
-        rva: 0x251e20,
-        size: 296,
-        sha256: "da6f2f3399943312c769046a68e5612e416d4af1c663cbf0108895acdf32aeea",
-    },
-    Guard {
-        name: "modifier_sum",
-        rva: 0x12c1050,
-        size: 2536,
-        sha256: "d42282064b43fe101e6c0296e8d39d56b12241736a56b78b20dfb91c96c2a3f2",
-    },
-    Guard {
-        name: "modifier_formula",
-        rva: 0x12c1a40,
-        size: 816,
-        sha256: "03cf6e4c30459e903354441baf6fddf5a18a642b01d8de2cee51296b9a19e500",
-    },
-    Guard {
-        name: "magic_find_case",
-        rva: 0x3e4898,
-        size: 241,
-        sha256: "189467c9767e02761b8847a53bc2e5e81fd5cc7b9eddb3d35d44341a9180a48a",
-    },
-    Guard {
-        name: "attribute_modifier_map",
-        rva: 0x3e3ea0,
-        size: 296,
-        sha256: "f3365e3fff838ba902f21415c68560a92bc466f2a02c9af21eb0c6f41ef0cc3d",
-    },
-    Guard {
-        name: HASH_TABLE,
-        rva: 0x1b90df0,
-        size: 1024,
-        sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
-    },
-];
-/// Vtable, slot and the guarded code that slot must select.
-pub const SLOTS: [(u64, u64, u64); 12] = [
-    (CHAR_CONTEXT_VTABLE, 0x68, 0x11b4f10),
-    (CHAR_CONTEXT_VTABLE, 0x70, 0x498900),
-    (CHAR_CONTEXT_VTABLE, 0x118, 0x11b77f0),
-    (CHARACTER_VTABLE, 0x100, 0x11d74b0),
-    (COMBATANT_VTABLE, 0x38, 0x400100),
-    (CHARACTER_AGENT_VTABLE, 0x68, 0x11d9be0),
-    (CHARACTER_AGENT_VTABLE, 0x18, 0x11d84e0),
-    (PLAYER_VTABLE, 0x320, 0x11bb1c0),
-    (PLAYER_STATS_VTABLE, 0x30, 0x402b80),
-    (BUFF_MANAGER_VTABLE, 0x18, 0x12c2f60),
-    (BUFF_MANAGER_VTABLE, 0x20, 0x12c3030),
-    (BUFF_MANAGER_VTABLE, 0x28, 0x12c33e0),
-];
-// `BuildProfile::checked` only accepts an image that reaches the TLS index, which lies beyond
-// every address this module reads inside the executable.
-const _: () = assert!(BUFF_MANAGER_VTABLE + 0x30 <= TLS_INDEX_RVA);
-const _: () = assert!(PLAYER_VTABLE + 0x328 <= TLS_INDEX_RVA);
+pub const fn guards_of(l: &Layout) -> [Guard; 19] {
+    [
+        Guard {
+            name: "local_player_getter",
+            rva: l.local_player_getter,
+            size: 8,
+            sha256: "8fd42236905c9ccb06782e7a64df231d2be5f1c373f520fb9ff3a1a087796392",
+        },
+        Guard {
+            name: "controlled_character_getter",
+            rva: l.controlled_character_getter,
+            size: 29,
+            sha256: "1f8522d1275fdf3efb6c9b9c7d7ae54d914e2723422263f0073ce6d09a8a830b",
+        },
+        Guard {
+            name: "player_by_id_getter",
+            rva: l.player_by_id_getter,
+            size: 25,
+            sha256: "7282c8c69835b41f12c3ddad5eff3e4955cc2fbcbb6514295e510c8e16244086",
+        },
+        Guard {
+            name: "player_stats_getter",
+            rva: l.player_stats_getter,
+            size: 8,
+            sha256: "3e958f563d9a1a4621232a43557373e42652bb1280fbfa2214f0d767abf7f16e",
+        },
+        Guard {
+            name: "account_luck_level_getter",
+            rva: l.account_luck_level_getter,
+            size: 4,
+            sha256: "e27121b8816e0aef2ed29676899d26e79f66af7e5ee5aed902be7208122bb635",
+        },
+        Guard {
+            name: "combatant_cast",
+            rva: l.combatant_cast,
+            size: 14,
+            sha256: "39f54bd1c6a5da3b35f2d3060c65179833ad00f2db5cb9f73dd75a67d3e09faf",
+        },
+        Guard {
+            name: "buff_manager_getter",
+            rva: l.buff_manager_getter,
+            size: 8,
+            sha256: "6b185d33a0706874cb3e05bca6abc44f8ea444d6a7e1e6548f7f0b263040af5b",
+        },
+        Guard {
+            name: "is_player",
+            rva: l.is_player,
+            size: 24,
+            sha256: "1a16f6adc080470acfd8f3d49b216607ece022ee3006e2430d7397ebf6fc164e",
+        },
+        Guard {
+            name: "player_id_getter",
+            rva: l.player_id_getter,
+            size: 54,
+            sha256: "a701c55fe12ab50346fda01b72eb72156039b838ab3da4ad0059014fdd46b891",
+        },
+        Guard {
+            name: "modifier_value",
+            rva: l.modifier_value,
+            size: 129,
+            sha256: "a581f4a80d24c21f359d6b3ee8a93183db4cc533230c6de1b68188aa553cb7e1",
+        },
+        Guard {
+            name: "pushed_modifier_sum",
+            rva: l.pushed_modifier_sum,
+            size: 212,
+            sha256: "84b64e88e0cfcd72545ceb0724c6c3b1214eac9f26e45a0cf04c037ba273ed88",
+        },
+        Guard {
+            name: "buff_iterator",
+            rva: l.buff_iterator,
+            size: 188,
+            sha256: "698db876d7edf85250891673fe1d791224a161b1489d90147497ba7c91abbf18",
+        },
+        Guard {
+            name: "buff_filter",
+            rva: l.buff_filter,
+            size: 142,
+            sha256: "7b44974ea06ed7f392fde2572356338fde9dc4eba4922634d480716d6a20abce",
+        },
+        Guard {
+            name: "buff_lookup",
+            rva: l.buff_lookup,
+            size: 296,
+            sha256: "da6f2f3399943312c769046a68e5612e416d4af1c663cbf0108895acdf32aeea",
+        },
+        Guard {
+            name: "modifier_sum",
+            rva: l.modifier_sum,
+            size: 2536,
+            sha256: "d42282064b43fe101e6c0296e8d39d56b12241736a56b78b20dfb91c96c2a3f2",
+        },
+        Guard {
+            name: "modifier_formula",
+            rva: l.modifier_formula,
+            size: 816,
+            sha256: "03cf6e4c30459e903354441baf6fddf5a18a642b01d8de2cee51296b9a19e500",
+        },
+        Guard {
+            name: "magic_find_case",
+            rva: l.magic_find_case,
+            size: 241,
+            sha256: "189467c9767e02761b8847a53bc2e5e81fd5cc7b9eddb3d35d44341a9180a48a",
+        },
+        Guard {
+            name: "attribute_modifier_map",
+            rva: l.attribute_modifier_map,
+            size: 296,
+            sha256: "f3365e3fff838ba902f21415c68560a92bc466f2a02c9af21eb0c6f41ef0cc3d",
+        },
+        Guard {
+            name: HASH_TABLE,
+            rva: l.hash_table,
+            size: 1024,
+            sha256: "7a5e36b78f411ef1d20f94aec5c1e324e5f43b47e1b084ea392d596daa25bed6",
+        },
+    ]
+}
+/// Vtable, slot and the guarded code that slot must select, where `layout` places the vtables
+/// and the code; the slots are fixed.
+pub const fn slots_of(l: &Layout) -> [(u64, u64, u64); 12] {
+    [
+        (l.char_context_vtable, 0x68, l.controlled_character_getter),
+        (l.char_context_vtable, 0x70, l.local_player_getter),
+        (l.char_context_vtable, 0x118, l.player_by_id_getter),
+        (l.character_vtable, 0x100, l.combatant_cast),
+        (l.combatant_vtable, 0x38, l.buff_manager_getter),
+        (l.character_agent_vtable, 0x68, l.is_player),
+        (l.character_agent_vtable, 0x18, l.player_id_getter),
+        (l.player_vtable, 0x320, l.player_stats_getter),
+        (l.player_stats_vtable, 0x30, l.account_luck_level_getter),
+        (l.buff_manager_vtable, 0x18, l.modifier_value),
+        (l.buff_manager_vtable, 0x20, l.pushed_modifier_sum),
+        (l.buff_manager_vtable, 0x28, l.buff_iterator),
+    ]
+}
+/// The guards and slots of the certified build, for the tests that fix them against the audit.
+pub const GUARDS: [Guard; 19] = guards_of(&Layout::CERTIFIED);
+pub const SLOTS: [(u64, u64, u64); 12] = slots_of(&Layout::CERTIFIED);
+// `BuildProfile::checked` only accepts a layout whose image reaches the TLS index, which lies
+// beyond every address this module reads inside the executable ([`Layout::validate`] checks it
+// for any layout; these are the two that bound this module's slots in the certified one).
+const _: () = assert!(Layout::CERTIFIED.buff_manager_vtable + 0x30 <= Layout::CERTIFIED.tls_index);
+const _: () = assert!(Layout::CERTIFIED.player_vtable + 0x328 <= Layout::CERTIFIED.tls_index);
 // One definition at its bound, with its head and its group, is under a third of a pass's
 // budget: the bound on records can never be what lets a pass ask for more than `MAX_BYTES`.
 const _: () = assert!((DEFINITION_HEAD + 12 + MAX_MODIFIERS as usize * MODIFIER) * 3 < MAX_BYTES);
@@ -310,6 +322,7 @@ pub enum MagicFindCoverage {
 #[derive(Debug, Clone)]
 pub struct MagicFindProfile {
     base: u64,
+    layout: &'static Layout,
     table: [u32; 256],
 }
 impl MagicFindProfile {
@@ -317,19 +330,20 @@ impl MagicFindProfile {
         r: &mut Reader<M>,
         profile: BuildProfile,
     ) -> Result<Self, Uncovered> {
-        Self::build(r, profile, &GUARDS)
+        Self::build(r, profile, &guards_of(profile.layout))
     }
     /// For this crate's fixtures only; the addon calls [`Self::verified`] and nothing else.
     /// Fixtures carry no bytes of the game, so they stand for the executable with guard
-    /// contents and digests of their own. The ranges must still be exactly the audited ones:
-    /// an empty, shorter or shifted list is refused before anything is read.
+    /// contents and digests of their own. The ranges must still be exactly the audited ones,
+    /// where the profile's layout places them: an empty, shorter or shifted list is refused
+    /// before anything is read.
     #[doc(hidden)]
     pub fn verified_against<M: Memory>(
         r: &mut Reader<M>,
         profile: BuildProfile,
         guards: &[Guard],
     ) -> Result<Self, Uncovered> {
-        if !crate::passive::same_ranges(guards, &GUARDS) {
+        if !crate::passive::same_ranges(guards, &guards_of(profile.layout)) {
             return Err(Uncovered::Guard);
         }
         Self::build(r, profile, guards)
@@ -351,6 +365,7 @@ impl MagicFindProfile {
         })?;
         Ok(Self {
             base: profile.base,
+            layout: profile.layout,
             table: words.ok_or(Uncovered::Guard)?,
         })
     }
@@ -700,21 +715,22 @@ struct Route {
 fn route<M: Memory>(
     r: &mut Reader<M>,
     b: u64,
+    l: &Layout,
     context: u64,
 ) -> Result<(Route, [u8; CHAR_CONTEXT_BLOCK], [u8; CHARACTER_BLOCK]), Uncovered> {
     let char_context = object(r, context + 0x98)?;
     let context_block: [u8; CHAR_CONTEXT_BLOCK] = r.read(char_context)?;
-    certified(u64_at(&context_block, 0)?, b + CHAR_CONTEXT_VTABLE)?;
+    certified(u64_at(&context_block, 0)?, b + l.char_context_vtable)?;
     let character = owned(u64_at(&context_block, 0x98)?)?;
     let character_block: [u8; CHARACTER_BLOCK] = r.read(character)?;
-    certified(u64_at(&character_block, 0)?, b + CHARACTER_VTABLE)?;
+    certified(u64_at(&character_block, 0)?, b + l.character_vtable)?;
     let player = owned(u64_at(&context_block, 0xa0)?)?;
-    identity(r, player, b + PLAYER_VTABLE)?;
+    identity(r, player, b + l.player_vtable)?;
     let stats: [u8; STATS_BLOCK] = r.read(player + 0x9700)?;
-    certified(u64_at(&stats, 0)?, b + PLAYER_STATS_VTABLE)?;
+    certified(u64_at(&stats, 0)?, b + l.player_stats_vtable)?;
     let manager = owned(u64_at(&character_block, 0xd0)?)?;
     let manager_block: [u8; MANAGER_BLOCK] = r.read(manager)?;
-    certified(u64_at(&manager_block, 0)?, b + BUFF_MANAGER_VTABLE)?;
+    certified(u64_at(&manager_block, 0)?, b + l.buff_manager_vtable)?;
     Ok((
         Route {
             owner: (char_context, character, player, manager),
@@ -728,10 +744,11 @@ fn route<M: Memory>(
     ))
 }
 
-/// Every slot of [`SLOTS`] must select its guarded code. The slots of one vtable are copied
-/// together, from the lowest to the highest.
-fn slots<M: Memory>(r: &mut Reader<M>, b: u64) -> Result<(), Uncovered> {
-    let mut rest: &[(u64, u64, u64)] = &SLOTS;
+/// Every slot of [`slots_of`] the layout must select its guarded code. The slots of one vtable
+/// are copied together, from the lowest to the highest.
+fn slots<M: Memory>(r: &mut Reader<M>, b: u64, l: &Layout) -> Result<(), Uncovered> {
+    let table = slots_of(l);
+    let mut rest: &[(u64, u64, u64)] = &table;
     while let Some(&(vtable, ..)) = rest.first() {
         let run = rest.iter().take_while(|slot| slot.0 == vtable).count();
         let (group, later) = rest.split_at_checked(run).ok_or(Uncovered::Bounds)?;
@@ -765,7 +782,7 @@ fn occupant<M: Memory>(
     }
     let node = heap(node)?;
     let link: [u8; NODE_BLOCK] = r.read(node)?;
-    certified(u64_at(&link, 0)?, profile.base + BUFF_NODE_VTABLE)?;
+    certified(u64_at(&link, 0)?, profile.base + profile.layout.buff_node_vtable)?;
     if u32_at(&link, 0x18)? != key {
         return Err(Uncovered::Integrity);
     }
@@ -982,16 +999,16 @@ fn pass<M: Memory>(
     probe: bool,
 ) -> Result<(MagicFind, (u64, u64)), Uncovered> {
     context_checked(context)?;
-    let b = profile.base;
-    let (first, context_block, character_block) = route(r, b, context)?;
+    let (b, l) = (profile.base, profile.layout);
+    let (first, context_block, character_block) = route(r, b, l, context)?;
     let (_, character, player, _) = first.owner;
-    slots(r, b)?;
+    slots(r, b, l)?;
     // The widget resolves the player from the character's id; it must be the local one.
     if u32_at(&character_block, 0x178)? & 0x10 == 0 {
         return Err(Uncovered::Root);
     }
-    certified(u64_at(&character_block, 8)?, b + CHARACTER_AGENT_VTABLE)?;
-    certified(u64_at(&character_block, 0x40)?, b + COMBATANT_VTABLE)?;
+    certified(u64_at(&character_block, 8)?, b + l.character_agent_vtable)?;
+    certified(u64_at(&character_block, 0x40)?, b + l.combatant_vtable)?;
     let agent = u32_at(&character_block, 0xa0)?;
     if agent & 0xf000_0000 != 0x3000_0000 {
         return Err(Uncovered::Root);
@@ -1113,7 +1130,7 @@ fn pass<M: Memory>(
 
     // The second look: the route again, with its identities, then the two tables. Of the
     // copied blocks it compares the owners and the fields of `Route`, nothing else.
-    if route(r, b, context)?.0 != first
+    if route(r, b, l, context)?.0 != first
         || (!pushed.is_empty() && table(r, pushed_at, pushed.len(), PUSHED)? != pushed)
         || (!buckets.is_empty() && table(r, entries, buckets.len(), BUCKET)? != buckets)
     {

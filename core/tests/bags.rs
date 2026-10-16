@@ -27,11 +27,11 @@ use tyrian_companion_nexus_core::inventory::{
     BuildProfile, Memory, ReadError, Reader, 
 };
 use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
+use tyrian_companion_nexus_core::layout::Layout;
 use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 
 const BASE: u64 = 0x140000000;
-const IMAGE: u64 = 0x2c49000;
 const CTX: u64 = 0x200000;
 const CHAR_CONTEXT: u64 = 0x210000;
 const CHARACTER: u64 = 0x220000;
@@ -62,6 +62,8 @@ fn synthetic_guards() -> Vec<Guard> {
 #[derive(Default, Clone)]
 struct Fixture {
     bytes: BTreeMap<u64, u8>,
+    /// Where a whole 8-byte value was put: the only places a pointer of the fixture can be.
+    words: std::collections::BTreeSet<u64>,
     heap: u64,
     remainder: u64,
     fail: Option<u64>,
@@ -73,6 +75,9 @@ struct Fixture {
 }
 impl Fixture {
     fn put(&mut self, address: u64, value: u64, size: usize) {
+        if size == 8 {
+            self.words.insert(address);
+        }
         for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
             self.bytes.insert(address + i as u64, *byte);
         }
@@ -172,7 +177,7 @@ fn small() -> Fixture {
     fixture(&[20, 32, 32, 28], 128, 40)
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, &Layout::CERTIFIED).unwrap()
 }
 /// Guards and one whole pass through the same budgeted reader, as the addon's first cycle does.
 fn run(m: Fixture) -> (Result<BagSlots, Uncovered>, usize) {
@@ -222,11 +227,16 @@ fn the_largest_certified_pass_costs_what_the_budget_comment_says() {
 fn production_constants_are_the_audited_profile() {
     let audited: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/bag_capacity_profile.json")).unwrap();
+    // The certified layout, and the guards and slots it places, are the audited profile.
+    let l = &Layout::CERTIFIED;
+    let certified = guards_of(l);
+    assert_eq!(certified, GUARDS);
+    assert_eq!(slots_of(l), SLOTS);
     for (name, value) in [
-        ("char_context_vtable", CHAR_CONTEXT_VTABLE),
-        ("character_agent_vtable", CHARACTER_AGENT_VTABLE),
-        ("inventory_vtable", INVENTORY_VTABLE),
-        ("bag_item_vtable", BAG_ITEM_VTABLE),
+        ("char_context_vtable", l.char_context_vtable),
+        ("character_agent_vtable", l.character_agent_vtable),
+        ("inventory_vtable", l.inventory_vtable),
+        ("bag_item_vtable", l.bag_item_vtable),
         ("bags_max", BAGS as u64),
         ("bag_size_max", BAG_SIZE_MAX as u64),
         ("content_pointer_remainder", tyrian_companion_nexus_core::passive::CONTENT_REMAINDER),
@@ -235,23 +245,23 @@ fn production_constants_are_the_audited_profile() {
     }
     assert_eq!(audited["binary_sha256"].as_str(), Some(REFERENCE_BUILD_SHA256));
     let guards = audited["guards"].as_array().unwrap();
-    assert_eq!(guards.len(), GUARDS.len());
-    for (expected, guard) in guards.iter().zip(GUARDS) {
+    assert_eq!(guards.len(), certified.len());
+    for (expected, guard) in guards.iter().zip(certified) {
         assert_eq!(expected["name"].as_str(), Some(guard.name));
         assert_eq!(expected["rva"].as_u64(), Some(guard.rva), "{}", guard.name);
         assert_eq!(expected["size"].as_u64(), Some(guard.size as u64), "{}", guard.name);
         assert_eq!(expected["sha256"].as_str(), Some(guard.sha256), "{}", guard.name);
     }
     let slots = audited["slots"].as_array().unwrap();
-    assert_eq!(slots.len(), SLOTS.len());
-    for (expected, (vtable, slot, target)) in slots.iter().zip(SLOTS) {
+    assert_eq!(slots.len(), slots_of(l).len());
+    for (expected, (vtable, slot, target)) in slots.iter().zip(slots_of(l)) {
         let name = expected["target"].as_str().unwrap();
         let table = audited[expected["vtable"].as_str().unwrap()].as_u64();
         assert_eq!(table, Some(vtable), "{name}");
         assert_eq!(expected["slot"].as_u64(), Some(slot), "{name}");
         assert_eq!(expected["target_rva"].as_u64(), Some(target), "{name}");
         // Every slot selects code that is itself guarded by digest.
-        assert!(GUARDS.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
+        assert!(certified.iter().any(|guard| guard.name == name && guard.rva == target), "{name}");
     }
 }
 
@@ -472,4 +482,33 @@ fn misaligned_or_low_context_rejects_before_reading() {
     assert_eq!(bag_slots(&mut reader, &verified, CTX + 4).map(|_| ()), Err(Uncovered::Bounds));
     assert_eq!(bag_slots(&mut reader, &verified, 0x100).map(|_| ()), Err(Uncovered::Bounds));
     assert_eq!(reader.bytes, before);
+}
+
+#[path = "support/moved_build.rs"]
+mod moved_build;
+
+/// A build whose code and vtables moved ([`moved_build`]) is read with its own layout exactly as
+/// the certified build is read with `Layout::CERTIFIED`: guards where the layout places them,
+/// with the same digests, and the same slots, free count and bytes. With the certified layout
+/// the moved bytes fail at the first guard.
+#[test]
+fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
+    let layout = moved_build::layout();
+    let guards: Vec<Guard> = guards_of(layout)
+        .iter()
+        .zip(synthetic_guards())
+        .map(|(moved, certified)| Guard { sha256: certified.sha256, ..*moved })
+        .collect();
+    for m in [small(), fixture(&LIVE_SIZES, 512, 313)] {
+        let certified = run(m.clone());
+        assert!(certified.0.is_ok(), "{certified:?}");
+        let moved = Fixture { bytes: moved_build::bytes(&m.bytes, &m.words), ..m.clone() };
+        let mut reader = Reader::bounded(moved.clone(), MAX_BYTES);
+        let profile = BuildProfile::checked(BASE, layout).unwrap();
+        let result = BagProfile::verified_against(&mut reader, profile, &guards)
+            .and_then(|verified| bag_slots(&mut reader, &verified, CTX))
+            .map(|(slots, _owner)| slots);
+        assert_eq!((result, reader.bytes), certified);
+        assert_eq!(run(moved).0, Err(Uncovered::Guard));
+    }
 }

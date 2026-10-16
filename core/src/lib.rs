@@ -25,6 +25,7 @@ pub mod farming;
 pub mod game_context;
 pub mod instance;
 pub mod inventory;
+pub mod layout;
 pub mod live;
 pub mod magic_find;
 pub mod magic_find_wire;

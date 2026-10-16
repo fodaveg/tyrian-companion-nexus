@@ -28,6 +28,8 @@ struct Race {
 #[derive(Default, Clone)]
 struct Fixture {
     bytes: BTreeMap<u64, u8>,
+    /// Where a whole 8-byte value was put: the only places a pointer of the fixture can be.
+    words: std::collections::BTreeSet<u64>,
     calls: Vec<(u64, usize)>,
     forbidden: Vec<u64>,
     race: Option<Race>,
@@ -35,6 +37,9 @@ struct Fixture {
 }
 impl Fixture {
     fn put(&mut self, address: u64, value: u64, size: usize) {
+        if size == 8 {
+            self.words.insert(address);
+        }
         for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
             self.bytes.insert(address + i as u64, *byte);
         }
@@ -92,7 +97,7 @@ impl Memory for &mut Fixture {
     }
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BASE, 0x2c49000).unwrap()
+    BuildProfile::checked(BASE, &Layout::CERTIFIED).unwrap()
 }
 fn fixture(count: u64) -> Fixture {
     let mut m = Fixture::default();
@@ -346,7 +351,16 @@ fn invalid_ranges_cannot_read() {
     // Which executable may be read is no longer a hash given here: since 16 October 2026 it is
     // what the file holds, checked by `certificate` before a profile is made (its tests, and
     // `executable`'s, are where a build that differs is refused).
-    assert!(matches!(BuildProfile::checked(0x1000, 0x2c49000), Err(ReadError::Bounds)));
+    assert!(matches!(BuildProfile::checked(0x1000, &Layout::CERTIFIED), Err(ReadError::Bounds)));
+    // A layout that does not hold its relations makes no profile either: here the TLS index
+    // lies before the vtables, which the readers' asserts used to refuse when the RVAs were
+    // constants.
+    let broken: &'static Layout = Box::leak(Box::new(Layout {
+        tls_index: 0x2000000,
+        ..Layout::CERTIFIED
+    }));
+    assert_eq!(broken.validate(), Err("rdata_vtables ends before tls_index"));
+    assert!(matches!(BuildProfile::checked(BASE, broken), Err(ReadError::Bounds)));
     let mut r = Reader::new(fixture(570));
     assert!(r.read::<8>(1).is_err());
     assert!(r.read::<8>(u64::MAX - 1).is_err());
@@ -1055,4 +1069,117 @@ fn only_a_failed_read_of_a_thread_that_is_gone_is_skipped() {
     assert!(is_gone_code(87), "ERROR_INVALID_PARAMETER");
     assert!(!is_gone_code(5), "ERROR_ACCESS_DENIED");
     assert!(!is_gone_code(0));
+}
+
+#[path = "support/moved_build.rs"]
+mod moved_build;
+
+/// `m` as the build whose code moved holds it ([`moved_build`]).
+fn moved(m: &Fixture) -> Fixture {
+    Fixture {
+        bytes: moved_build::bytes(&m.bytes, &m.words),
+        ..Fixture::default()
+    }
+}
+fn moved_profile() -> BuildProfile {
+    BuildProfile::checked(BASE, moved_build::layout()).unwrap()
+}
+/// One pass over `m` with `profile`: its outcome and what it asked for.
+fn pass_with(m: Fixture, profile: BuildProfile) -> (Result<InventorySnapshot, ReadError>, usize, usize) {
+    let mut r = Reader::new(m);
+    let result = inventory_snapshot(&mut r, profile, CTX);
+    (result, r.reads, r.bytes)
+}
+/// One item of every way the reader takes a quantity: the getter that reads the stack at
+/// `+0x98`, the one at `+0xd0`, the certified NULL fallback, each of the three conditional
+/// classes with its condition met and not, and a dense inventory of 300 conditional stacks.
+fn every_quantity_rule() -> Vec<(String, Fixture)> {
+    let mut all = vec![("stack at +0x98".to_string(), fixture(570))];
+    let mut m = fixture(570);
+    m.put(VT + 0x260, BASE + 0x13c8ce0, 8);
+    m.put(ITEM + 0xd0, STACK_VT, 8);
+    m.put(ITEM + 0xd8, 5, 4);
+    all.push(("stack at +0xd0".to_string(), m));
+    let mut m = fixture(570);
+    m.put(VT + 0x260, BASE + 0x168aa0, 8);
+    m.put(BASE + 0x168aa0, 0xc3c033, 3);
+    all.push(("NULL fallback".to_string(), m));
+    for (class, primary, embedded, evt, slot, predicate, subtype, field, value, stack, getter) in [
+        ("A", 0x225e6d0, 0xa8, 0x225e9e8, 0, 0x13ca880, 5, 0, 1, 0x98, 0x13ca840),
+        ("B", 0x225eec8, 0xa8, 0x225f1d0, 0, 0x13cb0b0, 10, 0, 1, 0x98, 0x13ca840),
+        ("C", 0x225ea60, 0xe0, 0x225ee08, 0x20, 0x13cac50, 9, 0x18, 4, 0xe8, 0x13caa80),
+    ] {
+        for active in [true, false] {
+            let mut m = fixture(570);
+            let vt = BASE + primary;
+            for (off, fun) in [
+                (8, 0x13c4930),
+                (0x68, 0x31ba20),
+                (0x70, 0x13c50f0),
+                (0xa0, 0x13c51f0),
+                (0x260, getter),
+            ] {
+                m.put(vt + off, BASE + fun, 8);
+            }
+            for (addr, val, size) in [
+                (ITEM, vt, 8),
+                (ITEM + embedded, BASE + evt, 8),
+                (BASE + evt + slot, BASE + predicate, 8),
+                (DEF + 0x2c, subtype, 4),
+                (DEF + 0x30, PAYLOAD, 8),
+                (PAYLOAD + field, if active { value } else { 0 }, 4),
+                (ITEM + stack, STACK_VT, 8),
+                (ITEM + stack + 8, 7, 4),
+            ] {
+                m.put(addr, val, size);
+            }
+            all.push((format!("conditional {class}, active {active}"), m));
+        }
+    }
+    all.push(("dense conditional".to_string(), dense(512, 300, Branch::Conditional)));
+    // A class whose slots end right before `.rdata` does: moved, it lies past where the
+    // certified `.rdata` ends, so only the moved range holds it.
+    let mut m = fixture(570);
+    let last = BASE + 0x2553500 - 0x268;
+    for (off, fun) in [
+        (8, 0x13c4930),
+        (0x68, 0x31ba20),
+        (0x70, 0x13c50f0),
+        (0xa0, 0x13c51f0),
+        (0x260, 0x84c4c0),
+    ] {
+        m.put(last + off, BASE + fun, 8);
+    }
+    m.put(ITEM, last, 8);
+    all.push(("a class at the end of .rdata".to_string(), m));
+    all
+}
+
+/// A build whose code and vtables moved (by 0x1000 in `.text`, 0x2000 in `.rdata` and 0x3000
+/// past it) is read with its own layout exactly as the certified build is read with
+/// `Layout::CERTIFIED`: the same snapshot, from the same number of copies of the same sizes.
+/// With the certified layout the moved bytes give nothing, so the move is one the reader sees.
+#[test]
+fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
+    assert_eq!(moved_build::layout().validate(), Ok(()));
+    for (what, m) in every_quantity_rule() {
+        let certified = pass_with(m.clone(), profile());
+        assert!(certified.0.is_ok(), "{what}: {certified:?}");
+        assert_eq!(pass_with(moved(&m), moved_profile()), certified, "{what}");
+        assert!(pass_with(moved(&m), profile()).0.is_err(), "{what}");
+    }
+}
+
+/// The TLS route of a moved build reads its TLS index where its layout puts it.
+#[test]
+fn a_build_whose_code_moved_finds_its_context_through_its_own_tls_index() {
+    let (m, located) = located_fixture();
+    let mut r = Reader::new(moved(&m));
+    assert_eq!(context_from_teb(&mut r, moved_profile(), TEB), Ok(Some(CTX)));
+    let mut r = Reader::new(moved(&m));
+    assert_eq!(verify_located(&mut r, moved_profile(), PID, &located), Ok(true));
+    // With the certified layout the index is read where the moved build has nothing: index 0,
+    // whose TLS slot is empty, so no context.
+    let mut r = Reader::new(moved(&m));
+    assert_eq!(context_from_teb(&mut r, profile(), TEB), Ok(None));
 }

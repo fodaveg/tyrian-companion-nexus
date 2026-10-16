@@ -1,13 +1,14 @@
 //! Passive, bounded inventory interpretation for a GW2 executable that holds the certificate.
 //!
 //! Addresses here are RVAs/field offsets, never session pointers. The route and the field
-//! offsets come from the 2026-10-06 proof; the RVAs are those the static recertification of
-//! 13 October 2026 carried them to (`docs/audit/2026-10-13-recertification-build-208574.json`),
-//! which the game's build of 15 October 2026 keeps byte for byte
-//! (`docs/audit/2026-10-15-recertification-build-208704.json`). In this module and in `bags`,
-//! `wallet` and `magic_find`, every RVA and every digest belongs to that code, which
-//! `certificate` checks in the file of every build before a profile is made: a later build that
-//! keeps it byte for byte is read, one that changes it is not.
+//! offsets come from the 2026-10-06 proof. The RVAs are not constants of this module: they are
+//! the [`Layout`] of the [`BuildProfile`], and [`Layout::CERTIFIED`] holds those the static
+//! recertification of 13 October 2026 carried them to
+//! (`docs/audit/2026-10-13-recertification-build-208574.json`), which the game's build of
+//! 15 October 2026 keeps byte for byte (`docs/audit/2026-10-15-recertification-build-208704.json`).
+//! In this module and in `bags`, `wallet` and `magic_find`, every digest belongs to that code,
+//! which `certificate` checks in the file of every build before a profile is made: a later build
+//! that keeps it byte for byte is read, one that changes it is not.
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
 //!
@@ -15,12 +16,15 @@
 //! inside one pass (up to 750 ms), and one that leaves the state, the map and the character the
 //! same, which the context probe cannot tell from no change.
 
+pub use crate::layout::Layout;
 use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 pub const PROFILE: &str = "owned-bags-v3";
-pub const TLS_INDEX_RVA: u64 = 0x28155c0;
+/// The TLS index of the certified build, which the certificate checks in the file. A reader
+/// takes the one of its profile's layout instead.
+pub const TLS_INDEX_RVA: u64 = Layout::CERTIFIED.tls_index;
 pub const MAX_POSITIONS: u32 = 640;
 pub const MAX_BYTES: usize = 131_072;
 /// The most bytes any reader of a cycle may ask for, whatever budget its caller gives it
@@ -150,22 +154,30 @@ impl<M: Memory> Reader<M> {
 /// The loaded image of an executable that holds the certificate ([`crate::certificate`]): only
 /// `executable::image_profile` makes one in the addon, after the file was certified by content.
 /// An executable that does not hold it never gets one, and so never reads a game field.
+///
+/// The profile carries where that image keeps what the readers use, its [`Layout`], by a
+/// `'static` reference: a process has one executable and its layout is decided once, so the
+/// profile stays two words and `Copy`, and every reader of every cycle sees that one value
+/// rather than a copy of some 70 addresses each.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildProfile {
     pub(crate) base: u64,
+    pub(crate) layout: &'static Layout,
 }
 impl BuildProfile {
-    pub fn checked(base: u64, image_size: u64) -> Result<Self, ReadError> {
+    /// The image at `base` read with `layout`, which must hold every relation of
+    /// [`Layout::validate`]; the whole image of `layout.image_size` bytes must fit in user space.
+    pub fn checked(base: u64, layout: &'static Layout) -> Result<Self, ReadError> {
         if base < 0x10000
             || base & 7 != 0
-            || image_size < TLS_INDEX_RVA + 4
+            || layout.validate().is_err()
             || base
-                .checked_add(image_size)
+                .checked_add(layout.image_size)
                 .is_none_or(|end| end > MAX_POINTER)
         {
             return Err(ReadError::Bounds);
         }
-        Ok(Self { base })
+        Ok(Self { base, layout })
     }
 }
 
@@ -178,7 +190,7 @@ pub fn context_from_teb<M: Memory>(
     if !(0x10000..=MAX_POINTER - 0x58).contains(&teb) || teb & 7 != 0 {
         return Err(ReadError::Bounds);
     }
-    let index = reader.scalar(profile.base + TLS_INDEX_RVA, 4)?;
+    let index = reader.scalar(profile.base + profile.layout.tls_index, 4)?;
     if index > 4095 {
         return Err(ReadError::Bounds);
     }
@@ -338,10 +350,11 @@ pub struct InventorySnapshot {
     pub wallet: Option<WalletSnapshot>,
 }
 
-/// Where the item vtables of the certified build live, and so where a class is a fixed word of
-/// the executable rather than something the game writes.
-fn vtables(base: u64) -> std::ops::Range<u64> {
-    base + 0x1914000..base + 0x2553500
+/// Where the item vtables of the build live, and so where a class is a fixed word of the
+/// executable rather than something the game writes.
+fn vtables(profile: BuildProfile) -> std::ops::Range<u64> {
+    let rdata = &profile.layout.rdata_vtables;
+    profile.base + rdata.start..profile.base + rdata.end
 }
 /// Up to 8 bytes at `address`, little-endian.
 fn word<M: Memory>(r: &mut Reader<M>, address: u64, size: usize) -> Result<u64, ReadError> {
@@ -394,18 +407,57 @@ impl Statics {
 }
 
 /// A certified conditional profile: where the item embeds its predicate class, that class's
-/// vtable, the slot and the predicate it must select, the definition subtype, the payload
-/// field with its mask and value, where the stack lies and the quantity getter.
+/// vtable (an RVA), the slot and the predicate it must select (an RVA), the definition subtype,
+/// the payload field with its mask and value, where the stack lies and the quantity getter (an
+/// RVA). The three RVAs are the layout's; everything else is fixed.
 type Conditional = (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
 /// The conditional profile of an item class, for the three classes that have one.
-fn conditional(base: u64, vt: u64) -> Option<Conditional> {
-    Some(match vt.checked_sub(base) {
-        Some(0x225e6d0) => (0xa8, 0x225e9e8, 0, 0x13ca880, 5, 0, 1, 1, 0x98, 0x13ca840),
-        Some(0x225eec8) => (0xa8, 0x225f1d0, 0, 0x13cb0b0, 10, 0, 1, 1, 0x98, 0x13ca840),
-        Some(0x225ea60) => (
-            0xe0, 0x225ee08, 0x20, 0x13cac50, 9, 0x18, 0xffffffff, 4, 0xe8, 0x13caa80,
-        ),
-        _ => return None,
+/// [`Layout::validate`] keeps the three classes distinct, so the order of the checks decides
+/// nothing.
+fn conditional(profile: BuildProfile, vt: u64) -> Option<Conditional> {
+    let l = profile.layout;
+    let class = vt.checked_sub(profile.base)?;
+    Some(if class == l.conditional_item_a_vtable {
+        (
+            0xa8,
+            l.conditional_predicate_a_vtable,
+            0,
+            l.conditional_predicate_a,
+            5,
+            0,
+            1,
+            1,
+            0x98,
+            l.conditional_stackable_a8,
+        )
+    } else if class == l.conditional_item_b_vtable {
+        (
+            0xa8,
+            l.conditional_predicate_b_vtable,
+            0,
+            l.conditional_predicate_b,
+            10,
+            0,
+            1,
+            1,
+            0x98,
+            l.conditional_stackable_a8,
+        )
+    } else if class == l.conditional_item_c_vtable {
+        (
+            0xe0,
+            l.conditional_predicate_c_vtable,
+            0x20,
+            l.conditional_predicate_c,
+            9,
+            0x18,
+            0xffffffff,
+            4,
+            0xe8,
+            l.conditional_stackable_e0,
+        )
+    } else {
+        return None;
     })
 }
 /// A definition's subtype and payload pointer, copied only for a class with a conditional
@@ -434,17 +486,18 @@ fn definition_record<M: Memory>(
 fn quantity<M: Memory>(
     r: &mut Reader<M>,
     statics: &mut Statics,
-    base: u64,
+    profile: BuildProfile,
     item: u64,
     vt: u64,
     definition: u64,
     conditional: Option<(Conditional, (u64, u64))>,
 ) -> Result<Option<u32>, ReadError> {
+    let (base, l) = (profile.base, profile.layout);
     let getter = pointer_value(statics.word(r, vt + 0x260, 8)?)?;
     let offset = match getter.checked_sub(base) {
-        Some(0x84c4c0) => Some(0x98),
-        Some(0x13c8ce0) => Some(0xd0),
-        Some(0x168aa0) => {
+        Some(rva) if rva == l.stackable_at_0x98 => Some(0x98),
+        Some(rva) if rva == l.stackable_at_0xd0 => Some(0xd0),
+        Some(rva) if rva == l.null_stackable => {
             // `xor eax, eax; ret`, the bytes 33 C0 C3.
             if statics.word(r, getter, 3)? != 0xc3c033 {
                 return Err(ReadError::ProfileMismatch);
@@ -454,7 +507,7 @@ fn quantity<M: Memory>(
         _ => None,
     };
     if let Some(offset) = offset {
-        return stack_quantity(r, statics, base, item + offset).map(Some);
+        return stack_quantity(r, statics, profile, item + offset).map(Some);
     }
     let Some((p, (subtype, payload))) = conditional else {
         return Ok(None);
@@ -473,7 +526,7 @@ fn quantity<M: Memory>(
     }
     let condition = r.scalar(payload + p.5, 4)?;
     let result = if condition & p.6 == p.7 {
-        stack_quantity(r, statics, base, item + p.8)?
+        stack_quantity(r, statics, profile, item + p.8)?
     } else {
         1
     };
@@ -495,18 +548,18 @@ fn stack<M: Memory>(r: &mut Reader<M>, address: u64) -> Result<(u64, u64), ReadE
 fn stack_quantity<M: Memory>(
     r: &mut Reader<M>,
     statics: &mut Statics,
-    base: u64,
+    profile: BuildProfile,
     address: u64,
 ) -> Result<u32, ReadError> {
     let (vt, value) = stack(r, address)?;
     // The stack's class is a pointer the game writes. Among the executable's vtables its
     // first slot is a fixed word like any other; anywhere else it is judged at every use.
-    let first = if vtables(base).contains(&vt) {
+    let first = if vtables(profile).contains(&vt) {
         statics.word(r, vt, 8)?
     } else {
         r.scalar(vt, 8)?
     };
-    if first != base + 0x168d10 {
+    if first != profile.base + profile.layout.stack_quantity_getter {
         return Err(ReadError::ProfileMismatch);
     }
     if value > 250 {
@@ -605,21 +658,21 @@ pub fn inventory_snapshot<M: Memory>(
     if !(0x10000..=MAX_POINTER - 0x198).contains(&context) || context & 7 != 0 {
         return Err(ReadError::Bounds);
     }
-    let b = profile.base;
+    let (b, l) = (profile.base, profile.layout);
     let charctx = r.pointer(context + 0x98)?;
-    r.equal(charctx, 8, b + 0x215dfc8)?;
-    r.equal(b + 0x215dfc8 + 0x68, 8, b + 0x11b4f10)?;
+    r.equal(charctx, 8, b + l.char_context_vtable)?;
+    r.equal(b + l.char_context_vtable + 0x68, 8, b + l.controlled_character_getter)?;
     let character = r.pointer(charctx + 0x98)?;
     if character == 0 || r.scalar(character + 0x178, 4)? & 0x10 == 0 {
         return Err(ReadError::RootUnavailable);
     }
-    r.equal(character + 8, 8, b + 0x2161250)?;
-    r.equal(b + 0x2161250 + 0xc8, 8, b + 0x11d7f60)?;
+    r.equal(character + 8, 8, b + l.character_agent_vtable)?;
+    r.equal(b + l.character_agent_vtable + 0xc8, 8, b + l.character_inventory_getter)?;
     let inventory = r.pointer(character + 0x3f0)?;
-    r.equal(inventory, 8, b + 0x2163228)?;
-    r.equal(b + 0x2163228 + 0x220, 8, b + 0x45de30)?;
+    r.equal(inventory, 8, b + l.inventory_vtable)?;
+    r.equal(b + l.inventory_vtable + 0x220, 8, b + l.inventory_owner_getter)?;
     r.equal(inventory + 0x70, 8, character)?;
-    r.equal(b + 0x2163228 + 0x190, 8, b + 0x11eee60)?;
+    r.equal(b + l.inventory_vtable + 0x190, 8, b + l.location3_index_getter)?;
     let count = r.scalar(inventory + 0xd4, 4)?;
     let capacity = r.scalar(inventory + 0xd0, 4)?;
     if count > capacity || capacity > MAX_POSITIONS as u64 {
@@ -630,8 +683,8 @@ pub fn inventory_snapshot<M: Memory>(
         return Err(ReadError::Bounds);
     }
     let itemctx = r.pointer(context + 0x178)?;
-    r.equal(itemctx, 8, b + 0x225ce50)?;
-    r.equal(b + 0x225ce50 + 0x10, 8, b + 0x13c6f20)?;
+    r.equal(itemctx, 8, b + l.item_context_vtable)?;
+    r.equal(b + l.item_context_vtable + 0x10, 8, b + l.item_resolver)?;
     let length = r.scalar(itemctx + 0x3c, 4)?;
     let item_capacity = r.scalar(itemctx + 0x38, 4)?;
     if length > item_capacity || item_capacity > 1_048_576 {
@@ -655,10 +708,10 @@ pub fn inventory_snapshot<M: Memory>(
             continue;
         }
         let vt = r.pointer(item)?;
-        if !vtables(b).contains(&vt) {
+        if !vtables(profile).contains(&vt) {
             return Err(ReadError::ProfileMismatch);
         }
-        statics.equal(r, vt + 0x70, b + 0x13c50f0)?;
+        statics.equal(r, vt + 0x70, b + l.item_location_getter)?;
         let location = r.scalar(item + 0x48, 2)?;
         if location & 15 != 3 {
             // Classification is part of coverage: an excluded entry must not enter our
@@ -667,9 +720,9 @@ pub fn inventory_snapshot<M: Memory>(
             continue;
         }
         r.equal(item + 0x58, 8, inventory)?;
-        statics.equal(r, vt + 0xa0, b + 0x13c51f0)?;
-        statics.equal(r, vt + 8, b + 0x13c4930)?;
-        statics.equal(r, vt + 0x68, b + 0x31ba20)?;
+        statics.equal(r, vt + 0xa0, b + l.final_stack_quantity_getter)?;
+        statics.equal(r, vt + 8, b + l.item_definition_getter)?;
+        statics.equal(r, vt + 0x68, b + l.item_instance_getter)?;
         let reference = r.scalar(item + 0x38, 4)?;
         if reference == 0 || reference >= length || !seen.insert(reference) {
             return Err(ReadError::Bounds);
@@ -678,13 +731,13 @@ pub fn inventory_snapshot<M: Memory>(
             return Err(ReadError::Changed);
         }
         let definition = r.pointer(item + 0x40)?;
-        let profile = conditional(b, vt);
-        let (id, detail) = definition_record(r, definition, profile.is_some())?;
+        let rule = conditional(profile, vt);
+        let (id, detail) = definition_record(r, definition, rule.is_some())?;
         if !(1..1_000_000).contains(&id) {
             return Err(ReadError::Bounds);
         }
-        let profile = profile.zip(detail);
-        let value = quantity(r, &mut statics, b, item, vt, definition, profile)?;
+        let rule = rule.zip(detail);
+        let value = quantity(r, &mut statics, profile, item, vt, definition, rule)?;
         if let Some(value) = value {
             let total = quantities.entry(id as u32).or_default();
             *total = total
@@ -722,8 +775,8 @@ pub fn inventory_snapshot<M: Memory>(
         }
     }
     for held in checked {
-        let profile = conditional(b, held.vt);
-        let Some(detail) = placed(r, &held, item_array, inventory, profile.is_some())? else {
+        let rule = conditional(profile, held.vt);
+        let Some(detail) = placed(r, &held, item_array, inventory, rule.is_some())? else {
             return Err(ReadError::Changed);
         };
         let Held {
@@ -733,8 +786,8 @@ pub fn inventory_snapshot<M: Memory>(
             value,
             ..
         } = held;
-        let profile = profile.zip(detail);
-        if quantity(r, &mut statics, b, item, vt, definition, profile)? != value {
+        let rule = rule.zip(detail);
+        if quantity(r, &mut statics, profile, item, vt, definition, rule)? != value {
             return Err(ReadError::Changed);
         }
     }
