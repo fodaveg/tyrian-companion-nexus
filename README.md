@@ -219,6 +219,13 @@ game build". Every range, vtable and RVA the readers rely on is the same as on 1
 the executable's hash is new. It needs the plugin 0.7.3 or later, since an older one refuses the
 new executable's hash; the protocol does not change.
 
+Version 0.8.14 reads every executable that holds what the readers rely on, whatever its hash
+(see "Passive inventory source"): the game's updates of 15 and 16 October 2026 changed none of
+those bytes and still stopped the addon until a release carried the new hash. An update that
+does change them still ends in "unsupported game build" until a recertification. It needs the
+plugin 0.7.6 or later, since an older one refuses a hash it does not know; the protocol does not
+change.
+
 ## Updating the addon
 
 Since 0.8.5 the addon tells Nexus to look for new versions in the GitHub releases of
