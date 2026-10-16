@@ -10,11 +10,14 @@
 //! - the PE header: AMD64 PE32+, the image base, the image size, every section's name, RVA,
 //!   virtual size and file offset, and the TLS directory at its RVA;
 //! - the TLS directory's AddressOfIndex is the TLS index the context route reads;
-//! - [`SPANS`]: the 37 code and table ranges the three profiles keep by digest, and the 14
-//!   functions the inventory reader compares by address only, each by the SHA-256 of its bytes
-//!   at its file offset;
-//! - [`SLOTS`]: the vtable slots the readers follow hold the virtual address of the proven
-//!   function (image base plus its RVA, as the file stores it before relocation).
+//! - [`SPANS`]: the 37 code and table ranges the three profiles keep by digest, the 14
+//!   functions the inventory reader compares by address only, and, since revision 2, the 6
+//!   ranges of the game's own code that read the four field offsets no other range named (item
+//!   `+0x58`, inventory `+0xd0`, item context `+0x38`, definition `+0x28`), each by the SHA-256
+//!   of its bytes at its file offset;
+//! - [`SLOTS`]: the vtable slots the readers follow, and those that select two of those six
+//!   functions, hold the virtual address of the proven function (image base plus its RVA, as
+//!   the file stores it before relocation).
 //!
 //! A file that holds all of it is certified, whatever its hash. One that differs in any of it
 //! is not, and the readers do not run on it: an update that moves or changes that code needs a
@@ -34,7 +37,7 @@ use crate::sha256::{hex, sha256};
 
 /// What the certificate is called in the log and the Options window: the build it was taken
 /// from and its revision.
-pub const CERTIFICATE: &str = "code-208704-r1";
+pub const CERTIFICATE: &str = "code-208704-r2";
 
 /// The SHA-256 of the executable the certificate was taken from (the game's build of
 /// 15 October 2026). It identifies the certificate's origin and the fixtures; it is not a
@@ -386,7 +389,7 @@ mod tests {
         for slot in GAME.slots {
             assert!(names.insert(slot.name), "{}", slot.name);
         }
-        assert_eq!((GAME.spans.len(), GAME.slots.len(), GAME.sections.len()), (51, 43, 7));
+        assert_eq!((GAME.spans.len(), GAME.slots.len(), GAME.sections.len()), (57, 48, 7));
         // Every piece lies inside a section of the file.
         for (offset, len) in GAME.pieces() {
             assert!(

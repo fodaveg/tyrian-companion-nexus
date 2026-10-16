@@ -1,5 +1,6 @@
-// Generated from docs/audit/2026-10-15-recertification-build-208704.json and the 14 functions
-// measured on 16 October 2026 (see the module docs). Do not edit by hand: a change here is a
+// Generated from docs/audit/2026-10-15-recertification-build-208704.json, the 14 functions
+// and the field offset ranges measured on 16 October 2026 (see the module docs and
+// docs/audit/2026-10-16-content-certificate/). Do not edit by hand: a change here is a
 // recertification.
 pub const IMAGE_BASE: u64 = 0x140000000;
 pub const IMAGE_SIZE: u32 = 0x2c49000;
@@ -14,7 +15,7 @@ pub const SECTIONS: [Section; 7] = [
     Section { name: *b".rsrc\0\0\0", rva: 0x2b0a000, virtual_size: 0xb41f8, file_offset: 0x27cf200 },
     Section { name: *b".reloc\0\0", rva: 0x2bbf000, virtual_size: 0x89b90, file_offset: 0x2883400 },
 ];
-pub const SPANS: [Span; 51] = [
+pub const SPANS: [Span; 57] = [
     Span { name: "wallet:hash_lookup", offset: 0x238bf0, len: 296, sha256: "c0c92b06913be7e76211d3b0b20cc397d17e7767a528d46f71ecbbae7b3e75a4" },
     Span { name: "mf:buff_lookup", offset: 0x251220, len: 296, sha256: "da6f2f3399943312c769046a68e5612e416d4af1c663cbf0108895acdf32aeea" },
     Span { name: "mf:attribute_modifier_map", offset: 0x3e32a0, len: 296, sha256: "f3365e3fff838ba902f21415c68560a92bc466f2a02c9af21eb0c6f41ef0cc3d" },
@@ -66,8 +67,14 @@ pub const SPANS: [Span; 51] = [
     Span { name: "item:conditional_predicate_A", offset: 0x13c9c80, len: 107, sha256: "66bffaac1527c151955b352532473d0eaf88c319fe73f773fb6cc1584600d462" },
     Span { name: "item:conditional_predicate_B", offset: 0x13ca4b0, len: 49, sha256: "65790137460cb328c12a5289eab9eaa679e75c15086a58ea5c71faebb3702f81" },
     Span { name: "item:conditional_predicate_C", offset: 0x13ca050, len: 124, sha256: "b8b33009a641d330cd02258cdb24da930e8a7a820ed724c52b6f5ec7bdc6a173" },
+    Span { name: "item:inventory_location_getter", offset: 0x13c4180, len: 115, sha256: "331a5d44ce877894d8b4fd8da9061bf14dc85e337c3fca0bf0ff96c58720adc7" },
+    Span { name: "item:inventory_slots_message + bag:inventory_slots_message", offset: 0x1250810, len: 140, sha256: "a57e1a4f1647ff47bf53274ba997cf9868b65459707c0b8c6a30aa65af93a3b8" },
+    Span { name: "item:inventory_slots_resize + bag:inventory_slots_resize", offset: 0x128ca80, len: 276, sha256: "f4d31c6c72ae58b457f8304b6d2b56c6ec28fefe9aa215ff41e9e43265e2bf2c" },
+    Span { name: "item:array_reserve + bag:array_reserve", offset: 0x243c40, len: 376, sha256: "0bf8a8a7111c3de9d57c634c7e35d9e895855583602de97a033344644afe96fd" },
+    Span { name: "item:item_array_growth", offset: 0x13c6cee, len: 53, sha256: "e116fa735347923eef4749a41bacb4632b3e0eaffdcfda2a0407330fde2fb89e" },
+    Span { name: "item:definition_id_match", offset: 0x13c5e50, len: 146, sha256: "f7a726525e06bb923d4d831747beb38a0f417878b819a68e9d29449b30ec13f3" },
 ];
-pub const SLOTS: [Slot; 43] = [
+pub const SLOTS: [Slot; 48] = [
     Slot { name: "vtable char_context +0x68", offset: 0x215c630, rva: 0x11b4f10 },
     Slot { name: "vtable char_context +0x70", offset: 0x215c638, rva: 0x498900 },
     Slot { name: "vtable char_context +0x118", offset: 0x215c6e0, rva: 0x11b77f0 },
@@ -111,4 +118,9 @@ pub const SLOTS: [Slot; 43] = [
     Slot { name: "vtable conditional item C +0xa0", offset: 0x225d100, rva: 0x13c51f0 },
     Slot { name: "vtable conditional item C +0x260", offset: 0x225d2c0, rva: 0x13caa80 },
     Slot { name: "vtable conditional predicate C +0x20", offset: 0x225d428, rva: 0x13cac50 },
+    Slot { name: "vtable bag_item (ItCliBag) +0x170", offset: 0x225c5d8, rva: 0x13c4d80 },
+    Slot { name: "vtable conditional item A +0x170", offset: 0x225ce40, rva: 0x13c4d80 },
+    Slot { name: "vtable conditional item B +0x170", offset: 0x225d638, rva: 0x13c4d80 },
+    Slot { name: "vtable conditional item C +0x170", offset: 0x225d1d0, rva: 0x13c4d80 },
+    Slot { name: "vtable item_context +0x0", offset: 0x225b450, rva: 0x13c6a50 },
 ];

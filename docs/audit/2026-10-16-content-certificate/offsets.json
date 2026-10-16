@@ -1,0 +1,57 @@
+{
+ "about": "Ranges and slots added in code-208704-r2 for the four field offsets the readers used without a range: item +0x58, inventory +0xd0, item context +0x38 and definition +0x28. Input of offsets.py; the reasons are in README.md. Bounds are RVAs of the copy of 16 October 2026; evidence is the memory operands and direct calls offsets.py must find in order in each range.",
+ "spans": [
+  {
+   "name": "item:inventory_location_getter",
+   "backs": "item +0x58",
+   "rva": "0x13c4d80",
+   "bound": "pdata",
+   "evidence": ["[rax+0x70]", "[rbx+0x58]", "[rbx+0x58]", "[rbx+0x48]"]
+  },
+  {
+   "name": "item:inventory_slots_message + bag:inventory_slots_message",
+   "backs": "inventory +0xd0",
+   "rva": "0x1251410",
+   "bound": "pdata",
+   "evidence": ["call 0x9b1fb0", "[rax+0x98]", "[rbx+0x8]", "[rax+0xc8]", "call 0x128d680"]
+  },
+  {
+   "name": "item:inventory_slots_resize + bag:inventory_slots_resize",
+   "backs": "inventory +0xd0",
+   "rva": "0x128d680",
+   "bound": "pdata",
+   "evidence": ["[rcx+0xd4]", "[rcx+0xd4]", "rcx,0xc0", "call 0x244840", "[rsi+0xd4]", "[rsi+0xc8]", "[rsi+0xd4]"]
+  },
+  {
+   "name": "item:array_reserve + bag:array_reserve",
+   "backs": "inventory +0xd0, item context +0x38",
+   "rva": "0x244840",
+   "end": "0x2449b8",
+   "bound": "pdata-run",
+   "evidence": ["[rcx+0x10]", "[rdi+0x14]", "[rdi+0x8]", "[rdi+0x8]", "[rdi+0x10]"]
+  },
+  {
+   "name": "item:item_array_growth",
+   "backs": "item context +0x38",
+   "rva": "0x13c78ee",
+   "end": "0x13c7923",
+   "bound": "block",
+   "function": "0x13c7720",
+   "evidence": ["[r12+0x3c]", "[r12+0x3c]", "[r12+0x28]", "call 0x244840", "[r12+0x30]"]
+  },
+  {
+   "name": "item:definition_id_match",
+   "backs": "definition +0x28",
+   "rva": "0x13c6a50",
+   "bound": "pdata",
+   "evidence": ["[rax+0x260]", "[rax+0x8]", "[rax+0x28]", "[rax+0x8]", "[rax+0x28]"]
+  }
+ ],
+ "slots": [
+  {"vtable": "bag_item (ItCliBag)", "rva": "0x225de68", "slot": "0x170", "target": "0x13c4d80"},
+  {"vtable": "conditional item A", "rva": "0x225e6d0", "slot": "0x170", "target": "0x13c4d80"},
+  {"vtable": "conditional item B", "rva": "0x225eec8", "slot": "0x170", "target": "0x13c4d80"},
+  {"vtable": "conditional item C", "rva": "0x225ea60", "slot": "0x170", "target": "0x13c4d80"},
+  {"vtable": "item_context", "rva": "0x225ce50", "slot": "0x0", "target": "0x13c6a50"}
+ ]
+}

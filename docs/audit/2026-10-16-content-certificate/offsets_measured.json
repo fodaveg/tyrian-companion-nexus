@@ -1,0 +1,85 @@
+{
+ "spans": [
+  {
+   "name": "item:inventory_location_getter",
+   "backs": "item +0x58",
+   "rva": "0x13c4d80",
+   "file_offset": "0x13c4180",
+   "size": 115,
+   "bound": "pdata",
+   "sha256": "331a5d44ce877894d8b4fd8da9061bf14dc85e337c3fca0bf0ff96c58720adc7"
+  },
+  {
+   "name": "item:inventory_slots_message + bag:inventory_slots_message",
+   "backs": "inventory +0xd0",
+   "rva": "0x1251410",
+   "file_offset": "0x1250810",
+   "size": 140,
+   "bound": "pdata",
+   "sha256": "a57e1a4f1647ff47bf53274ba997cf9868b65459707c0b8c6a30aa65af93a3b8"
+  },
+  {
+   "name": "item:inventory_slots_resize + bag:inventory_slots_resize",
+   "backs": "inventory +0xd0",
+   "rva": "0x128d680",
+   "file_offset": "0x128ca80",
+   "size": 276,
+   "bound": "pdata",
+   "sha256": "f4d31c6c72ae58b457f8304b6d2b56c6ec28fefe9aa215ff41e9e43265e2bf2c"
+  },
+  {
+   "name": "item:array_reserve + bag:array_reserve",
+   "backs": "inventory +0xd0, item context +0x38",
+   "rva": "0x244840",
+   "file_offset": "0x243c40",
+   "size": 376,
+   "bound": "pdata-run",
+   "sha256": "0bf8a8a7111c3de9d57c634c7e35d9e895855583602de97a033344644afe96fd"
+  },
+  {
+   "name": "item:item_array_growth",
+   "backs": "item context +0x38",
+   "rva": "0x13c78ee",
+   "file_offset": "0x13c6cee",
+   "size": 53,
+   "bound": "block",
+   "sha256": "e116fa735347923eef4749a41bacb4632b3e0eaffdcfda2a0407330fde2fb89e"
+  },
+  {
+   "name": "item:definition_id_match",
+   "backs": "definition +0x28",
+   "rva": "0x13c6a50",
+   "file_offset": "0x13c5e50",
+   "size": 146,
+   "bound": "pdata",
+   "sha256": "f7a726525e06bb923d4d831747beb38a0f417878b819a68e9d29449b30ec13f3"
+  }
+ ],
+ "slots": [
+  {
+   "name": "vtable bag_item (ItCliBag) +0x170",
+   "file_offset": "0x225c5d8",
+   "rva": "0x13c4d80"
+  },
+  {
+   "name": "vtable conditional item A +0x170",
+   "file_offset": "0x225ce40",
+   "rva": "0x13c4d80"
+  },
+  {
+   "name": "vtable conditional item B +0x170",
+   "file_offset": "0x225d638",
+   "rva": "0x13c4d80"
+  },
+  {
+   "name": "vtable conditional item C +0x170",
+   "file_offset": "0x225d1d0",
+   "rva": "0x13c4d80"
+  },
+  {
+   "name": "vtable item_context +0x0",
+   "file_offset": "0x225b450",
+   "rva": "0x13c6a50"
+  }
+ ]
+}

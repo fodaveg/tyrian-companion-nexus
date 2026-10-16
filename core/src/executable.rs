@@ -975,7 +975,7 @@ mod tests {
         );
         assert_eq!(
             decided_line(Build::Certified(digest), 43_065_736, Duration::from_millis(370), Duration::from_secs(9)),
-            "game executable: certified by content (code-208704-r1), sha256 ba7816bf8f01, 41.0 MiB, hashed in 370 ms"
+            format!("game executable: certified by content ({CERTIFICATE}), sha256 ba7816bf8f01, 41.0 MiB, hashed in 370 ms")
         );
         let relocated = &*Box::leak(Box::new(Relocated { layout: Layout::CERTIFIED, digests: GuardDigests::CERTIFIED, moved: 37 }));
         assert_eq!(

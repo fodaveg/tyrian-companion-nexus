@@ -1,6 +1,6 @@
 import json,struct,sys,re,hashlib
-exe,receipt,funcs=sys.argv[1:4]
-f=open(exe,'rb').read(); d=json.load(open(receipt)); fn=json.load(open(funcs))
+exe,receipt,funcs,offsets=sys.argv[1:5]
+f=open(exe,'rb').read(); d=json.load(open(receipt)); fn=json.load(open(funcs)); fo=json.load(open(offsets))
 IB=0x140000000
 pe=struct.unpack_from('<I',f,0x3c)[0]; ns=struct.unpack_from('<H',f,pe+6)[0]; osz=struct.unpack_from('<H',f,pe+20)[0]
 secs=[]
@@ -11,8 +11,9 @@ def r2o(r):
         if va<=r<va+vs: return r-va+ro
 tls_rva=struct.unpack_from('<I',f,pe+24+112+9*8)[0]
 L=[]
-L.append('// Generated from docs/audit/2026-10-15-recertification-build-208704.json and the 14 functions')
-L.append('// measured on 16 October 2026 (see the module docs). Do not edit by hand: a change here is a')
+L.append('// Generated from docs/audit/2026-10-15-recertification-build-208704.json, the 14 functions')
+L.append('// and the field offset ranges measured on 16 October 2026 (see the module docs and')
+L.append('// docs/audit/2026-10-16-content-certificate/). Do not edit by hand: a change here is a')
 L.append('// recertification.')
 L.append('pub const IMAGE_BASE: u64 = %s;' % hex(IB))
 L.append('pub const IMAGE_SIZE: u32 = %s;' % d['to']['image_size'])
@@ -22,12 +23,16 @@ L.append('pub const SECTIONS: [Section; %d] = [' % len(secs))
 for n,va,vs,ro in secs:
     L.append('    Section { name: *b"%s", rva: %s, virtual_size: %s, file_offset: %s },' % (''.join(chr(c) if c else '\\0' for c in n), hex(va), hex(vs), hex(ro)))
 L.append('];')
-L.append('pub const SPANS: [Span; %d] = [' % (len(d['guards'])+len(fn)))
+L.append('pub const SPANS: [Span; %d] = [' % (len(d['guards'])+len(fn)+len(fo['spans'])))
 for g in d['guards']:
     L.append('    Span { name: "%s", offset: %s, len: %d, sha256: "%s" },' % (' + '.join(g['names']), g['file_offset'], g['size'], g['new_sha256']))
 for x in fn:
     assert x['evidence_in_order'] or x['name'] in ('final_stack_quantity_getter','stack_quantity_getter','conditional_predicate_A','conditional_predicate_B','conditional_predicate_C')
     L.append('    Span { name: "item:%s", offset: %s, len: %d, sha256: "%s" },' % (x['name'], x['file_offset'], x['size'], x['sha256']))
+for x in fo['spans']:
+    o=int(x['file_offset'],16)
+    assert hashlib.sha256(f[o:o+x['size']]).hexdigest()==x['sha256'], x['name']
+    L.append('    Span { name: "%s", offset: %s, len: %d, sha256: "%s" },' % (x['name'], x['file_offset'], x['size'], x['sha256']))
 L.append('];')
 slots=[]
 for v in d['vtables']:
@@ -36,5 +41,9 @@ for v in d['vtables']:
         q=struct.unpack_from('<Q',f,r2o(a))[0]
         assert q==IB+int(tgt,16), v['name']
         slots.append('    Slot { name: "vtable %s +%s", offset: %s, rva: %s },' % (v['name'], off, hex(r2o(a)), tgt))
+for s in fo['slots']:
+    q=struct.unpack_from('<Q',f,int(s['file_offset'],16))[0]
+    assert q==IB+int(s['rva'],16), s['name']
+    slots.append('    Slot { name: "%s", offset: %s, rva: %s },' % (s['name'], s['file_offset'], s['rva']))
 L.append('pub const SLOTS: [Slot; %d] = [' % len(slots)); L+=slots; L.append('];')
 print('\n'.join(L))
