@@ -20,6 +20,7 @@ use crate::certificate::{Certificate, Collector, CERTIFICATE, GAME};
 use crate::inventory::{BuildProfile, Memory, ReadError, Reader};
 use crate::layout::Layout;
 use crate::live::RESPONSE_TIMEOUT;
+use crate::resolver::{self, Failure, Resolution, Resolved, Scanner, Table};
 use crate::sha256::hex;
 
 /// The largest executable that is hashed at all. A larger file is not the certified build,
@@ -154,6 +155,10 @@ pub trait HashedFile {
     fn update(&mut self, bytes: &[u8]) -> bool;
     /// The SHA-256 of everything added.
     fn finish(&mut self) -> Option<[u8; 32]>;
+    /// At most `buffer.len()` bytes of it from `offset`, `Some(0)` past its end, without
+    /// changing where [`HashedFile::read`] goes on. The resolution of the relocation table
+    /// ([`Hashing::resolve`]) reads with it at points, once the hash has ended.
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Option<usize>;
 }
 
 /// The hash of the executable, under way: the file where the last slice left it, and how much
@@ -164,6 +169,12 @@ pub struct Hashing<F> {
     hashed: u64,
     /// The bytes the certificate names, copied as the file goes by.
     collector: Collector,
+    /// The first phase of the relocation table's resolution, on the same pass.
+    scanner: Scanner,
+    /// Its second phase, once the hash has ended and [`Hashing::resolve`] is called.
+    resolution: Option<Resolution>,
+    /// The hash ended with a verdict on the file.
+    decided: bool,
 }
 
 impl<F: HashedFile> Hashing<F> {
@@ -174,12 +185,29 @@ impl<F: HashedFile> Hashing<F> {
     }
 
     /// [`Hashing::start`] against another certificate than the game's: the tests'.
-    pub fn start_with(mut file: F, certificate: &'static Certificate) -> Result<Self, Step<Build>> {
+    pub fn start_with(file: F, certificate: &'static Certificate) -> Result<Self, Step<Build>> {
+        Self::start_with_table(file, certificate, &resolver::GAME)
+    }
+
+    /// [`Hashing::start_with`] with another relocation table than the game's: the tests'.
+    pub fn start_with_table(
+        mut file: F,
+        certificate: &'static Certificate,
+        table: &'static Table,
+    ) -> Result<Self, Step<Build>> {
         let Some(before) = file.stamp() else { return Err(Step::Failed) };
         if !size_in_range(before.len) {
             return Err(Step::Decided(Build::BySize));
         }
-        Ok(Self { file, before, hashed: 0, collector: Collector::new(certificate) })
+        Ok(Self {
+            file,
+            before,
+            hashed: 0,
+            collector: Collector::new(certificate),
+            scanner: Scanner::new(table),
+            resolution: None,
+            decided: false,
+        })
     }
 
     /// Hashes more of the file, until it ends or `expired` says this slice is over, which it
@@ -206,15 +234,19 @@ impl<F: HashedFile> Hashing<F> {
                 return Step::Failed;
             }
             self.collector.feed(at, bytes);
+            self.scanner.feed(at, bytes);
         }
         if self.hashed != self.before.len || self.file.stamp() != Some(self.before) {
             return Step::Failed;
         }
         match self.file.finish() {
-            Some(digest) => Step::Decided(match self.collector.verdict() {
-                Ok(()) => Build::Certified(digest),
-                Err(check) => Build::Uncertified(digest, check),
-            }),
+            Some(digest) => {
+                self.decided = true;
+                Step::Decided(match self.collector.verdict() {
+                    Ok(()) => Build::Certified(digest),
+                    Err(check) => Build::Uncertified(digest, check),
+                })
+            }
             None => Step::Failed,
         }
     }
@@ -222,6 +254,50 @@ impl<F: HashedFile> Hashing<F> {
     /// How many bytes of the file have gone into the hash so far.
     pub fn hashed(&self) -> u64 {
         self.hashed
+    }
+
+    /// One step of the resolution of the relocation table ([`crate::resolver`]) over this file,
+    /// once [`Hashing::advance`] has decided: where every anchor and vtable is, or the first rule
+    /// that does not hold. `expired` is asked before every read, as in `advance`, and a step
+    /// that it ends is `Unfinished`; the next call goes on. The file held the certificate at its
+    /// fixed offsets or not by the same verdict as the [`Build`] (rule 1, identity first).
+    ///
+    /// Nothing decides by it yet: [`Build`] is what the readers go by. A file that changed since
+    /// it was hashed, or a read the system fails, is `Failed`, as is a call before the hash has
+    /// decided.
+    pub fn resolve(&mut self, expired: impl FnMut() -> bool) -> Step<Result<Resolved, Failure>> {
+        self.resolve_by(false, expired)
+    }
+
+    /// [`Hashing::resolve`] without the identity path: every place found by the search and the
+    /// graph, as `gen_relocation.py --resolve --force-search` does.
+    pub fn resolve_by_search(&mut self, expired: impl FnMut() -> bool) -> Step<Result<Resolved, Failure>> {
+        self.resolve_by(true, expired)
+    }
+
+    fn resolve_by(&mut self, force_search: bool, mut expired: impl FnMut() -> bool) -> Step<Result<Resolved, Failure>> {
+        if !self.decided {
+            return Step::Failed;
+        }
+        let identity = !force_search && self.collector.verdict().is_ok();
+        let scanner = &self.scanner;
+        let resolution = self.resolution.get_or_insert_with(|| Resolution::new(scanner));
+        let file = &mut self.file;
+        let step = resolution.step(identity, &mut |offset, buffer| file.read_at(offset, buffer), &mut expired);
+        if matches!(step, Step::Decided(_)) && self.file.stamp() != Some(self.before) {
+            return Step::Failed;
+        }
+        step
+    }
+
+    /// How many reads at points the resolution has made, and how many bytes they brought.
+    pub fn resolution_reads(&self) -> (u64, u64) {
+        self.resolution.as_ref().map_or((0, 0), Resolution::reads)
+    }
+
+    /// The first phase of the resolution, for its measures.
+    pub fn scanner(&self) -> &Scanner {
+        &self.scanner
     }
 }
 
@@ -385,6 +461,12 @@ mod tests {
                 return None;
             }
             Some(crate::sha256::sha256(&self.fed))
+        }
+        fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Option<usize> {
+            let from = (offset as usize).min(self.contents.len());
+            let count = buffer.len().min(self.contents.len() - from);
+            buffer[..count].copy_from_slice(&self.contents[from..from + count]);
+            Some(count)
         }
     }
 

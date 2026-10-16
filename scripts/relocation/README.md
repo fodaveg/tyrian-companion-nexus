@@ -3,7 +3,9 @@
 `gen_relocation.py` makes `core/src/relocation_data.rs` from the certified copy of `Gw2-64.exe`,
 and resolves another executable with it: the semiautomatic recertification of
 `docs/audit/2026-10-16-relocation-study/README.md`. `test_relocation.py` holds it to the figures
-of that study and to its own guarantees. Nothing in the addon uses the table yet (lots 2-4).
+of that study and to its own guarantees. `core/src/resolver.rs` is the same resolver in the
+addon (lot 2), held to this one by tests that run both over the same copy; the readers do not go
+by it yet (lots 3-4).
 
 It lives here and not in `docs/audit/` because it is a tool that is run again on every update of
 the game; the dated directories of `docs/audit/` are receipts of one recertification each.
@@ -21,6 +23,12 @@ python3 -I scripts/relocation/gen_relocation.py --resolve <other Gw2-64.exe> [--
 
 # checks (variants are written under --tmp only, outside the repository, and deleted)
 python3 -I scripts/relocation/test_relocation.py <certified Gw2-64.exe> --tmp <dir>
+
+# the Rust resolver against this one, over the copy and over a moved copy kept outside the repo
+python3 -I scripts/relocation/test_relocation.py <copy> --tmp <dir> --only moved --keep-moved <dir>/moved.exe
+TC_GW2_EXE=<copy> TC_GW2_MOVED_EXE=<dir>/moved.exe \
+    cargo test --offline --release -p tyrian_companion_nexus_core --lib resolver -- --ignored --nocapture
+rm <dir>/moved.exe
 ```
 
 Use `systemd-run --user --scope -q -p MemoryMax=2G` around them. Generation needs
@@ -107,4 +115,4 @@ digests are of the same kind as those of the certificate.
 - Any real update of the game: the moved copy of `test_relocation.py` moves a block of `.text`
   and a block of `.rdata` coherently for what the resolver reads, not 32-bit RVAs in `.rdata`
   (RTTI, unwind data), which it does not read.
-- The fields of callees (only their own digest is checked) and the resolver in Rust.
+- The fields of callees (only their own digest is checked).

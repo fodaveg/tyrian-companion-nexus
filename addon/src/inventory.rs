@@ -26,8 +26,9 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_void, OsString};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::FileExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -241,6 +242,14 @@ impl HashedFile for Executable {
     fn finish(&mut self) -> Option<[u8; 32]> {
         let mut digest = [0u8; 32];
         (unsafe { BCryptFinishHash(self.handles.hash, &mut digest, 0) }.0 >= 0).then_some(digest)
+    }
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Option<usize> {
+        // `seek_read` (ReadFile at an offset) moves the file's cursor on Windows: it is put back
+        // where `read` goes on, so that the two can be mixed.
+        let position = self.file.stream_position().ok()?;
+        let read = self.file.seek_read(buffer, offset).ok();
+        self.file.seek(SeekFrom::Start(position)).ok()?;
+        read
     }
 }
 

@@ -4,12 +4,13 @@
     python3 -I test_relocation.py <certified Gw2-64.exe> --tmp <directory outside the repo>
         [--recert13 docs/audit/2026-10-13-recertification-build-208574.json]
         [--table core/src/relocation_data.rs] [--certificate core/src/certificate_data.rs]
-        [--only identity,replay13,moved,negatives,leak]
+        [--only identity,replay13,moved,negatives,leak] [--keep-moved <path outside the repo>]
 
 Prints the literal outcome of each check and exits 1 if any did not come out as expected. The
 executables it makes (a copy with a block of .text moved, copies with one change each) are
-written under --tmp only, and deleted at the end. It prints RVAs, counts and digests, never
-bytes of the game.
+written under --tmp only, and deleted at the end; with --keep-moved, the moved copy is left at
+that path instead (for the Rust resolver's test, TC_GW2_MOVED_EXE), and whoever asked for it
+deletes it. It prints RVAs, counts and digests, never bytes of the game.
 
 - identity: the copy resolves to the certified RVAs by the identity path and by search alone;
 - replay13: the figures of the relocation study, section 3, over the recertification of
@@ -484,10 +485,14 @@ def main():
     ap.add_argument('--table', default=g.DEFAULT_TABLE)
     ap.add_argument('--certificate', default=g.DEFAULT_CERT)
     ap.add_argument('--only', default='identity,replay13,moved,negatives,leak')
+    ap.add_argument('--keep-moved', metavar='PATH', help='leave the moved copy at PATH (outside the repo)')
     args = ap.parse_args()
     tmp = os.path.realpath(args.tmp)
     if tmp == REPO or tmp.startswith(REPO + os.sep):
         raise SystemExit('--tmp must be outside the repository')
+    keep = os.path.realpath(args.keep_moved) if args.keep_moved else None
+    if keep and (keep == REPO or keep.startswith(REPO + os.sep)):
+        raise SystemExit('--keep-moved must be outside the repository')
     work = tempfile.mkdtemp(prefix='relocation-', dir=tmp)
     only = set(args.only.split(','))
     rt = g.load_table(args.table)
@@ -500,13 +505,16 @@ def main():
         if 'replay13' in only:
             test_replay13(rt, pe, args.recert13)
         moved = None
-        if 'moved' in only or 'negatives' in only:
+        if 'moved' in only or 'negatives' in only or keep:
             moved = test_moved(rt, cert, pe, work)
         if 'negatives' in only:
             test_negatives(rt, cert, pe, work, *moved)
         if 'leak' in only:
             files = [args.table, g.DEFAULT_EVIDENCE, os.path.join(REPO, 'core', 'src', 'relocation.rs'), os.path.join(HERE, 'README.md')]
             test_leak(rt, pe, [p for p in files if os.path.exists(p)])
+        if keep and moved and os.path.exists(moved[0]):
+            shutil.move(moved[0], keep)
+            print('\nmoved copy left at %s' % keep)
     finally:
         shutil.rmtree(work)
     print('\n%s' % ('all checks as expected' if not FAILED else 'NOT as expected: %s' % FAILED))

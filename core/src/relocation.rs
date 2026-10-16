@@ -1,10 +1,10 @@
 //! The relocation table: what lets the readers find, in an update of the game that moved its
 //! code, the anchors the certificate ([`crate::certificate`]) checks at fixed offsets.
 //!
-//! Nothing uses it yet: the resolver that applies it in the addon is the next step. Until then
-//! it is the output of `scripts/relocation/gen_relocation.py`, which also resolves an executable
+//! It is the output of `scripts/relocation/gen_relocation.py`, which also resolves an executable
 //! with it offline (the semiautomatic recertification), and the tests below hold it to what the
-//! certificate says.
+//! certificate says. [`crate::resolver`] is the same resolver in the addon; the readers do not
+//! go by it yet.
 //!
 //! The table keeps no byte of the game, as the certificate keeps none. For each anchor (the 51
 //! spans of the certificate, the constructors that install the vtables, and the context getter
