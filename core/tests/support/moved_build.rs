@@ -14,6 +14,14 @@
 //! moved bytes hold nothing, and fails.
 use std::collections::{BTreeMap, BTreeSet};
 use tyrian_companion_nexus_core::layout::Layout;
+#[allow(unused_imports)]
+use tyrian_companion_nexus_core::{
+    certificate::SPANS,
+    passive::Guard,
+    relocation::FieldKind,
+    resolver::{Mode, Place, Resolved, GAME},
+    sha256::sha256,
+};
 
 pub const BASE: u64 = 0x140000000;
 /// The deltas of the three sections. They differ, so that a reader that took an RVA of one
@@ -109,6 +117,98 @@ pub fn layout() -> &'static Layout {
         magic_find_case: m(l.magic_find_case),
         attribute_modifier_map: m(l.attribute_modifier_map),
     }))
+}
+
+/// The anchor of the game's relocation table that one of a reader's guards is: the one whose
+/// name has `prefix:name` as one of its parts, as `executable::relocated` finds it.
+#[allow(dead_code)]
+fn anchor_of(prefix: &str, name: &str) -> &'static tyrian_companion_nexus_core::relocation::Anchor {
+    let part = format!("{prefix}:{name}");
+    GAME.anchors
+        .iter()
+        .find(|a| a.name.split(" + ").any(|p| p == part))
+        .unwrap_or_else(|| panic!("no anchor is {part}"))
+}
+
+/// The four bytes at `address`, as a little-endian dword; a byte the fixture does not have is 0.
+#[allow(dead_code)]
+fn dword(bytes: &BTreeMap<u64, u8>, address: u64) -> u32 {
+    u32::from_le_bytes(std::array::from_fn(|i| *bytes.get(&(address + i as u64)).unwrap_or(&0)))
+}
+
+/// Rewrites, in `bytes` (a fixture already moved by [`bytes`]), the fields the relocation table
+/// masks in each of `guards` (the certified ones of a reader, named `prefix:` in the table), as
+/// moving the code rewrites them: a rel32 or rip-relative field points where its target went
+/// from where the field went, an image-relative one names where its target went. A field whose
+/// target moved by the same delta as the field keeps its bytes; one into another section does
+/// not. How many of the guards' ranges changed is returned.
+///
+/// This is what [`bytes`] leaves out: it moves code without touching it, so a guard's bytes, and
+/// their digest, stay the certified ones. A real update rewrites them, and the readers must then
+/// compare memory with the digest of the file and not with the certified one.
+#[allow(dead_code)]
+pub fn rewrite_fields(bytes: &mut BTreeMap<u64, u8>, guards: &[Guard], prefix: &str) -> usize {
+    let mut changed = 0;
+    for guard in guards {
+        let anchor = anchor_of(prefix, guard.name);
+        assert_eq!((u64::from(anchor.rva), anchor.len as usize), (guard.rva, guard.size), "{prefix}:{}", guard.name);
+        let before: Vec<Option<u8>> = (0..guard.size as u64).map(|i| bytes.get(&(BASE + moved(guard.rva) + i)).copied()).collect();
+        for field in anchor.fields {
+            let site = guard.rva + u64::from(field.at);
+            let value = dword(bytes, BASE + moved(site));
+            let new = match field.kind {
+                FieldKind::Rel32 | FieldKind::Rip => {
+                    let end = site + 4 + u64::from(field.tail);
+                    let target = end.wrapping_add(i64::from(value as i32) as u64) & 0xffff_ffff;
+                    (moved(target) as i64 - (moved(site) + 4 + u64::from(field.tail)) as i64) as i32 as u32
+                }
+                FieldKind::ImageRel | FieldKind::JumpTable => moved(u64::from(value)) as u32,
+            };
+            for (i, byte) in new.to_le_bytes().iter().enumerate() {
+                bytes.insert(BASE + moved(site) + i as u64, *byte);
+            }
+        }
+        let after: Vec<Option<u8>> = (0..guard.size as u64).map(|i| bytes.get(&(BASE + moved(guard.rva) + i)).copied()).collect();
+        changed += usize::from(before != after);
+    }
+    changed
+}
+
+/// What the resolver gives for the moved build: every anchor and vtable of the game's table
+/// where [`moved`] puts it, and its image. An anchor carries, as the digest of the file there,
+/// that of the bytes `bytes` holds over its whole range, or, for one they do not hold, the
+/// certificate's digest of it: the moved file holds that anchor's certified bytes unchanged.
+#[allow(dead_code)]
+pub fn resolved(bytes: &BTreeMap<u64, u8>) -> Resolved {
+    let l = &Layout::CERTIFIED;
+    let digest_of = |name: &str, rva: u64, len: u32| {
+        let range: Option<Vec<u8>> = (0..u64::from(len)).map(|i| bytes.get(&(BASE + moved(rva) + i)).copied()).collect();
+        range.map(|range| sha256(&range)).or_else(|| {
+            SPANS.iter().find(|s| s.name == name).map(|s| std::array::from_fn(|i| u8::from_str_radix(&s.sha256[2 * i..2 * i + 2], 16).unwrap()))
+        })
+    };
+    Resolved {
+        mode: Mode::Relocated,
+        image_size: (l.image_size + DATA) as u32,
+        tls_index: moved(l.tls_index),
+        rdata: (moved(l.rdata_vtables.start), moved(l.rdata_vtables.end)),
+        anchors: GAME
+            .anchors
+            .iter()
+            .map(|a| Place {
+                name: a.name,
+                rva: Some(moved(u64::from(a.rva))),
+                how: None,
+                file_sha256: digest_of(a.name, u64::from(a.rva), a.len),
+            })
+            .collect(),
+        vtables: GAME
+            .vtables
+            .iter()
+            .map(|v| Place { name: v.name, rva: Some(moved(u64::from(v.rva))), how: None, file_sha256: None })
+            .collect(),
+        search: None,
+    }
 }
 
 /// The bytes of a fixture of the certified build, as the moved build holds them.

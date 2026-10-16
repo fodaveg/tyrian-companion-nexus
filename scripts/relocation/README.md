@@ -4,8 +4,8 @@
 and resolves another executable with it: the semiautomatic recertification of
 `docs/audit/2026-10-16-relocation-study/README.md`. `test_relocation.py` holds it to the figures
 of that study and to its own guarantees. `core/src/resolver.rs` is the same resolver in the
-addon (lot 2), held to this one by tests that run both over the same copy; the readers do not go
-by it yet (lots 3-4).
+addon (lot 2), held to this one by tests that run both over the same copy; since lot 4 the readers
+go by it when a build does not hold the certificate at its fixed offsets (`core/src/executable.rs`).
 
 It lives here and not in `docs/audit/` because it is a tool that is run again on every update of
 the game; the dated directories of `docs/audit/` are receipts of one recertification each.

@@ -560,3 +560,34 @@ fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
     assert_eq!(read_with(moved.clone(), moved_profile), certified);
     assert_eq!(read(moved), Err(WalletError::Guard));
 }
+
+/// The gap the layout alone left: an update that moves code rewrites the rel32 and rip fields
+/// of the guarded ranges, so their bytes are not the audited ones even with the right layout.
+/// The guards compare memory with the digest of the file there, which the resolution gives
+/// (`executable::relocated`): with it the moved build reads the same balances as the certified
+/// one; with the audited digests, the guards refuse it.
+#[test]
+fn a_moved_build_whose_guards_were_rewritten_is_read_with_the_digests_of_its_file() {
+    use tyrian_companion_nexus_core::executable::relocated;
+    use tyrian_companion_nexus_core::resolver::GAME;
+    let balances: Vec<(u32, u32)> = LIVE_IDS.iter().map(|id| (*id, id * 37)).collect();
+    let m = fixture(128, &balances);
+    let read_with = |m: Fixture, profile: BuildProfile| {
+        let mut r = Reader::bounded(m, MAX_BYTES);
+        let result = WalletProfile::verified(&mut r, profile)
+            .and_then(|verified| wallet_snapshot(&mut r, &verified, CTX));
+        (result, r.reads, r.bytes)
+    };
+    let certified = read_with(m.clone(), profile());
+    let mut moved = Fixture { bytes: moved_build::bytes(&m.bytes, &m.words), ..m.clone() };
+    // The lookup reads the hash table through a rip field, from `.text` into `.rdata`, which
+    // moved by another delta: its bytes change. The getters' fields stay within `.text`.
+    assert_eq!(moved_build::rewrite_fields(&mut moved.bytes, &GUARDS, "wallet"), 1);
+    let file = &*Box::leak(Box::new(relocated(&moved_build::resolved(&moved.bytes), &GAME).unwrap()));
+    assert_eq!(&file.layout, moved_build::layout());
+    assert_ne!(file.digests.wallet, GUARDS.map(|g| g.sha256));
+    let with_file = BuildProfile::checked_with(BASE, &file.layout, &file.digests).unwrap();
+    assert_eq!(read_with(moved.clone(), with_file), certified);
+    let with_certified = BuildProfile::checked(BASE, &file.layout).unwrap();
+    assert_eq!(read_with(moved, with_certified).0.err(), Some(WalletError::Guard));
+}

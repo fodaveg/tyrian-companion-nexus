@@ -25,8 +25,10 @@
 //! The result is [`Resolved`]: the RVA of each anchor and vtable by its name in the table, the
 //! TLS index, the image size, the bounds of `.rdata`, and whether the file held the certificate
 //! at its fixed offsets (`identity`) or every place was found again (`relocated`). Or a
-//! [`Failure`]: the anchor, the rule, and why, in the words of the Python resolver. Nothing
-//! reads the game with it yet: the readers take their RVAs from it in a later lot.
+//! [`Failure`]: the anchor, the rule, and why, in the words of the Python resolver. A build whose
+//! file does not hold the certificate at its fixed offsets is read with what it gives
+//! ([`crate::executable::relocated`]): the layout of its places, and the SHA-256 of the file at
+//! each anchor ([`Place::file_sha256`]) for the guards of the readers.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -482,6 +484,10 @@ pub struct Place {
     /// `None` only for a constructor that was not found and whose vtables were.
     pub rva: Option<u64>,
     pub how: Option<String>,
+    /// For an anchor, the SHA-256 of the file's bytes over its length at `rva`, its fields as
+    /// they are and not zeroed: what the readers' guards must find in memory where the layout
+    /// places them (`passive::GuardDigests`). For a vtable, or an anchor not located, `None`.
+    pub file_sha256: Option<[u8; 32]>,
 }
 
 /// What the search cost, in a relocated resolution.
@@ -1300,6 +1306,15 @@ fn finish(
     let tls = pe.tls_index_rva()?.expect("the header check read it");
     let rdata = pe.h().section(".rdata").map_or((0, 0), |s| (u64::from(s.va), u64::from(s.va) + u64::from(s.vs)));
     let to_u64 = |v: Option<i64>| v.map(|v| v as u64);
+    // The raw bytes of each anchor where it is: every one was read for its digest above, so this
+    // reads no page that is not already in.
+    let mut file_sha256 = Vec::with_capacity(t.anchors.len());
+    for (i, a) in t.anchors.iter().enumerate() {
+        file_sha256.push(match loc.anchors[i] {
+            Some(at) => pe.read(at, a.len as usize)?.map(|raw| sha256(&raw)),
+            None => None,
+        });
+    }
     Ok(Resolved {
         mode,
         image_size: pe.h().image_size,
@@ -1309,15 +1324,16 @@ fn finish(
             .anchors
             .iter()
             .zip(how)
+            .zip(file_sha256)
             .enumerate()
-            .map(|(i, (a, how))| Place { name: a.name, rva: to_u64(loc.anchors[i]), how })
+            .map(|(i, ((a, how), file_sha256))| Place { name: a.name, rva: to_u64(loc.anchors[i]), how, file_sha256 })
             .collect(),
         vtables: t
             .vtables
             .iter()
             .zip(vhow)
             .enumerate()
-            .map(|(j, (v, how))| Place { name: v.name, rva: to_u64(loc.vtables[j]), how })
+            .map(|(j, (v, how))| Place { name: v.name, rva: to_u64(loc.vtables[j]), how, file_sha256: None })
             .collect(),
         search,
     })
@@ -1816,12 +1832,15 @@ mod tests {
         }
     }
 
-    /// Hashes `file` whole against `certificate` and `table`.
-    fn hashed(file: Bytes, certificate: &'static Certificate, table: &'static Table) -> (Hashing<Bytes>, Build) {
+    /// Hashes `file` whole against `certificate` and `table`: the build, when the certificate
+    /// holds at its fixed offsets and the hash decides it, and `None` when it does not and
+    /// `advance` would go on to the resolution, which is left to the test.
+    fn hashed(file: Bytes, certificate: &'static Certificate, table: &'static Table) -> (Hashing<Bytes>, Option<Build>) {
         let mut h = Hashing::start_with_table(file, certificate, table).ok().expect("start");
         match h.advance(|| false) {
-            Step::Decided(build) => (h, build),
-            _ => panic!("the hash did not decide"),
+            Step::Decided(build) => (h, Some(build)),
+            Step::Unfinished if h.resolving() => (h, None),
+            _ => panic!("the hash did not end"),
         }
     }
 
@@ -1847,7 +1866,7 @@ mod tests {
         let file = file(&certified());
         for chunk in [1, 7, 4096, 65536] {
             let (_, build) = hashed(Bytes::of(file.clone(), chunk), certificate(), table());
-            assert_eq!(build, Build::Certified([0; 32]), "the synthetic certificate holds");
+            assert_eq!(build, Some(Build::Certified([0; 32])), "the synthetic certificate holds");
             let r = resolve_synthetic(file.clone(), chunk, false).unwrap();
             assert_eq!(r.mode, Mode::Identity, "reads of {chunk}");
             assert_eq!(rvas(&r), expected(&certified()));
@@ -1874,7 +1893,7 @@ mod tests {
         let p = moved();
         let file = file(&p);
         let (_, build) = hashed(Bytes::of(file.clone(), 65536), certificate(), table());
-        assert!(matches!(build, Build::Uncertified(..)), "not the certified offsets: {build:?}");
+        assert_eq!(build, None, "not the certified offsets");
         for chunk in [1, 4096, 65536] {
             let r = resolve_synthetic(file.clone(), chunk, false).unwrap();
             assert_eq!(r.mode, Mode::Relocated);
@@ -1893,7 +1912,15 @@ mod tests {
                     "search (1 match)",
                 ]
             );
-            assert_eq!(r.vtables[0], Place { name: "vt", rva: Some(u64::from(p.vt)), how: Some("lea in ctor:vt".into()) });
+            assert_eq!(
+                r.vtables[0],
+                Place { name: "vt", rva: Some(u64::from(p.vt)), how: Some("lea in ctor:vt".into()), file_sha256: None }
+            );
+            // Each anchor carries the digest of the moved file's bytes where it was found.
+            for (place, a) in r.anchors.iter().zip(table().anchors) {
+                let o = off(place.rva.unwrap() as u32);
+                assert_eq!(place.file_sha256, Some(crate::sha256::sha256(&file[o..o + a.len as usize])), "{}", a.name);
+            }
             assert_eq!(r.resolved_rva("vtable vt"), Some(u64::from(p.vt)));
             assert_eq!(r.resolved_rva("s:derived"), Some(u64::from(p.derived)));
             assert_eq!(r.resolved_rva("vt"), None, "a vtable is named as a failure names it");

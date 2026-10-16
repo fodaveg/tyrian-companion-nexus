@@ -512,3 +512,37 @@ fn a_build_whose_code_moved_is_read_with_its_layout_as_the_certified_one() {
         assert_eq!(run(moved).0, Err(Uncovered::Guard));
     }
 }
+
+/// The gap the layout alone left, through `BagProfile::verified`, which the addon calls: an
+/// update that moves code rewrites the fields of the guarded ranges, so their bytes are not the
+/// certified ones even with the right layout. The profile's digests are those of the file at
+/// each range, as the resolution gives them (`executable::relocated`): with them the moved build
+/// reads what the certified one reads; with the fixture's stand-ins for the audited digests,
+/// which the moved build held before its fields were rewritten, the guards refuse it.
+#[test]
+fn a_moved_build_whose_guards_were_rewritten_is_read_with_the_digests_of_its_file() {
+    use tyrian_companion_nexus_core::executable::relocated;
+    use tyrian_companion_nexus_core::resolver::GAME;
+    let layout = moved_build::layout();
+    let stand_ins: Vec<Guard> = guards_of(layout)
+        .iter()
+        .zip(synthetic_guards())
+        .map(|(moved, certified)| Guard { sha256: certified.sha256, ..*moved })
+        .collect();
+    for m in [small(), fixture(&LIVE_SIZES, 512, 313)] {
+        let certified = run(m.clone());
+        let mut moved = Fixture { bytes: moved_build::bytes(&m.bytes, &m.words), ..m.clone() };
+        assert!(moved_build::rewrite_fields(&mut moved.bytes, &GUARDS, "bag") > 0);
+        let file = &*Box::leak(Box::new(relocated(&moved_build::resolved(&moved.bytes), &GAME).unwrap()));
+        assert_eq!(&file.layout, layout);
+        let mut reader = Reader::bounded(moved.clone(), MAX_BYTES);
+        let profile = BuildProfile::checked_with(BASE, &file.layout, &file.digests).unwrap();
+        let result = BagProfile::verified(&mut reader, profile)
+            .and_then(|verified| bag_slots(&mut reader, &verified, CTX))
+            .map(|(slots, _owner)| slots);
+        assert_eq!((result, reader.bytes), certified);
+        let mut reader = Reader::bounded(moved, MAX_BYTES);
+        let profile = BuildProfile::checked(BASE, layout).unwrap();
+        assert_eq!(BagProfile::verified_against(&mut reader, profile, &stand_ins).err(), Some(Uncovered::Guard));
+    }
+}

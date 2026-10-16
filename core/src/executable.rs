@@ -1,18 +1,28 @@
-//! Whether the game's executable holds the certificate: what decides it for good, and what only
-//! means "not now".
+//! Whether the game's executable holds what the readers rely on: what decides it for good, and
+//! what only means "not now".
 //!
 //! The readers touch a game field only after the executable was read whole, found to hold what
-//! they rely on ([`crate::certificate`]), and its loaded image checked. Its SHA-256 is taken on
-//! the same pass and only names the build: since 16 October 2026 an update of the game that
-//! leaves that code as it was does not stop the readers. Some answers of that check depend on
-//! nothing but the file and the image: its size, its content, its header. Those are final for as long as the process lives, whichever way
-//! they go, and a "no" among them is another build: the source says so and stops. Every other
-//! way of not getting an answer is the system's doing, a file that cannot be opened or read
-//! or a copy that fails, and is tried again later.
+//! they rely on, and its loaded image checked. Its SHA-256 is taken on the same pass and only
+//! names the build: since 16 October 2026 an update of the game that leaves that code as it was
+//! does not stop the readers. What they rely on is found in one of two ways, in this order
+//! (`docs/audit/2026-10-16-relocation-study/README.md`, section 4, rule 1):
+//!
+//! - **by identity**: the file holds the certificate at its fixed offsets
+//!   ([`crate::certificate`]), and is read with [`Layout::CERTIFIED`] ([`Build::Certified`]);
+//! - **by relocation**, only when it does not: the relocation table's resolver
+//!   ([`crate::resolver`]) finds every anchor again in the file, and it is read with the layout
+//!   that gives ([`Build::Relocated`]). One anchor it does not find is another build.
+//!
+//! Some answers depend on nothing but the file and the image: its size, its content, its
+//! header. Those are final for as long as the process lives, whichever way they go, and a "no"
+//! among them is another build: the source says so and stops. Every other way of not getting an
+//! answer is the system's doing, a file that cannot be opened or read or a copy that fails, and
+//! is tried again later.
 //!
 //! This module holds that rule, with the file, the hash and the memory handed in, so that it
 //! is tested here. The Windows adapter only opens the file, runs the system's SHA-256 over
-//! what this asks it to and copies the bytes of the image.
+//! what this asks it to, reads it at the points the resolver asks for and copies the bytes of
+//! the image.
 
 use std::time::{Duration, SystemTime};
 
@@ -20,7 +30,8 @@ use crate::certificate::{Certificate, Collector, CERTIFICATE, GAME};
 use crate::inventory::{BuildProfile, Memory, ReadError, Reader};
 use crate::layout::Layout;
 use crate::live::RESPONSE_TIMEOUT;
-use crate::resolver::{self, Failure, Resolution, Resolved, Scanner, Table};
+use crate::passive::{Guard, GuardDigests};
+use crate::resolver::{self, rule_name, Failure, Resolution, Resolved, Scanner, Table};
 use crate::sha256::hex;
 
 /// The largest executable that is hashed at all. A larger file is not the certified build,
@@ -39,6 +50,10 @@ pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 /// one. A heartbeat that is due goes out that much late at most, so the plugin sees one every
 /// six and a half seconds in the worst case. A longer slice would get the verdict no sooner:
 /// the thread already hashes four fifths of the time.
+///
+/// The resolution of a build whose code moved goes in the same slices, on the passes after the
+/// hash: a read at a point is 4 KiB, less than the hash's 64 KiB, and it too is asked for only
+/// while the slice lasts.
 pub const SLICE: Duration = Duration::from_secs(1);
 
 /// How much hashing the source keeps quiet about. While the hash is under way the source takes
@@ -78,16 +93,116 @@ pub enum Step<T> {
     Failed,
 }
 
-/// Whether the file holds what the readers rely on ([`crate::certificate`]), and its SHA-256.
+/// Whether the file holds what the readers rely on, how that was found, and its SHA-256. The
+/// SHA-256 is whatever the game's update made it: it is the build `live_open` names, not a
+/// condition, on either path.
+///
+/// The variants say which path the readers go by, because that is what they read with:
+/// `Certified` keeps the name it had, the identity path the readers have always gone by;
+/// `Relocated` is the resolver's own word for a build every anchor of which was found again
+/// (`resolver::Mode::Relocated`, and the log's "relocated by content"); `Uncertified` keeps its
+/// name too, but what it carries is now the resolver's first failure, since the certificate
+/// failing at its fixed offsets no longer refuses a build on its own. A [`Failure`] and a
+/// [`Relocated`] are kept by a `'static` reference, so that `Build` stays `Copy`: a process
+/// decides its executable once, and keeps that answer for as long as it lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Build {
-    /// It holds the certificate. Its SHA-256 is whatever the game's update made it: it is the
-    /// build `live_open` names, not a condition.
+    /// It holds the certificate at its fixed offsets: read with [`Layout::CERTIFIED`] and the
+    /// audited digests ([`GuardDigests::CERTIFIED`]).
     Certified([u8; 32]),
-    /// It does not: its SHA-256 and the first check of the certificate that failed.
-    Uncertified([u8; 32], &'static str),
+    /// It does not, and the resolver placed every anchor and vtable of the relocation table
+    /// again: read with the layout and the digests of the file it found ([`Relocated`]).
+    Relocated([u8; 32], &'static Relocated),
+    /// Neither: its SHA-256 and the first rule that did not hold, as the resolver says it. The
+    /// readers never get a layout from it, not even part of one.
+    Uncertified([u8; 32], &'static Failure),
     /// Decided by size alone, before a byte was read.
     BySize,
+}
+
+/// What a build whose code moved is read with, as its resolution gave it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Relocated {
+    /// Every RVA the readers use ([`Layout::from_resolved`]).
+    pub layout: Layout,
+    /// What each guard must find in memory: the file's bytes at the range the layout places.
+    pub digests: GuardDigests,
+    /// How many anchors and vtables of the table are not where the certified build has them.
+    pub moved: usize,
+}
+
+impl Build {
+    /// What the readers read this build with: its layout and its guards' digests. `None` for a
+    /// build that is not read.
+    pub fn readable(&self) -> Option<(&'static Layout, &'static GuardDigests)> {
+        match self {
+            Build::Certified(_) => Some((&Layout::CERTIFIED, &GuardDigests::CERTIFIED)),
+            Build::Relocated(_, relocated) => Some((&relocated.layout, &relocated.digests)),
+            Build::Uncertified(..) | Build::BySize => None,
+        }
+    }
+
+    /// The SHA-256 of the file, when it was hashed.
+    pub fn digest(&self) -> Option<&[u8; 32]> {
+        match self {
+            Build::Certified(digest) | Build::Relocated(digest, _) | Build::Uncertified(digest, _) => Some(digest),
+            Build::BySize => None,
+        }
+    }
+}
+
+/// What the readers read a resolved executable with, or why it is not read: the layout of its
+/// places ([`Layout::from_resolved`]), and the digest of the file at each guard's range.
+///
+/// Every failure is rule 9, all or nothing, named by what it lacks: the anchor of a field the
+/// resolution did not place (or that `table` does not have), the relation of the layout that
+/// breaks (`layout`), or the guard no anchor of the table is (`bag:`, `wallet:` or `mf:` and its
+/// name). A guard's range must be exactly one anchor's, at its place and of its length: the
+/// digest the guard is given is that anchor's, taken over the file by the resolver.
+///
+/// Each digest is kept as a `'static` string, as the audited ones are: called once per process,
+/// when the build is decided.
+pub fn relocated(resolved: &Resolved, table: &Table) -> Result<Relocated, Failure> {
+    let refused = |anchor: &str, detail: String| Failure { anchor: anchor.to_string(), rule: 9, detail };
+    let layout = Layout::from_names(resolved)
+        .map_err(|name| refused(name, "the layout reads it and the resolution did not place it".into()))?;
+    layout.validate().map_err(|relation| refused("layout", format!("the resolved layout breaks: {relation}")))?;
+    let digests = GuardDigests {
+        bags: guard_digests("bag", crate::bags::guards_of(&layout), resolved, table)?,
+        wallet: guard_digests("wallet", crate::wallet::guards_of(&layout), resolved, table)?,
+        magic_find: guard_digests("mf", crate::magic_find::guards_of(&layout), resolved, table)?,
+    };
+    let anchors = resolved.anchors.iter().zip(table.anchors).filter(|(p, a)| p.rva.is_some_and(|rva| rva != u64::from(a.rva)));
+    let vtables = resolved.vtables.iter().zip(table.vtables).filter(|(p, v)| p.rva != Some(u64::from(v.rva)));
+    Ok(Relocated { layout, digests, moved: anchors.count() + vtables.count() })
+}
+
+/// The digest of the file at each of one reader's guards, by the anchor of the table whose name
+/// has `prefix:name` as one of its parts.
+fn guard_digests<const N: usize>(
+    prefix: &str,
+    guards: [Guard; N],
+    resolved: &Resolved,
+    table: &Table,
+) -> Result<[&'static str; N], Failure> {
+    let mut out = [""; N];
+    for (digest, guard) in out.iter_mut().zip(&guards) {
+        let name = format!("{prefix}:{}", guard.name);
+        let found = resolved.anchors.iter().zip(table.anchors).find(|(p, _)| p.name.split(" + ").any(|part| part == name));
+        let file_sha256 = match found {
+            Some((p, a)) if p.rva == Some(guard.rva) && a.len as usize == guard.size => p.file_sha256,
+            _ => None,
+        };
+        let Some(file_sha256) = file_sha256 else {
+            return Err(Failure {
+                anchor: name,
+                rule: 9,
+                detail: format!("no anchor of the table is this guard's range, {} bytes at {:#x}", guard.size, guard.rva),
+            });
+        };
+        *digest = Box::leak(hex(&file_sha256).into_boxed_str());
+    }
+    Ok(out)
 }
 
 /// The first 12 hex digits of a SHA-256: enough to tell one binary from another in a log line.
@@ -101,15 +216,54 @@ fn mib(bytes: u64) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
-/// The log line for an executable the hash decided: which build, the first 12 hex digits of its
-/// SHA-256, its size in MiB and how long the hash took. No path and no name of the file.
-pub fn decided_line(build: Build, bytes: u64, took: Duration) -> String {
-    let (which, digest) = match build {
-        Build::Certified(digest) => (format!("certified by content ({CERTIFICATE})"), short_digest(&digest)),
-        Build::Uncertified(digest, check) => (format!("not certified, {check} differs"), short_digest(&digest)),
-        Build::BySize => return size_line(bytes),
-    };
-    format!("game executable: {which}, sha256 {digest}, {} MiB, hashed in {} ms", mib(bytes), took.as_millis())
+/// A failure of the resolver as the log and the panel say it: the anchor, the rule by its number
+/// and its name, and why.
+fn refusal(failure: &Failure) -> String {
+    format!("{} rule {} ({}): {}", failure.anchor, failure.rule, rule_name(failure.rule), failure.detail)
+}
+
+/// The log line for an executable the hash decided: which build and how it was found, the first
+/// 12 hex digits of its SHA-256, its size in MiB and how long the hash took; for one that did
+/// not hold the certificate at its fixed offsets, how long its resolution took, and how many
+/// anchors moved or the first rule that failed. No path and no name of the file, and no byte of
+/// it: a failure names RVAs and counts.
+///
+/// The failure goes first, as the other lines say what the build is first, and its detail is
+/// closed by a semicolon: it is free text with commas of its own.
+pub fn decided_line(build: Build, bytes: u64, hashed: Duration, resolved: Duration) -> String {
+    let size = format!("{} MiB, hashed in {} ms", mib(bytes), hashed.as_millis());
+    match build {
+        Build::Certified(digest) => {
+            format!("game executable: certified by content ({CERTIFICATE}), sha256 {}, {size}", short_digest(&digest))
+        }
+        Build::Relocated(digest, relocated) => format!(
+            "game executable: relocated by content ({CERTIFICATE}), sha256 {}, {size}, {} anchors moved, resolved in {} ms",
+            short_digest(&digest),
+            relocated.moved,
+            resolved.as_millis()
+        ),
+        Build::Uncertified(digest, failure) => format!(
+            "game executable: not certified, {}; sha256 {}, {size}, resolved in {} ms",
+            refusal(failure),
+            short_digest(&digest),
+            resolved.as_millis()
+        ),
+        Build::BySize => size_line(bytes),
+    }
+}
+
+/// What the Options window says of the executable: how it was found, or why it is not read.
+/// `None` is a verification still under way, or one the system failed and will try again.
+pub fn panel_line(build: Option<Build>) -> String {
+    match build {
+        None => "Game executable: not verified yet".to_string(),
+        Some(Build::Certified(_)) => format!("Game executable: certified by content ({CERTIFICATE})"),
+        Some(Build::Relocated(_, relocated)) => {
+            format!("Game executable: relocated by content ({} anchors moved)", relocated.moved)
+        }
+        Some(Build::Uncertified(_, failure)) => format!("Game executable: not certified, {}", refusal(failure)),
+        Some(Build::BySize) => "Game executable: other build by size".to_string(),
+    }
 }
 
 /// The log line for the addon's own DLL: its version label and what the file really is, by the
@@ -169,12 +323,17 @@ pub struct Hashing<F> {
     hashed: u64,
     /// The bytes the certificate names, copied as the file goes by.
     collector: Collector,
+    /// The relocation table the resolution goes by.
+    table: &'static Table,
     /// The first phase of the relocation table's resolution, on the same pass.
     scanner: Scanner,
-    /// Its second phase, once the hash has ended and [`Hashing::resolve`] is called.
+    /// Its second phase, once the hash has ended without the certificate at its fixed offsets
+    /// ([`Hashing::advance`]), or [`Hashing::resolve`] is called.
     resolution: Option<Resolution>,
-    /// The hash ended with a verdict on the file.
+    /// The hash ended with a digest of the whole file.
     decided: bool,
+    /// The digest, while the resolution that decides the build is under way.
+    resolving: Option<[u8; 32]>,
 }
 
 impl<F: HashedFile> Hashing<F> {
@@ -204,9 +363,11 @@ impl<F: HashedFile> Hashing<F> {
             before,
             hashed: 0,
             collector: Collector::new(certificate),
+            table,
             scanner: Scanner::new(table),
             resolution: None,
             decided: false,
+            resolving: None,
         })
     }
 
@@ -217,7 +378,18 @@ impl<F: HashedFile> Hashing<F> {
     /// At the end of the file it must still be the file the hash began on, by its size, its
     /// last write and the number of bytes that came out of it. One that changed meanwhile is
     /// not decided: the hash is of neither file.
+    ///
+    /// A file that holds the certificate at its fixed offsets is decided there:
+    /// [`Build::Certified`]. One that does not is decided by the resolution of the relocation
+    /// table: the call that ends the hash is `Unfinished`, and the next ones each do a step of
+    /// it, asking `expired` before every read as the hash does, until it gives
+    /// [`Build::Relocated`] or [`Build::Uncertified`]. The resolution starts on a call of its
+    /// own so that the time of each phase is the time of its own calls
+    /// ([`Hashing::resolving`]).
     pub fn advance(&mut self, mut expired: impl FnMut() -> bool) -> Step<Build> {
+        if let Some(digest) = self.resolving {
+            return self.relocate(digest, expired);
+        }
         let mut buffer = [0u8; 65536];
         loop {
             if expired() {
@@ -242,12 +414,29 @@ impl<F: HashedFile> Hashing<F> {
         match self.file.finish() {
             Some(digest) => {
                 self.decided = true;
-                Step::Decided(match self.collector.verdict() {
-                    Ok(()) => Build::Certified(digest),
-                    Err(check) => Build::Uncertified(digest, check),
-                })
+                if self.collector.verdict().is_ok() {
+                    return Step::Decided(Build::Certified(digest));
+                }
+                self.resolving = Some(digest);
+                Step::Unfinished
             }
             None => Step::Failed,
+        }
+    }
+
+    /// One step of the resolution that decides a file whose hash ended without the certificate
+    /// at its fixed offsets: a layout of every place, or the first rule that does not hold.
+    fn relocate(&mut self, digest: [u8; 32], expired: impl FnMut() -> bool) -> Step<Build> {
+        match self.resolve_by(false, expired) {
+            Step::Unfinished => Step::Unfinished,
+            Step::Failed => Step::Failed,
+            Step::Decided(resolution) => {
+                let table = self.table;
+                Step::Decided(match resolution.and_then(|resolved| relocated(&resolved, table)) {
+                    Ok(relocated) => Build::Relocated(digest, Box::leak(Box::new(relocated))),
+                    Err(failure) => Build::Uncertified(digest, Box::leak(Box::new(failure))),
+                })
+            }
         }
     }
 
@@ -256,15 +445,22 @@ impl<F: HashedFile> Hashing<F> {
         self.hashed
     }
 
+    /// Whether the hash is over and what [`Hashing::advance`] does now is the resolution: the
+    /// adapter counts the time of these calls as the resolution's.
+    pub fn resolving(&self) -> bool {
+        self.resolving.is_some()
+    }
+
     /// One step of the resolution of the relocation table ([`crate::resolver`]) over this file,
     /// once [`Hashing::advance`] has decided: where every anchor and vtable is, or the first rule
     /// that does not hold. `expired` is asked before every read, as in `advance`, and a step
     /// that it ends is `Unfinished`; the next call goes on. The file held the certificate at its
     /// fixed offsets or not by the same verdict as the [`Build`] (rule 1, identity first).
     ///
-    /// Nothing decides by it yet: [`Build`] is what the readers go by. A file that changed since
-    /// it was hashed, or a read the system fails, is `Failed`, as is a call before the hash has
-    /// decided.
+    /// It is the same resolution [`Hashing::advance`] decides a build by, and shares its pages:
+    /// called after `advance`, it gives what `advance` went by without reading again. A file
+    /// that changed since it was hashed, or a read the system fails, is `Failed`, as is a call
+    /// before the hash has ended.
     pub fn resolve(&mut self, expired: impl FnMut() -> bool) -> Step<Result<Resolved, Failure>> {
         self.resolve_by(false, expired)
     }
@@ -307,20 +503,21 @@ pub fn size_in_range(len: u64) -> bool {
     len != 0 && len <= MAX_BYTES
 }
 
-/// The profile of the image loaded at `base`, for a process whose executable file holds the
-/// certificate: `Some` when its header is the one the file says (an AMD64 PE32+ image of the
-/// size of the layout the readers will read it with), `None` when it is not.
+/// The profile of the image loaded at `base`, for a process whose executable file is read with
+/// `layout` and `digests` ([`Build::readable`]): `Some` when its header is the one the file says
+/// (an AMD64 PE32+ image of the size of that layout, the file's own and not a constant), `None`
+/// when it is not.
 ///
 /// The header is in memory for as long as the process lives and does not change, so a header
 /// that is not the expected one is as final as a digest that is not. Only a copy that failed
 /// says nothing about it.
-pub fn image_profile<M: Memory>(reader: &mut Reader<M>, base: u64) -> Step<Option<BuildProfile>> {
-    // The readers read the certified layout: the only one a file can hold today, since the
-    // certificate checks every RVA of it at its fixed place. Batch 2 of the relocation plan
-    // (`docs/audit/2026-10-16-relocation-study/README.md`, §8) plugs in here: the layout its
-    // resolver gives for the file that was hashed replaces `Layout::CERTIFIED`, and nothing
-    // below this line changes for it.
-    match header(reader, base, &Layout::CERTIFIED) {
+pub fn image_profile<M: Memory>(
+    reader: &mut Reader<M>,
+    base: u64,
+    layout: &'static Layout,
+    digests: &'static GuardDigests,
+) -> Step<Option<BuildProfile>> {
+    match header(reader, base, layout, digests) {
         Ok(profile) => Step::Decided(Some(profile)),
         Err(ReadError::ReadFailed) => Step::Failed,
         Err(_) => Step::Decided(None),
@@ -332,6 +529,7 @@ fn header<M: Memory>(
     reader: &mut Reader<M>,
     base: u64,
     layout: &'static Layout,
+    digests: &'static GuardDigests,
 ) -> Result<BuildProfile, ReadError> {
     if reader.read::<2>(base)? != *b"MZ" {
         return Err(ReadError::UnsupportedBuild);
@@ -348,7 +546,7 @@ fn header<M: Memory>(
     if image_size != layout.image_size {
         return Err(ReadError::UnsupportedBuild);
     }
-    BuildProfile::checked(base, layout)
+    BuildProfile::checked_with(base, layout, digests)
 }
 
 #[cfg(test)]
@@ -390,7 +588,7 @@ mod tests {
     }
 
     fn check(bytes: Vec<u8>, readable: bool) -> Step<Option<u64>> {
-        match image_profile(&mut Reader::new(Image { bytes, readable }), BASE) {
+        match image_profile(&mut Reader::new(Image { bytes, readable }), BASE, &Layout::CERTIFIED, &GuardDigests::CERTIFIED) {
             Step::Decided(profile) => Step::Decided(profile.map(|profile| profile.base)),
             Step::Unfinished => Step::Unfinished,
             Step::Failed => Step::Failed,
@@ -474,12 +672,28 @@ mod tests {
         (0..len).map(|index| (index * 31 % 251) as u8).collect()
     }
 
-    /// Hashes `file` in one go against the synthetic certificate and says how it ended.
+    /// Hashes `file` in one go against the synthetic certificate, and resolves it if it does not
+    /// hold it, and says how it ended.
     fn whole(file: File) -> Step<Build> {
+        whole_with(file).0
+    }
+
+    /// [`whole`], and the first check of the certificate the file did not hold.
+    fn whole_with(file: File) -> (Step<Build>, Result<(), &'static str>) {
         match Hashing::start_with(file, certificate_and_file().0) {
-            Ok(mut hashing) => hashing.advance(|| false),
-            Err(step) => step,
+            Ok(mut hashing) => loop {
+                match hashing.advance(|| false) {
+                    Step::Unfinished => assert!(hashing.resolving(), "a slice that never expires ends only the hash"),
+                    step => break (step, hashing.collector.verdict()),
+                }
+            },
+            Err(step) => (step, Ok(())),
         }
+    }
+
+    /// A refusal of the resolver, as the build keeps it.
+    fn failure(anchor: &str, rule: u8, detail: &str) -> &'static Failure {
+        Box::leak(Box::new(Failure { anchor: anchor.into(), rule, detail: detail.into() }))
     }
 
     /// A file that holds the synthetic certificate.
@@ -504,7 +718,8 @@ mod tests {
 
     /// What decides is what the file holds, not its digest: two files with different digests
     /// that both hold the certificate are both certified, each with its own digest, and one byte
-    /// that differs in any check is not, with the name of that check for the log.
+    /// that differs in any check is not certified by identity. The synthetic certificate's file
+    /// has none of the game's sections, so its resolution fails, by the header (rule 8).
     #[test]
     fn the_content_decides_and_the_digest_only_names_the_build() {
         let data = holding();
@@ -516,15 +731,175 @@ mod tests {
         for (name, at) in one_byte_of_each_check() {
             let mut changed = data.clone();
             changed[at] ^= 0x40;
-            assert_eq!(
-                whole(File::of(changed.clone())),
-                Step::Decided(Build::Uncertified(crate::sha256::sha256(&changed), name)),
-                "byte {at:#x}"
-            );
+            let (step, check) = whole_with(File::of(changed.clone()));
+            assert_eq!(check, Err(name), "byte {at:#x}");
+            let Step::Decided(Build::Uncertified(digest, failure)) = step else { panic!("byte {at:#x}: {step:?}") };
+            assert_eq!(digest, crate::sha256::sha256(&changed));
+            assert_eq!((failure.anchor.as_str(), failure.rule), ("header", 8), "byte {at:#x}: {failure}");
         }
         // A file that is not an executable at all.
         let other = contents(12_345);
-        assert_eq!(whole(File::of(other.clone())), Step::Decided(Build::Uncertified(crate::sha256::sha256(&other), "pe_header")));
+        assert_eq!(
+            whole(File::of(other.clone())),
+            Step::Decided(Build::Uncertified(crate::sha256::sha256(&other), failure("header", 8, "not MZ")))
+        );
+    }
+
+    /// A file that does not hold the certificate at its fixed offsets is decided by its
+    /// resolution, on the calls after the one that ended the hash; one whose resolution fails,
+    /// or gives none of what the readers read, is another build, with nothing to read it with.
+    #[test]
+    fn a_file_without_the_certificate_at_its_offsets_is_decided_by_its_resolution() {
+        use crate::resolver::synthetic::{certificate, file, moved, off, table};
+        let start = |data: Vec<u8>| Hashing::start_with_table(File::of(data), certificate(), table()).ok().unwrap();
+        // Code moved: the synthetic table resolves, but names nothing the readers read, so there
+        // is no layout to read it with, not a part of one.
+        let data = file(&moved());
+        let mut hashing = start(data.clone());
+        assert_eq!(hashing.advance(|| false), Step::Unfinished);
+        assert!(hashing.resolving());
+        assert_eq!(hashing.resolution_reads(), (0, 0), "the call that ends the hash ends there");
+        let step = hashing.advance(|| false);
+        let expected = failure("vtable char_context", 9, "the layout reads it and the resolution did not place it");
+        assert_eq!(step, Step::Decided(Build::Uncertified(crate::sha256::sha256(&data), expected)));
+        assert!(hashing.resolution_reads().0 > 0);
+        let Step::Decided(build) = step else { unreachable!() };
+        assert_eq!(build.readable(), None);
+        // The resolution fails: its first failure is what the build says.
+        let mut broken = data.clone();
+        broken[off(moved().lonely + 10)] ^= 1;
+        let mut hashing = start(broken.clone());
+        let step = loop {
+            match hashing.advance(|| false) {
+                Step::Unfinished => continue,
+                step => break step,
+            }
+        };
+        let Step::Decided(Build::Uncertified(digest, failure)) = step else { panic!("{step:?}") };
+        assert_eq!(digest, crate::sha256::sha256(&broken));
+        assert_eq!(
+            failure.to_string(),
+            "not resolved: s:lonely: rule 9 (all or nothing): not located (search: 0 matches, certified matches 1; no derivation reached it)"
+        );
+        // And `resolve` gives, after `advance`, the resolution it went by, with no read more.
+        let reads = hashing.resolution_reads();
+        assert!(matches!(hashing.resolve(|| true), Step::Decided(Err(f)) if f == *failure));
+        assert_eq!(hashing.resolution_reads(), reads);
+        // The certified file is decided where its hash ends, without a resolution.
+        let mut hashing = start(file(&crate::resolver::synthetic::certified()));
+        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Certified(_))));
+        assert_eq!((hashing.resolving(), hashing.resolution_reads()), (false, (0, 0)));
+    }
+
+    /// What the readers get from a resolution: the certified layout and digests from the one of
+    /// identity, and the first thing missing from any other, never a layout with a hole in it.
+    #[test]
+    fn a_resolution_gives_the_layout_and_the_guard_digests_or_the_first_thing_missing() {
+        use crate::layout::tests::identity;
+        let certified = relocated(&identity(), &resolver::GAME).unwrap();
+        assert_eq!(certified, Relocated { layout: Layout::CERTIFIED, digests: GuardDigests::CERTIFIED, moved: 0 });
+        // A guard whose file digest the resolution does not have.
+        let mut resolved = identity();
+        resolved.anchors.iter_mut().find(|p| p.name == "wallet:balance_getter").unwrap().file_sha256 = None;
+        assert_eq!(
+            relocated(&resolved, &resolver::GAME),
+            Err(Failure { anchor: "wallet:balance_getter".into(), rule: 9, detail: "no anchor of the table is this guard's range, 80 bytes at 0x12722a0".into() })
+        );
+        // A field the resolution did not place.
+        let mut resolved = identity();
+        resolved.anchors.iter_mut().find(|p| p.name == "mf:buff_lookup").unwrap().rva = None;
+        assert_eq!(
+            relocated(&resolved, &resolver::GAME).map_err(|f| f.to_string()),
+            Err("not resolved: mf:buff_lookup: rule 9 (all or nothing): the layout reads it and the resolution did not place it".into())
+        );
+        // A layout that breaks a relation of the readers.
+        let mut resolved = identity();
+        resolved.tls_index = 0x100;
+        assert_eq!(
+            relocated(&resolved, &resolver::GAME).map_err(|f| f.anchor + ": " + &f.detail),
+            Err("layout: the resolved layout breaks: rdata_vtables ends before tls_index".into())
+        );
+        // A moved anchor and its file digest: counted, and given to its guard.
+        let mut resolved = identity();
+        let place = resolved.anchors.iter_mut().find(|p| p.name == "bag:slot_validity").unwrap();
+        place.rva = place.rva.map(|rva| rva + 0x40);
+        place.file_sha256 = Some(crate::sha256::sha256(b"moved"));
+        let moved = relocated(&resolved, &resolver::GAME).unwrap();
+        assert_eq!((moved.moved, moved.layout.slot_validity), (1, Layout::CERTIFIED.slot_validity + 0x40));
+        let at = crate::bags::GUARDS.iter().position(|g| g.name == "slot_validity").unwrap();
+        assert_eq!(moved.digests.bags[at], hex(&crate::sha256::sha256(b"moved")));
+        assert_eq!(moved.digests.wallet, GuardDigests::CERTIFIED.wallet);
+    }
+
+    /// The model of the worker's passes, on a disk as slow as the doc of [`SLICE`] allows: every
+    /// read of the file, in order or at a point, costs a quarter of a second on the model's
+    /// clock, and a call is given [`SLICE`] of it. No call of either phase goes past its slice by
+    /// more than the read under way when it ran out, the resolution included, and the worst wait
+    /// of a heartbeat (its interval, one call and the worker's wait on its socket) stays within
+    /// the six and a half seconds the doc of [`SLICE`] gives.
+    ///
+    /// The clock moves only with reads. What a step spends between reads, going over the pages it
+    /// already has, is measured on the real copy (`a_moved_copy_is_relocated_in_slices`).
+    #[test]
+    fn no_call_goes_past_its_slice_and_the_heartbeat_holds_in_the_worst_case() {
+        use crate::resolver::synthetic::{certificate, file, moved, table};
+        use std::cell::Cell;
+        use std::rc::Rc;
+        const READ: Duration = Duration::from_millis(250);
+        struct Slow {
+            file: File,
+            clock: Rc<Cell<Duration>>,
+        }
+        impl HashedFile for Slow {
+            fn stamp(&mut self) -> Option<Stamp> {
+                self.file.stamp()
+            }
+            fn read(&mut self, buffer: &mut [u8]) -> Option<usize> {
+                self.clock.set(self.clock.get() + READ);
+                self.file.read(buffer)
+            }
+            fn update(&mut self, bytes: &[u8]) -> bool {
+                self.file.update(bytes)
+            }
+            fn finish(&mut self) -> Option<[u8; 32]> {
+                self.file.finish()
+            }
+            fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Option<usize> {
+                self.clock.set(self.clock.get() + READ);
+                self.file.read_at(offset, buffer)
+            }
+        }
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        let mut slow = File::of(file(&moved()));
+        slow.chunk = 65536;
+        let mut hashing = Hashing::start_with_table(Slow { file: slow, clock: clock.clone() }, certificate(), table()).ok().unwrap();
+        let (mut longest, mut hash_calls, mut resolution_calls) = (Duration::ZERO, 0, 0);
+        let outcome = loop {
+            let start = clock.get();
+            let until = start + SLICE;
+            let resolving = hashing.resolving();
+            let step = hashing.advance(|| clock.get() >= until);
+            let took = clock.get() - start;
+            assert!(took <= SLICE + READ, "a call of {took:?}");
+            longest = longest.max(took);
+            if resolving {
+                resolution_calls += 1;
+            } else {
+                hash_calls += 1;
+            }
+            match step {
+                Step::Unfinished => continue,
+                step => break step,
+            }
+        };
+        assert!(matches!(outcome, Step::Decided(Build::Uncertified(..))), "{outcome:?}");
+        let (reads, _) = hashing.resolution_reads();
+        assert!(resolution_calls > 1 && reads > 4, "{resolution_calls} calls, {reads} reads: the resolution went over several slices");
+        assert_eq!(hash_calls, 1, "two reads of 64 KiB and the end: one slice");
+        let heartbeat = Duration::from_millis(crate::protocol::DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let worst = heartbeat + longest + crate::client::READ_POLL_INTERVAL;
+        assert!(worst <= Duration::from_millis(6_500), "a heartbeat waits up to {worst:?}");
+        println!("model: {hash_calls} call of hash, {resolution_calls} of resolution ({reads} reads), longest {longest:?}, worst heartbeat {worst:?}");
     }
 
     /// The fault of the review: the hash had ten seconds in one go, on the thread that owes
@@ -579,8 +954,9 @@ mod tests {
             assert_eq!(hashing.advance(|| true), Step::Unfinished);
         }
         assert_eq!((hashing.hashed(), hashing.file.reads), (0, 0));
-        // And it is still good for the rest.
-        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Uncertified(_, "pe_header"))));
+        // And it is still good for the rest: the hash ends, and the resolution refuses the file.
+        assert_eq!(hashing.advance(|| false), Step::Unfinished);
+        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Uncertified(_, f)) if f.detail == "not MZ"));
     }
 
     /// The lines say which build, 12 hex digits, MiB and time; by size alone there is no digest.
@@ -590,17 +966,37 @@ mod tests {
         let digest = crate::sha256::sha256(b"abc");
         assert_eq!(short_digest(&digest), "ba7816bf8f01");
         let ninety_mib = 90 * 1024 * 1024 + 512 * 1024;
+        let refused = failure("mf:modifier_sum", 4, "field +12 (rel32) calls 0x12c5000, which is not the certified callee (function, 96 bytes)");
         assert_eq!(
-            decided_line(Build::Uncertified(digest, "mf:modifier_sum"), ninety_mib, Duration::from_millis(4120)),
-            "game executable: not certified, mf:modifier_sum differs, sha256 ba7816bf8f01, 90.5 MiB, hashed in 4120 ms"
+            decided_line(Build::Uncertified(digest, refused), ninety_mib, Duration::from_millis(4120), Duration::from_millis(85)),
+            "game executable: not certified, mf:modifier_sum rule 4 (every masked field points where it pointed): \
+             field +12 (rel32) calls 0x12c5000, which is not the certified callee (function, 96 bytes); \
+             sha256 ba7816bf8f01, 90.5 MiB, hashed in 4120 ms, resolved in 85 ms"
         );
         assert_eq!(
-            decided_line(Build::Certified(digest), 43_065_736, Duration::from_millis(370)),
+            decided_line(Build::Certified(digest), 43_065_736, Duration::from_millis(370), Duration::from_secs(9)),
             "game executable: certified by content (code-208704-r1), sha256 ba7816bf8f01, 41.0 MiB, hashed in 370 ms"
+        );
+        let relocated = &*Box::leak(Box::new(Relocated { layout: Layout::CERTIFIED, digests: GuardDigests::CERTIFIED, moved: 37 }));
+        assert_eq!(
+            decided_line(Build::Relocated(digest, relocated), 43_065_736, Duration::from_millis(370), Duration::from_millis(120)),
+            format!(
+                "game executable: relocated by content ({CERTIFICATE}), sha256 ba7816bf8f01, 41.0 MiB, hashed in 370 ms, \
+                 37 anchors moved, resolved in 120 ms"
+            )
         );
         // Decided by size: no digest and no time, whatever the caller passes.
         let by_size = "game executable: other build by size, 0.0 MiB, not hashed";
-        assert_eq!(decided_line(Build::BySize, 0, Duration::from_secs(9)), by_size);
+        assert_eq!(decided_line(Build::BySize, 0, Duration::from_secs(9), Duration::from_secs(9)), by_size);
+        // The Options window: how it was found, or why it is not read; nothing before a verdict.
+        assert_eq!(panel_line(None), "Game executable: not verified yet");
+        assert_eq!(panel_line(Some(Build::Certified(digest))), format!("Game executable: certified by content ({CERTIFICATE})"));
+        assert_eq!(panel_line(Some(Build::Relocated(digest, relocated))), "Game executable: relocated by content (37 anchors moved)");
+        assert_eq!(
+            panel_line(Some(Build::Uncertified(digest, failure("header", 8, "not AMD64 PE32+")))),
+            "Game executable: not certified, header rule 8 (header): not AMD64 PE32+"
+        );
+        assert_eq!(panel_line(Some(Build::BySize)), "Game executable: other build by size");
         assert_eq!(size_line(MAX_BYTES + 1), "game executable: other build by size, 128.0 MiB, not hashed");
         assert_eq!(
             addon_line("0.8.8", &digest, 2 * 1024 * 1024 + 300_000, Duration::from_millis(9)),
@@ -679,7 +1075,7 @@ mod tests {
             ..Layout::CERTIFIED
         }));
         let read = |bytes: Vec<u8>| {
-            header(&mut Reader::new(Image { bytes, readable: true }), BASE, layout)
+            header(&mut Reader::new(Image { bytes, readable: true }), BASE, layout, &GuardDigests::CERTIFIED)
                 .map(|profile| (profile.base, profile.layout.image_size))
         };
         let mut larger = certified();
@@ -696,5 +1092,237 @@ mod tests {
         let mut other = certified();
         other[..2].copy_from_slice(b"ZM");
         assert_eq!(check(other, false), Step::Failed);
+    }
+
+    // --------------------------------------------------------------------------------------
+    // The real file, end to end, when there is a copy to point at: the hash and, for the moved
+    // copy, the resolution, in slices of the real clock as the adapter makes them, then the
+    // guards of the three readers over the file laid out as its image:
+    //
+    //   TC_GW2_EXE=<copy> cargo test --offline --release -p tyrian_companion_nexus_core \
+    //       --lib executable -- --ignored --nocapture
+    //   TC_GW2_MOVED_EXE=<moved copy of test_relocation.py --keep-moved> ...
+    // --------------------------------------------------------------------------------------
+
+    /// The image base the copies are laid out at: the file's own, so that no pointer of it moves.
+    const IMAGE_BASE: u64 = 0x1_4000_0000;
+
+    /// The file laid out as the loader lays out its sections, at [`IMAGE_BASE`]: what the
+    /// readers find in memory, before the base relocations ASLR would apply.
+    struct Loaded {
+        data: Vec<u8>,
+        /// (RVA, virtual size, file offset, raw size) of each section.
+        sections: Vec<(u64, u64, u64, u64)>,
+    }
+
+    impl Loaded {
+        fn of(data: Vec<u8>) -> Self {
+            let u16_at = |at: usize| u64::from(u16::from_le_bytes([data[at], data[at + 1]]));
+            let u32_at = |at: usize| u64::from(u32::from_le_bytes(data[at..at + 4].try_into().unwrap()));
+            let pe = u32_at(0x3c) as usize;
+            let table = pe + 24 + u16_at(pe + 20) as usize;
+            let sections = (0..u16_at(pe + 6) as usize)
+                .map(|i| {
+                    let at = table + 40 * i;
+                    (u32_at(at + 12), u32_at(at + 8), u32_at(at + 20), u32_at(at + 16))
+                })
+                .collect();
+            Self { data, sections }
+        }
+    }
+
+    impl crate::inventory::Memory for Loaded {
+        fn read_exact(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), ReadError> {
+            let rva = address.checked_sub(IMAGE_BASE).ok_or(ReadError::ReadFailed)?;
+            let end = rva + bytes.len() as u64;
+            let &(va, _, ro, rs) =
+                self.sections.iter().find(|s| s.0 <= rva && end <= s.0 + s.1).ok_or(ReadError::ReadFailed)?;
+            for (i, byte) in bytes.iter_mut().enumerate() {
+                // Past its raw data, a section is zeros in memory.
+                let inside = rva + i as u64 - va;
+                *byte = if inside < rs { self.data[(ro + inside) as usize] } else { 0 };
+            }
+            Ok(())
+        }
+    }
+
+    /// How the adapter's calls went, for each phase: the hash, then the resolution.
+    struct Calls {
+        count: [u32; 2],
+        longest: [Duration; 2],
+        spent: [Duration; 2],
+    }
+
+    /// Hashes and decides `data` as the adapter does, in calls of at most `slice` of the real
+    /// clock: the build, how the calls of each phase went, and the hash.
+    fn decide_in_slices(data: Vec<u8>, slice: Duration) -> (Build, Calls, Hashing<File>) {
+        let mut file = File::of(data);
+        file.chunk = 65536;
+        let mut hashing = Hashing::start(file).ok().expect("a size in range");
+        let mut calls = Calls { count: [0; 2], longest: [Duration::ZERO; 2], spent: [Duration::ZERO; 2] };
+        loop {
+            let phase = usize::from(hashing.resolving());
+            let began = std::time::Instant::now();
+            let until = began + slice;
+            let step = hashing.advance(|| std::time::Instant::now() >= until);
+            let took = began.elapsed();
+            calls.count[phase] += 1;
+            calls.longest[phase] = calls.longest[phase].max(took);
+            calls.spent[phase] += took;
+            match step {
+                Step::Unfinished => continue,
+                Step::Decided(build) => return (build, calls, hashing),
+                Step::Failed => panic!("the system failed"),
+            }
+        }
+    }
+
+    /// The guards of the three readers for `profile`, each compared with the SHA-256 of what
+    /// `image` holds at its range: how many hold the profile's digest, of how many.
+    fn guards_hold(image: &mut Loaded, profile: BuildProfile) -> (usize, usize) {
+        let guards: Vec<Guard> = crate::bags::guards_in(profile)
+            .into_iter()
+            .chain(crate::wallet::guards_in(profile))
+            .chain(crate::magic_find::guards_in(profile))
+            .collect();
+        let held = guards
+            .iter()
+            .filter(|guard| {
+                let mut bytes = vec![0u8; guard.size];
+                crate::inventory::Memory::read_exact(image, IMAGE_BASE + guard.rva, &mut bytes).unwrap();
+                hex(&crate::sha256::sha256(&bytes)) == guard.sha256
+            })
+            .count();
+        (held, guards.len())
+    }
+
+    /// Whether each reader's own verification accepts `profile` over `image`.
+    fn readers_verify(image: Loaded, profile: BuildProfile) -> [bool; 3] {
+        let mut reader = Reader::new(image);
+        [
+            crate::bags::BagProfile::verified(&mut reader, profile).is_ok(),
+            crate::wallet::WalletProfile::verified(&mut reader, profile).is_ok(),
+            crate::magic_find::MagicFindProfile::verified(&mut reader, profile).is_ok(),
+        ]
+    }
+
+    #[test]
+    #[ignore]
+    fn the_copy_of_today_is_certified_by_identity_in_slices() {
+        let path = std::env::var("TC_GW2_EXE").expect("TC_GW2_EXE");
+        let data = std::fs::read(&path).unwrap();
+        let digest = crate::sha256::sha256(&data);
+        let (build, calls, mut hashing) = decide_in_slices(data.clone(), SLICE);
+        assert_eq!(build, Build::Certified(digest));
+        assert_eq!(calls.count[1], 0, "no resolution by identity");
+        let (layout, digests) = build.readable().unwrap();
+        assert_eq!((layout, digests), (&Layout::CERTIFIED, &GuardDigests::CERTIFIED));
+        // The resolution of identity, over the same file, gives the same: the file's digest at
+        // every guard is the audited one.
+        let Step::Decided(Ok(resolved)) = hashing.resolve(|| false) else { panic!("identity resolves") };
+        assert_eq!(resolved.mode, resolver::Mode::Identity);
+        let from_file = relocated(&resolved, &resolver::GAME).unwrap();
+        assert_eq!((&from_file.layout, &from_file.digests, from_file.moved), (&Layout::CERTIFIED, &GuardDigests::CERTIFIED, 0));
+        let profile = BuildProfile::checked_with(IMAGE_BASE, layout, digests).unwrap();
+        assert_eq!(guards_hold(&mut Loaded::of(data.clone()), profile), (36, 36));
+        assert_eq!(readers_verify(Loaded::of(data.clone()), profile), [true; 3]);
+        // In slices of a millisecond: the same build, in many calls.
+        let (sliced, small, _) = decide_in_slices(data, Duration::from_millis(1));
+        assert_eq!(sliced, build);
+        println!("{}", decided_line(build, hashing.hashed(), calls.spent[0], calls.spent[1]));
+        println!("{}", panel_line(Some(build)));
+        println!(
+            "slices of {SLICE:?}: {} call(s), longest {:?}; slices of 1 ms: {} calls, longest {:?}; \
+             36 of 36 guards hold the audited digests in the file laid out as its image, and the three readers verify",
+            calls.count[0], calls.longest[0], small.count[0], small.longest[0]
+        );
+    }
+
+    /// The resolution of `gen_relocation.py --resolve` over `exe`, as a [`Resolved`].
+    fn python_resolution(exe: &str) -> Resolved {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/relocation/gen_relocation.py");
+        let out = std::env::temp_dir().join(format!("tc-executable-{}.json", std::process::id()));
+        let status = std::process::Command::new("python3")
+            .args(["-I", script, "--resolve", exe, "--json", out.to_str().unwrap()])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("python3");
+        let json = std::fs::read_to_string(&out).unwrap_or_else(|_| panic!("python said {status}"));
+        let _ = std::fs::remove_file(&out);
+        let py: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let number = |v: &serde_json::Value| u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+        let places = |key: &str| {
+            py[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| resolver::Place {
+                    name: Box::leak(p["name"].as_str().unwrap().to_string().into_boxed_str()),
+                    rva: p["rva"].as_str().map(|_| number(&p["rva"])),
+                    how: None,
+                    file_sha256: None,
+                })
+                .collect()
+        };
+        Resolved {
+            mode: resolver::Mode::Relocated,
+            image_size: number(&py["image_size"]) as u32,
+            tls_index: number(&py["tls_index_rva"]),
+            rdata: (number(&py["rdata"][0]), number(&py["rdata"][1])),
+            anchors: places("anchors"),
+            vtables: places("vtables"),
+            search: None,
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn a_moved_copy_is_relocated_in_slices() {
+        let path = std::env::var("TC_GW2_MOVED_EXE").expect("TC_GW2_MOVED_EXE");
+        let data = std::fs::read(&path).unwrap();
+        let digest = crate::sha256::sha256(&data);
+        let (build, calls, hashing) = decide_in_slices(data.clone(), SLICE);
+        let Build::Relocated(named, found) = build else { panic!("{}", decided_line(build, 0, Duration::ZERO, Duration::ZERO)) };
+        assert_eq!(named, digest, "live_open names the file's own digest");
+        assert!(calls.count[1] >= 1);
+        // Every call within its slice, and the read under way: well within, on this machine.
+        assert!(calls.longest.iter().all(|took| *took <= SLICE + Duration::from_millis(250)), "{:?}", calls.longest);
+        // The same build in slices of a millisecond, and how far past such a slice a call goes.
+        let (sliced, small, _) = decide_in_slices(data.clone(), Duration::from_millis(1));
+        assert_eq!(sliced, build);
+        // The layout is the one of the Python resolver's places.
+        assert_eq!(Layout::from_resolved(&python_resolution(&path)).as_ref(), Ok(&found.layout));
+        assert_ne!(found.layout, Layout::CERTIFIED);
+        // The guards: every one holds the file's digest in the file laid out as its image, and the
+        // three readers verify; with the audited digests, those whose bytes moved do not.
+        let with_file = BuildProfile::checked_with(IMAGE_BASE, &found.layout, &found.digests).unwrap();
+        assert_eq!(guards_hold(&mut Loaded::of(data.clone()), with_file), (36, 36));
+        assert_eq!(readers_verify(Loaded::of(data.clone()), with_file), [true; 3]);
+        let with_certified = BuildProfile::checked(IMAGE_BASE, &found.layout).unwrap();
+        let (held, of) = guards_hold(&mut Loaded::of(data.clone()), with_certified);
+        let refused = readers_verify(Loaded::of(data), with_certified);
+        let differ = |audited: &[&str], file: &[&str]| audited.iter().zip(file).any(|(a, f)| a != f);
+        let certified = &GuardDigests::CERTIFIED;
+        assert_eq!(
+            refused,
+            [
+                !differ(&certified.bags, &found.digests.bags),
+                !differ(&certified.wallet, &found.digests.wallet),
+                !differ(&certified.magic_find, &found.digests.magic_find),
+            ],
+            "a reader verifies with the audited digests exactly when its file digests are those"
+        );
+        println!("{}", decided_line(build, hashing.hashed(), calls.spent[0], calls.spent[1]));
+        println!("{}", panel_line(Some(build)));
+        println!(
+            "slices of {SLICE:?}: {} call(s) of hash, longest {:?}; {} of resolution, longest {:?}; \
+             slices of 1 ms: {} and {} calls, longest {:?} and {:?}",
+            calls.count[0], calls.longest[0], calls.count[1], calls.longest[1],
+            small.count[0], small.count[1], small.longest[0], small.longest[1]
+        );
+        println!(
+            "the layout is gen_relocation.py --resolve's; 36 of 36 guards hold the file's digest and the three readers \
+             verify; with the audited digests {held} of {of} hold and the readers (bags, wallet, mf) verify {refused:?}"
+        );
     }
 }

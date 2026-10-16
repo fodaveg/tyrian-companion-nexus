@@ -17,6 +17,7 @@
 //! same, which the context probe cannot tell from no change.
 
 pub use crate::layout::Layout;
+pub use crate::passive::GuardDigests;
 use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -159,15 +160,31 @@ impl<M: Memory> Reader<M> {
 /// `'static` reference: a process has one executable and its layout is decided once, so the
 /// profile stays two words and `Copy`, and every reader of every cycle sees that one value
 /// rather than a copy of some 70 addresses each.
+///
+/// It carries, the same way, what the guards of the bag, wallet and Magic Find readers must find
+/// at the ranges the layout places ([`GuardDigests`]): the audited digests for the certified
+/// build, the file's own for one whose code moved.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildProfile {
     pub(crate) base: u64,
     pub(crate) layout: &'static Layout,
+    pub(crate) digests: &'static GuardDigests,
 }
 impl BuildProfile {
     /// The image at `base` read with `layout`, which must hold every relation of
     /// [`Layout::validate`]; the whole image of `layout.image_size` bytes must fit in user space.
+    /// Its guards must hold the audited digests ([`GuardDigests::CERTIFIED`]).
     pub fn checked(base: u64, layout: &'static Layout) -> Result<Self, ReadError> {
+        Self::checked_with(base, layout, &GuardDigests::CERTIFIED)
+    }
+
+    /// [`BuildProfile::checked`] with the digests the guards must hold: the ones the executable
+    /// file has at the ranges `layout` places (`executable::Build::readable`).
+    pub fn checked_with(
+        base: u64,
+        layout: &'static Layout,
+        digests: &'static GuardDigests,
+    ) -> Result<Self, ReadError> {
         if base < 0x10000
             || base & 7 != 0
             || layout.validate().is_err()
@@ -177,7 +194,7 @@ impl BuildProfile {
         {
             return Err(ReadError::Bounds);
         }
-        Ok(Self { base, layout })
+        Ok(Self { base, layout, digests })
     }
 }
 

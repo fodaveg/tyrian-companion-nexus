@@ -87,6 +87,11 @@ pub const fn guards_of(l: &Layout) -> [Guard; 5] {
 }
 /// The guards of the certified build, for the tests that fix them against the audit.
 pub const GUARDS: [Guard; 5] = guards_of(&Layout::CERTIFIED);
+/// The guards `profile`'s build must hold: the ranges where its layout places them, each with
+/// the digest its executable file has there ([`crate::passive::GuardDigests`]).
+pub fn guards_in(profile: BuildProfile) -> [Guard; 5] {
+    crate::passive::with_digests(guards_of(profile.layout), &profile.digests.wallet)
+}
 /// The audited key (volatile magic) and its hash, checked against the table the guard yields.
 pub const PROFILE_KEY: u32 = 45;
 pub const PROFILE_KEY_HASH: u32 = 0xc0da_54d6;
@@ -198,7 +203,7 @@ impl WalletProfile {
         profile: BuildProfile,
     ) -> Result<Self, WalletError> {
         let mut table = [0u32; 256];
-        for guard in &guards_of(profile.layout) {
+        for guard in &guards_in(profile) {
             let mut bytes = vec![0u8; guard.size];
             r.read_into(profile.base + guard.rva, &mut bytes)?;
             if hex(&sha256(&bytes)) != guard.sha256 {

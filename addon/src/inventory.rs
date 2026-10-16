@@ -36,8 +36,8 @@ use tyrian_companion_nexus_core::bags::{self, BagCoverage, BagProfile, BagSlots}
 use tyrian_companion_nexus_core::client::Readiness;
 use tyrian_companion_nexus_core::executable::{self, Build, HashedFile, Hashing, Stamp, Step};
 use tyrian_companion_nexus_core::inventory::{
-    self, BuildProfile, ContextSearch, Diagnostics, InventorySnapshot, Located, Memory, ReadError,
-    Reader, MAX_OWN_THREADS, MAX_SYSTEM_THREAD_ENTRIES,
+    self, BuildProfile, ContextSearch, Diagnostics, GuardDigests, InventorySnapshot, Layout,
+    Located, Memory, ReadError, Reader, MAX_OWN_THREADS, MAX_SYSTEM_THREAD_ENTRIES,
 };
 use tyrian_companion_nexus_core::magic_find::{
     self, CachedMagicFind, MagicFind, MagicFindCoverage, MagicFindProfile, Trace,
@@ -254,23 +254,35 @@ impl HashedFile for Executable {
 }
 
 /// How far the verification of the executable has got. The hash is done a slice on each pass
-/// of the bridge worker (`executable::SLICE`), so the file and the hash object wait here in
-/// between; once the file is known to be the certified build it is not hashed again, whatever
-/// fails after that.
+/// of the bridge worker (`executable::SLICE`), and so is the resolution of a file that does not
+/// hold the certificate at its fixed offsets, so the file and the hash object wait here in
+/// between; once the file is known to be readable it is not hashed again, whatever fails after
+/// that.
 enum Check {
     Unstarted,
-    /// The hash under way and the time its slices have taken so far, for the log line.
-    Hashing(Hashing<Executable>, Duration),
-    Certified,
+    /// The hash, or the resolution after it, under way, and the time the slices of each have
+    /// taken so far, for the log line.
+    Hashing(Hashing<Executable>, Duration, Duration),
+    /// A file read by identity or by relocation: what the readers read its image with.
+    Readable(&'static Layout, &'static GuardDigests),
 }
 static CHECK: Mutex<Check> = Mutex::new(Check::Unstarted);
+
+/// What the verification decided about the executable, for the Options window: once, for the
+/// whole load. Not set while it is under way or after a failure of the system.
+static BUILD: OnceLock<Build> = OnceLock::new();
+
+/// How the executable was found, or why it is not read, once that is decided.
+pub fn game_executable() -> Option<Build> {
+    BUILD.get().copied()
+}
 
 /// The first kind of failure of verifying the executable in this load and how many there have
 /// been. The system's failures are retried [`VERIFY_RETRY`] later, so this is counted and
 /// logged only when the count reaches a power of two, not on every retry.
 static VERIFY_FAILURES: Mutex<(Option<&'static str>, u32)> = Mutex::new((None, 0));
 
-/// Counts a failure of `kind` (`module`, `open`, `stat`, `hash` or `image`) and says it in the
+/// Counts a failure of `kind` (`module`, `open`, `stat`, `hash`, `resolve` or `image`) and says it in the
 /// log at the 1st, 2nd, 4th, 8th... one. Returns what `verify` returns for it.
 fn verification_failed(kind: &'static str) -> Attempt<Option<NativeReader>, Unverified> {
     let (first, count) = {
@@ -335,10 +347,11 @@ enum Unverified {
 /// verification the system failed is not kept: it is tried again [`VERIFY_RETRY`] later.
 static READER: Verdict<Option<NativeReader>, Unverified> = Verdict::new(VERIFY_RETRY);
 
-/// One step of verifying the executable: at most `executable::SLICE` of hashing, and once the
-/// file is the certified build's, the check of its loaded image.
+/// One step of verifying the executable: at most `executable::SLICE` of hashing or, for a file
+/// that does not hold the certificate at its fixed offsets, of its resolution, and once the file
+/// is readable, the check of its loaded image with the layout it is read with.
 ///
-/// `interrupted` cuts the slice of hashing short: the worker told to stop, or the game closing.
+/// `interrupted` cuts the slice short: the worker told to stop, or the game closing.
 fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<NativeReader>, Unverified> {
     // Safety: OS module metadata; no game function is resolved or called.
     let Ok(module) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else {
@@ -352,43 +365,54 @@ fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<N
         // Only for the log line of a verdict by size: a metadata call, no read of the file.
         let size = file.stamp().map_or(0, |stamp| stamp.len);
         match Hashing::start(file) {
-            Ok(hashing) => *check = Check::Hashing(hashing, Duration::ZERO),
+            Ok(hashing) => *check = Check::Hashing(hashing, Duration::ZERO, Duration::ZERO),
             // Its size alone: not the certified build, and no byte of it was read.
-            Err(Step::Decided(_)) => {
+            Err(Step::Decided(build)) => {
                 log::info!("{}", executable::size_line(size));
+                let _ = BUILD.set(build);
                 return Attempt::Settled(None);
             }
             Err(_) => return verification_failed("stat"),
         }
     }
-    if let Check::Hashing(hashing, spent) = &mut *check {
+    if let Check::Hashing(hashing, hashed, resolved) = &mut *check {
         let began = Instant::now();
         let until = began + executable::SLICE;
+        // A call is the hash's or the resolution's, never both: the one that ends the hash
+        // returns there (`Hashing::advance`).
+        let resolving = hashing.resolving();
         let step = hashing.advance(|| interrupted() || Instant::now() >= until);
-        *spent += began.elapsed();
+        *if resolving { &mut *resolved } else { &mut *hashed } += began.elapsed();
         match step {
             Step::Unfinished => return Attempt::Unfinished(Unverified::Pending),
             // The digest is the one the hash already gave: the file is not hashed again.
             Step::Decided(build) => {
-                log::info!("{}", executable::decided_line(build, hashing.hashed(), *spent));
-                match build {
-                    Build::Certified(digest) => {
-                        tyrian_companion_nexus_core::certificate::set_game_build(&digest);
-                        *check = Check::Certified;
+                log::info!("{}", executable::decided_line(build, hashing.hashed(), *hashed, *resolved));
+                let _ = BUILD.set(build);
+                match (build.readable(), build.digest()) {
+                    (Some((layout, digests)), Some(digest)) => {
+                        // `live_open` names the file's own SHA-256, by identity or relocated.
+                        tyrian_companion_nexus_core::certificate::set_game_build(digest);
+                        *check = Check::Readable(layout, digests);
                     }
-                    Build::Uncertified(..) | Build::BySize => {
+                    _ => {
                         *check = Check::Unstarted;
                         return Attempt::Settled(None);
                     }
                 }
             }
             Step::Failed => {
+                let kind = if hashing.resolving() { "resolve" } else { "hash" };
                 *check = Check::Unstarted;
-                return verification_failed("hash");
+                return verification_failed(kind);
             }
         }
     }
-    match NativeReader::of_image(module.0 as u64, stop) {
+    let Check::Readable(layout, digests) = *check else {
+        // Every other state returned above.
+        return verification_failed("hash");
+    };
+    match NativeReader::of_image(module.0 as u64, stop, layout, digests) {
         Step::Decided(reader) => Attempt::Settled(reader),
         _ => verification_failed("image"),
     }
@@ -479,11 +503,18 @@ pub fn sample(stop: &AtomicBool) -> Result<InventorySnapshot, ReadError> {
         .sample(stop)
 }
 impl NativeReader {
-    /// The reader for the image loaded at `base`, of an executable whose file is the certified
-    /// build's: `None` when the image is not what that build loads as, which is final.
-    fn of_image(base: u64, stop: &AtomicBool) -> Step<Option<Self>> {
+    /// The reader for the image loaded at `base`, of an executable whose file is read with
+    /// `layout` and `digests`: `None` when the image is not what that file loads as, which is
+    /// final.
+    fn of_image(
+        base: u64,
+        stop: &AtomicBool,
+        layout: &'static Layout,
+        digests: &'static GuardDigests,
+    ) -> Step<Option<Self>> {
+        let memory = ProcessMemory::new(stop);
         let profile =
-            match executable::image_profile(&mut Reader::new(ProcessMemory::new(stop)), base) {
+            match executable::image_profile(&mut Reader::new(memory), base, layout, digests) {
                 Step::Decided(Some(profile)) => profile,
                 Step::Decided(None) => return Step::Decided(None),
                 _ => return Step::Failed,

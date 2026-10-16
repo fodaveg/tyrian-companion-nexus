@@ -56,8 +56,9 @@ use crate::state::{SharedState, Status};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The socket read timeout while a connection is up. It is also how often the game context is
-/// sampled and how late a stop request can be noticed.
-const READ_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// sampled and how late a stop request can be noticed. The model of the executable's slices
+/// (`executable`'s tests) counts it in the worst wait of a heartbeat.
+pub(crate) const READ_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Granularity for waiting out a delay while still noticing a stop request promptly.
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);

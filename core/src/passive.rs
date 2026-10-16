@@ -73,6 +73,55 @@ pub(crate) fn verify<M: Memory>(
 fn in_range(value: u64) -> bool {
     (0x10000..=MAX_POINTER).contains(&value)
 }
+/// What every guard of the bag, wallet and Magic Find readers must find in memory: the SHA-256
+/// of the executable file's bytes over its range, where the layout places it, in hex and in the
+/// order of each reader's `guards_of`.
+///
+/// A guard proves that the code at a range is the code the reader was written against. For the
+/// certified build ([`GuardDigests::CERTIFIED`]) that is the audited digest, which the
+/// certificate checks in the file at the same offsets. A build whose code moved keeps the same
+/// code with its rel32 and rip-relative fields rewritten, so its bytes, and their digest, differ
+/// from the audited ones even where the layout is right: the resolver proves that code the same
+/// by its normalized digest and every field's target (`crate::resolver`), and the guard proves
+/// that memory holds what the file holds there. Nothing is loosened: the file's digest of a
+/// range is the certified one exactly when its bytes are, and a range of memory that differs from
+/// the file fails as it always did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardDigests {
+    pub bags: [&'static str; 12],
+    pub wallet: [&'static str; 5],
+    pub magic_find: [&'static str; 19],
+}
+
+impl GuardDigests {
+    /// The audited digests of the certified build: those of each reader's `GUARDS`.
+    pub const CERTIFIED: GuardDigests = GuardDigests {
+        bags: digests_of(crate::bags::GUARDS),
+        wallet: digests_of(crate::wallet::GUARDS),
+        magic_find: digests_of(crate::magic_find::GUARDS),
+    };
+}
+
+/// The digest of each guard, in order.
+const fn digests_of<const N: usize>(guards: [Guard; N]) -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut index = 0;
+    while index < N {
+        out[index] = guards[index].sha256;
+        index += 1;
+    }
+    out
+}
+
+/// `guards`, each with the digest `digests` gives it in the same order: the ranges stay where
+/// the layout put them.
+pub(crate) fn with_digests<const N: usize>(mut guards: [Guard; N], digests: &[&'static str; N]) -> [Guard; N] {
+    for (guard, digest) in guards.iter_mut().zip(digests) {
+        guard.sha256 = digest;
+    }
+    guards
+}
+
 /// Guards the fixtures stand in for must cover exactly the audited ranges: same names, RVAs
 /// and sizes, in the same order. Only the digests may differ, so an empty or shorter list can
 /// never yield a verified profile.

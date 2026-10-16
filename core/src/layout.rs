@@ -6,8 +6,8 @@
 //! [`crate::inventory::BuildProfile`], and [`Layout::CERTIFIED`] is the one the certificate
 //! proves (`code-208704-r1`, [`crate::certificate`]): with it every reader reads exactly what it
 //! read with the constants. A layout resolved from a build whose code moved (the relocation plan
-//! of `docs/audit/2026-10-16-relocation-study/`, batch 2) is another value of the same type; the
-//! readers do not change for it.
+//! of `docs/audit/2026-10-16-relocation-study/`, [`Layout::from_resolved`]) is another value of
+//! the same type; the readers do not change for it.
 //!
 //! Only addresses inside the image are here. Field offsets (`item+0x58`), vtable slots
 //! (`vtable+0x68`), sizes, masks and the other constants of the route are not: the readers keep
@@ -19,6 +19,7 @@
 //! address for the four of them, so a layout cannot give two readers two answers for it.
 
 use crate::certificate::{IMAGE_SIZE, SECTIONS};
+use crate::resolver::Resolved;
 use std::ops::Range;
 
 /// Every RVA of the game's executable the readers use, with the image's size and where its
@@ -255,6 +256,103 @@ impl Layout {
         magic_find_case: 0x3e4898,
         attribute_modifier_map: 0x3e3ea0,
     };
+
+    /// The layout of a resolved executable ([`crate::resolver`]): each RVA by the name of its
+    /// anchor or vtable in the relocation table, the names of the certificate (`bag:`, `wallet:`,
+    /// `mf:`, `item:` and `vtable <class>`); the image size, the TLS index and `.rdata` as the
+    /// resolver read them from the file's own header and TLS directory.
+    ///
+    /// `Err` names the first field's anchor that the table does not have or the resolution did
+    /// not place, so a table that lost a name never gives a layout with a hole in it; then the
+    /// relation of [`Layout::validate`] that the result breaks, if one does. Every field is named
+    /// below, so a field added to `Layout` does not build until this says which anchor gives it.
+    pub fn from_resolved(resolved: &Resolved) -> Result<Layout, &'static str> {
+        let layout = Self::from_names(resolved)?;
+        layout.validate()?;
+        Ok(layout)
+    }
+
+    /// [`Layout::from_resolved`] before [`Layout::validate`]: `Err` is always a name.
+    pub(crate) fn from_names(resolved: &Resolved) -> Result<Layout, &'static str> {
+        let at = |name: &'static str| resolved.resolved_rva(name).ok_or(name);
+        Ok(Layout {
+            image_size: u64::from(resolved.image_size),
+            tls_index: resolved.tls_index,
+            rdata_vtables: resolved.rdata.0..resolved.rdata.1,
+
+            char_context_vtable: at("vtable char_context")?,
+            character_agent_vtable: at("vtable character_agent")?,
+            character_vtable: at("vtable character")?,
+            combatant_vtable: at("vtable combatant")?,
+            player_vtable: at("vtable player (wallet character)")?,
+            player_stats_vtable: at("vtable player_stats")?,
+            inventory_vtable: at("vtable inventory")?,
+            item_context_vtable: at("vtable item_context")?,
+            bag_item_vtable: at("vtable bag_item (ItCliBag)")?,
+            conditional_item_a_vtable: at("vtable conditional item A")?,
+            conditional_predicate_a_vtable: at("vtable conditional predicate A")?,
+            conditional_item_b_vtable: at("vtable conditional item B")?,
+            conditional_predicate_b_vtable: at("vtable conditional predicate B")?,
+            conditional_item_c_vtable: at("vtable conditional item C")?,
+            conditional_predicate_c_vtable: at("vtable conditional predicate C")?,
+            currency_manager_vtable: at("vtable currency_manager")?,
+            buff_manager_vtable: at("vtable buff_manager")?,
+            buff_node_vtable: at("vtable buff_node")?,
+
+            hash_table: at("mf:hash_table + wallet:hash_table")?,
+
+            controlled_character_getter: at("bag:controlled_character_getter + mf:controlled_character_getter")?,
+            local_player_getter: at("mf:local_player_getter + wallet:local_character")?,
+            player_by_id_getter: at("mf:player_by_id_getter")?,
+            character_inventory_getter: at("bag:character_inventory_getter")?,
+            is_player: at("mf:is_player")?,
+            player_id_getter: at("mf:player_id_getter")?,
+            combatant_cast: at("mf:combatant_cast")?,
+            buff_manager_getter: at("mf:buff_manager_getter")?,
+            player_stats_getter: at("mf:player_stats_getter")?,
+            character_wallet_getter: at("wallet:wallet_manager")?,
+            account_luck_level_getter: at("mf:account_luck_level_getter")?,
+
+            inventory_owner_getter: at("bag:inventory_owner_getter")?,
+            location3_index_getter: at("item:location3_index_getter")?,
+            item_resolver: at("item:item_resolver")?,
+            item_definition_getter: at("bag:item_definition_getter")?,
+            item_instance_getter: at("item:item_instance_getter")?,
+            item_location_getter: at("item:item_location_getter")?,
+            final_stack_quantity_getter: at("item:final_stack_quantity_getter")?,
+            stackable_at_0x98: at("item:stackable_at_0x98")?,
+            stackable_at_0xd0: at("item:stackable_at_0xd0")?,
+            null_stackable: at("item:null_stackable")?,
+            stack_quantity_getter: at("item:stack_quantity_getter")?,
+            conditional_stackable_a8: at("item:conditional_stackable_a8")?,
+            conditional_stackable_e0: at("item:conditional_stackable_e0")?,
+            conditional_predicate_a: at("item:conditional_predicate_A")?,
+            conditional_predicate_b: at("item:conditional_predicate_B")?,
+            conditional_predicate_c: at("item:conditional_predicate_C")?,
+
+            bag_getter: at("bag:bag_getter")?,
+            bag_size_getter: at("bag:bag_size_getter")?,
+            bag_slot_count_getter: at("bag:bag_slot_count_getter")?,
+            free_slots_getter: at("bag:free_slots_getter")?,
+            used_slots_getter: at("bag:used_slots_getter")?,
+            capacity_getter: at("bag:capacity_getter")?,
+            slot_validity: at("bag:slot_validity")?,
+            capacity_counter_text: at("bag:capacity_counter_text")?,
+
+            balance_getter: at("wallet:balance_getter")?,
+            hash_lookup: at("wallet:hash_lookup")?,
+
+            modifier_value: at("mf:modifier_value")?,
+            pushed_modifier_sum: at("mf:pushed_modifier_sum")?,
+            buff_iterator: at("mf:buff_iterator")?,
+            buff_filter: at("mf:buff_filter")?,
+            buff_lookup: at("mf:buff_lookup")?,
+            modifier_sum: at("mf:modifier_sum")?,
+            modifier_formula: at("mf:modifier_formula")?,
+            magic_find_case: at("mf:magic_find_case")?,
+            attribute_modifier_map: at("mf:attribute_modifier_map")?,
+        })
+    }
 
     /// Each vtable with how far past it the readers read (its highest slot plus 8), and the
     /// relation that fails when it does not lie in `.rdata`.
@@ -499,7 +597,7 @@ const fn distinct(values: &[u64]) -> bool {
 const _: () = assert!(Layout::CERTIFIED.validate().is_ok());
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -638,6 +736,127 @@ mod tests {
         // The 47 ranges of the certificate that are a field of the layout, three of them named
         // twice because two readers share them.
         assert_eq!(fields, 47 + 3);
+    }
+
+    /// What the resolver gives for the certified build by identity: every anchor and vtable of
+    /// the game's table at the RVA it was certified at, and the certificate's image. A span of
+    /// the certificate carries, as the file's digest there, the certificate's own: a file that
+    /// holds the certificate has those bytes there.
+    pub(crate) fn identity() -> Resolved {
+        use crate::resolver::{Mode, Place, GAME};
+        let span = |name: &str| {
+            crate::certificate::SPANS.iter().find(|s| s.name == name).map(|s| {
+                let mut digest = [0u8; 32];
+                for (i, byte) in digest.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&s.sha256[2 * i..2 * i + 2], 16).unwrap();
+                }
+                digest
+            })
+        };
+        let place = |name: &'static str, rva: u32| Place { name, rva: Some(u64::from(rva)), how: None, file_sha256: span(name) };
+        Resolved {
+            mode: Mode::Identity,
+            image_size: IMAGE_SIZE,
+            tls_index: crate::certificate::GAME.tls_index_rva,
+            rdata: (
+                u64::from(SECTIONS[RDATA].rva),
+                u64::from(SECTIONS[RDATA].rva) + u64::from(SECTIONS[RDATA].virtual_size),
+            ),
+            anchors: GAME.anchors.iter().map(|a| place(a.name, a.rva)).collect(),
+            vtables: GAME.vtables.iter().map(|v| place(v.name, v.rva)).collect(),
+            search: None,
+        }
+    }
+
+    /// Each field of a layout and its value, as `Debug` writes them: every field, without a list
+    /// of them that could leave one out.
+    fn fields(layout: &Layout) -> Vec<(String, String)> {
+        format!("{layout:#?}")
+            .lines()
+            .filter_map(|line| line.trim().trim_end_matches(',').split_once(": "))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// The resolution of identity gives the certified layout, field by field.
+    #[test]
+    fn the_layout_of_the_identity_resolution_is_the_certified_one_field_by_field() {
+        let layout = Layout::from_resolved(&identity()).unwrap();
+        let (got, certified) = (fields(&layout), fields(&Layout::CERTIFIED));
+        assert_eq!(got.len(), 68);
+        for (field, expected) in got.iter().zip(&certified) {
+            assert_eq!(field, expected);
+        }
+        assert_eq!(layout, Layout::CERTIFIED);
+    }
+
+    /// Every one of the 68 fields comes from the resolution, each from one name of its own:
+    /// moving one anchor or vtable of the resolution, or its image size, TLS index or `.rdata`,
+    /// moves exactly one field, and every field is moved by one of them. A field left at a
+    /// constant would be moved by none; two fields read from one name, by the same one.
+    #[test]
+    fn every_field_of_the_layout_comes_from_one_place_of_the_resolution() {
+        let base = fields(&Layout::from_names(&identity()).unwrap());
+        let mut moved_by: Vec<Vec<String>> = vec![Vec::new(); base.len()];
+        let mut check = |what: String, resolved: Resolved| {
+            let changed: Vec<usize> = fields(&Layout::from_names(&resolved).unwrap())
+                .iter()
+                .zip(&base)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| i)
+                .collect();
+            assert!(changed.len() <= 1, "{what} moves {} fields", changed.len());
+            for i in changed {
+                moved_by[i].push(what.clone());
+            }
+        };
+        let names = crate::resolver::GAME.names();
+        for name in &names {
+            let mut resolved = identity();
+            let place = resolved
+                .anchors
+                .iter_mut()
+                .chain(resolved.vtables.iter_mut())
+                .find(|p| *name == p.name || name.strip_prefix("vtable ") == Some(p.name))
+                .unwrap();
+            place.rva = place.rva.map(|rva| rva + 0x10);
+            check(name.clone(), resolved);
+        }
+        let mut resolved = identity();
+        resolved.image_size += 0x1000;
+        check("image size".into(), resolved);
+        let mut resolved = identity();
+        resolved.tls_index += 8;
+        check("TLS index".into(), resolved);
+        let mut resolved = identity();
+        resolved.rdata.1 += 0x1000;
+        check(".rdata".into(), resolved);
+        for ((field, _), by) in base.iter().zip(&moved_by) {
+            assert_eq!(by.len(), 1, "{field} is moved by {by:?}");
+        }
+        assert_eq!(base.len(), 68);
+    }
+
+    /// A name the table does not have, or a place the resolution did not give, is no layout:
+    /// never one with a hole, or with the certified value standing in for it.
+    #[test]
+    fn a_layout_is_only_made_of_a_resolution_that_placed_every_field() {
+        let mut resolved = identity();
+        resolved.anchors.iter_mut().find(|p| p.name == "wallet:hash_lookup").unwrap().rva = None;
+        assert_eq!(Layout::from_resolved(&resolved), Err("wallet:hash_lookup"));
+        let mut resolved = identity();
+        resolved.vtables.retain(|p| p.name != "buff_node");
+        assert_eq!(Layout::from_resolved(&resolved), Err("vtable buff_node"));
+        // A resolution with none of the game's names, as the resolver's synthetic table gives.
+        let mut resolved = identity();
+        resolved.anchors.clear();
+        resolved.vtables.clear();
+        assert_eq!(Layout::from_resolved(&resolved), Err("vtable char_context"));
+        // Every place given, and a relation broken: refused with the relation.
+        let mut resolved = identity();
+        resolved.rdata = (0, 0);
+        assert_eq!(Layout::from_resolved(&resolved), Err("rdata_vtables is a non-empty range of the image"));
     }
 
     /// Each relation, broken on its own in an otherwise certified layout, is the one named.

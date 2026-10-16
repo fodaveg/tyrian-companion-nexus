@@ -277,6 +277,11 @@ pub const fn slots_of(l: &Layout) -> [(u64, u64, u64); 12] {
 }
 /// The guards and slots of the certified build, for the tests that fix them against the audit.
 pub const GUARDS: [Guard; 19] = guards_of(&Layout::CERTIFIED);
+/// The guards `profile`'s build must hold: the ranges where its layout places them, each with
+/// the digest its executable file has there ([`crate::passive::GuardDigests`]).
+pub fn guards_in(profile: BuildProfile) -> [Guard; 19] {
+    crate::passive::with_digests(guards_of(profile.layout), &profile.digests.magic_find)
+}
 pub const SLOTS: [(u64, u64, u64); 12] = slots_of(&Layout::CERTIFIED);
 // `BuildProfile::checked` only accepts a layout whose image reaches the TLS index, which lies
 // beyond every address this module reads inside the executable ([`Layout::validate`] checks it
@@ -330,7 +335,7 @@ impl MagicFindProfile {
         r: &mut Reader<M>,
         profile: BuildProfile,
     ) -> Result<Self, Uncovered> {
-        Self::build(r, profile, &guards_of(profile.layout))
+        Self::build(r, profile, &guards_in(profile))
     }
     /// For this crate's fixtures only; the addon calls [`Self::verified`] and nothing else.
     /// Fixtures carry no bytes of the game, so they stand for the executable with guard

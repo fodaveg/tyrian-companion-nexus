@@ -3,8 +3,8 @@
 //!
 //! It is the output of `scripts/relocation/gen_relocation.py`, which also resolves an executable
 //! with it offline (the semiautomatic recertification), and the tests below hold it to what the
-//! certificate says. [`crate::resolver`] is the same resolver in the addon; the readers do not
-//! go by it yet.
+//! certificate says. [`crate::resolver`] is the same resolver in the addon; the readers go by it
+//! when a build does not hold the certificate at its fixed offsets ([`crate::executable`]).
 //!
 //! The table keeps no byte of the game, as the certificate keeps none. For each anchor (the 51
 //! spans of the certificate, the constructors that install the vtables, and the context getter
