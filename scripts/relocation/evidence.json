@@ -1,0 +1,2288 @@
+{
+ "generated_by": "scripts/relocation/gen_relocation.py",
+ "inputs": {
+  "exe_sha256": "4a220846c8136dac90380ad0545304d6622a84cf6b0d45a46014212125c4a64d",
+  "recertification": "2026-10-15-recertification-build-208704.json",
+  "recertification_sha256": "a7358ab2b7500b6a3b7df2ff20f134bbbd9443d5abb347d64596cee11589a5eb",
+  "certificate_data_sha256": "12df871d7cc4889d7a804da6088bcdb1f3eeb094c9e251311a4cbece1a4d76ff",
+  "table_sha256": "a69fc847fd4dbe81cf9de86a2ec0af86b75a859fca84bdb812ff565b37acda47"
+ },
+ "parameters": {
+  "k": 16,
+  "prime": 4294967291,
+  "base": 16777619,
+  "ctor_max": 4096,
+  "ctor_window": 48
+ },
+ "counts": {
+  "anchors": 71,
+  "spans": 51,
+  "constructors": 19,
+  "tls_getters": 1,
+  "searched": 57,
+  "unique_searched": 53,
+  "vtables": 18,
+  "slots": 46,
+  "added_slots": 3,
+  "callees": 28,
+  "contents": 33,
+  "fields": 812,
+  "edges": {
+   "field_to_anchor": 31,
+   "constructor_lea": 27,
+   "vtable_slot": 46
+  }
+ },
+ "anchors": [
+  {
+   "name": "wallet:hash_lookup",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x2397f0",
+   "len": 296,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 206,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1960
+   },
+   "targets": [
+    "anchor",
+    "callee"
+   ]
+  },
+  {
+   "name": "mf:buff_lookup",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x251e20",
+   "len": 296,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 2,
+   "certified_survivors": 1,
+   "search": {
+    "at": 218,
+    "window_occurrences": 2,
+    "first_window_occurrences": 1960
+   },
+   "targets": [
+    "anchor",
+    "callee"
+   ]
+  },
+  {
+   "name": "mf:attribute_modifier_map",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x3e3ea0",
+   "len": 296,
+   "fields": 34,
+   "masked_bytes": 136,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 34,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "callee",
+    "content",
+    "image_base",
+    "internal"
+   ]
+  },
+  {
+   "name": "mf:magic_find_case",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x3e4898",
+   "len": 241,
+   "fields": 5,
+   "masked_bytes": 20,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee"
+   ]
+  },
+  {
+   "name": "mf:buff_manager_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x400100",
+   "len": 8,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 2,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "mf:account_luck_level_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x402b80",
+   "len": 4,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 2,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "bag:inventory_owner_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x45de30",
+   "len": 5,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 5,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "mf:local_player_getter + wallet:local_character",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x498900",
+   "len": 8,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "bag:capacity_counter_text",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x6a29d0",
+   "len": 136,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 1,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2
+   },
+   "targets": [
+    "callee"
+   ]
+  },
+  {
+   "name": "bag:controlled_character_getter + mf:controlled_character_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11b4f10",
+   "len": 29,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "mf:player_by_id_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11b77f0",
+   "len": 25,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "wallet:wallet_manager",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11bb070",
+   "len": 8,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "mf:player_stats_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11bb1c0",
+   "len": 8,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "mf:combatant_cast",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11d74b0",
+   "len": 14,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "bag:character_inventory_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11d7f60",
+   "len": 70,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 6,
+    "window_occurrences": 1,
+    "first_window_occurrences": 4
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "mf:player_id_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11d84e0",
+   "len": 54,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "mf:is_player",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11d9be0",
+   "len": 24,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "bag:bag_slot_count_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11eed90",
+   "len": 7,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "bag:free_slots_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11eef30",
+   "len": 59,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 9,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1960
+   },
+   "targets": []
+  },
+  {
+   "name": "bag:used_slots_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11eef70",
+   "len": 60,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "bag:capacity_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11eefb0",
+   "len": 103,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 4,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1960
+   },
+   "targets": []
+  },
+  {
+   "name": "wallet:balance_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12722a0",
+   "len": 80,
+   "fields": 1,
+   "masked_bytes": 4,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 3,
+    "window_occurrences": 1,
+    "first_window_occurrences": 12
+   },
+   "targets": [
+    "anchor"
+   ]
+  },
+  {
+   "name": "bag:bag_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12913f0",
+   "len": 72,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 4,
+    "window_occurrences": 1,
+    "first_window_occurrences": 17
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "bag:bag_size_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x1291440",
+   "len": 133,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 2,
+    "window_occurrences": 1,
+    "first_window_occurrences": 34
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "bag:slot_validity",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12915d0",
+   "len": 148,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 10,
+    "window_occurrences": 1,
+    "first_window_occurrences": 233
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "mf:modifier_sum",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c1050",
+   "len": 2536,
+   "fields": 73,
+   "masked_bytes": 292,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "content",
+    "internal"
+   ]
+  },
+  {
+   "name": "mf:modifier_formula",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c1a40",
+   "len": 816,
+   "fields": 41,
+   "masked_bytes": 164,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 11,
+    "window_occurrences": 1,
+    "first_window_occurrences": 75
+   },
+   "targets": [
+    "callee",
+    "content",
+    "image_base",
+    "internal"
+   ]
+  },
+  {
+   "name": "mf:modifier_value",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c2f60",
+   "len": 129,
+   "fields": 5,
+   "masked_bytes": 20,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 5,
+    "window_occurrences": 1,
+    "first_window_occurrences": 4
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "mf:pushed_modifier_sum",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c3030",
+   "len": 212,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "mf:buff_iterator",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c33e0",
+   "len": 188,
+   "fields": 1,
+   "masked_bytes": 4,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 4,
+    "window_occurrences": 1,
+    "first_window_occurrences": 90
+   },
+   "targets": [
+    "anchor"
+   ]
+  },
+  {
+   "name": "mf:buff_filter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x12c4e30",
+   "len": 142,
+   "fields": 1,
+   "masked_bytes": 4,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor"
+   ]
+  },
+  {
+   "name": "bag:item_definition_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c4930",
+   "len": 61,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "bag:item_factory_type_switch",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c7923",
+   "len": 40,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "image_base"
+   ]
+  },
+  {
+   "name": "bag:item_factory_bag_case",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c7a6a",
+   "len": 86,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 5,
+   "certified_survivors": 1,
+   "search": {
+    "at": 13,
+    "window_occurrences": 6,
+    "first_window_occurrences": 348
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "same_function"
+   ]
+  },
+  {
+   "name": "bag:item_factory_table_bag_entry",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c81f8",
+   "len": 4,
+   "fields": 1,
+   "masked_bytes": 4,
+   "certified_matches": null,
+   "certified_survivors": null,
+   "search": null,
+   "targets": [
+    "anchor"
+   ]
+  },
+  {
+   "name": "bag:bag_item_constructor",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c9730",
+   "len": 44,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 3,
+   "certified_survivors": null,
+   "search": null,
+   "targets": [
+    "callee",
+    "content",
+    "vtable"
+   ]
+  },
+  {
+   "name": "mf:hash_table + wallet:hash_table",
+   "kind": "span",
+   "section": ".rdata",
+   "rva": "0x1b90df0",
+   "len": 1024,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "item:location3_index_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x11eee60",
+   "len": 126,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 3,
+    "window_occurrences": 1,
+    "first_window_occurrences": 39
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:item_resolver",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c6f20",
+   "len": 81,
+   "fields": 3,
+   "masked_bytes": 12,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 6,
+    "window_occurrences": 1,
+    "first_window_occurrences": 15
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:item_instance_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x31ba20",
+   "len": 4,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 8,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "item:item_location_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c50f0",
+   "len": 8,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "item:final_stack_quantity_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c51f0",
+   "len": 63,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "item:stackable_at_0x98",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x84c4c0",
+   "len": 17,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "item:stackable_at_0xd0",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c8ce0",
+   "len": 17,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "item:null_stackable",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x168aa0",
+   "len": 3,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1202,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "item:stack_quantity_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x168d10",
+   "len": 4,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 62,
+   "certified_survivors": null,
+   "search": null,
+   "targets": []
+  },
+  {
+   "name": "item:conditional_stackable_a8",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13ca840",
+   "len": 51,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 1,
+    "window_occurrences": 1,
+    "first_window_occurrences": 3
+   },
+   "targets": []
+  },
+  {
+   "name": "item:conditional_stackable_e0",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13caa80",
+   "len": 52,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 6,
+    "window_occurrences": 1,
+    "first_window_occurrences": 3
+   },
+   "targets": []
+  },
+  {
+   "name": "item:conditional_predicate_A",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13ca880",
+   "len": 107,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:conditional_predicate_B",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13cb0b0",
+   "len": 49,
+   "fields": 0,
+   "masked_bytes": 0,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": []
+  },
+  {
+   "name": "item:conditional_predicate_C",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13cac50",
+   "len": 124,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "ctor:char_context",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11b1de0",
+   "len": 1770,
+   "fields": 91,
+   "masked_bytes": 364,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 133,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1393
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:char_context #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11b2640",
+   "len": 779,
+   "fields": 42,
+   "masked_bytes": 168,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 101,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:character_agent + character + combatant",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11d2810",
+   "len": 1948,
+   "fields": 82,
+   "masked_bytes": 328,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 8,
+    "window_occurrences": 1,
+    "first_window_occurrences": 142
+   },
+   "targets": [
+    "anchor",
+    "code",
+    "data",
+    "internal",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:character_agent + character + combatant #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11d3440",
+   "len": 1708,
+   "fields": 91,
+   "masked_bytes": 364,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 205,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1235
+   },
+   "targets": [
+    "anchor",
+    "code",
+    "data",
+    "internal",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:inventory",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11ebdf0",
+   "len": 829,
+   "fields": 36,
+   "masked_bytes": 144,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 8,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:inventory #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11ec130",
+   "len": 1110,
+   "fields": 19,
+   "masked_bytes": 76,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 74,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1393
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:player (wallet character)",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11b9cc0",
+   "len": 1106,
+   "fields": 58,
+   "masked_bytes": 232,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 17,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "anchor",
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:player (wallet character) #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x11ba1e0",
+   "len": 882,
+   "fields": 53,
+   "masked_bytes": 212,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 22,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1960
+   },
+   "targets": [
+    "anchor",
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:player_stats",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x12094b0",
+   "len": 146,
+   "fields": 4,
+   "masked_bytes": 16,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 4,
+    "window_occurrences": 1,
+    "first_window_occurrences": 157
+   },
+   "targets": [
+    "anchor",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:player_stats #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x1209550",
+   "len": 126,
+   "fields": 7,
+   "masked_bytes": 28,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 53,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:buff_manager",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x12c2560",
+   "len": 575,
+   "fields": 27,
+   "masked_bytes": 108,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 87,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1393
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:currency_manager",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x1271d10",
+   "len": 146,
+   "fields": 7,
+   "masked_bytes": 28,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "code",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:currency_manager #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x1272110",
+   "len": 276,
+   "fields": 17,
+   "masked_bytes": 68,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 54,
+    "window_occurrences": 1,
+    "first_window_occurrences": 233
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:buff_node",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x12c23a0",
+   "len": 441,
+   "fields": 14,
+   "masked_bytes": 56,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 15,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:item_context",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x13c6800",
+   "len": 351,
+   "fields": 15,
+   "masked_bytes": 60,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 6,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:item_context #2",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x13c6960",
+   "len": 230,
+   "fields": 7,
+   "masked_bytes": 28,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 8,
+    "window_occurrences": 1,
+    "first_window_occurrences": 2810
+   },
+   "targets": [
+    "code",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:conditional item A + conditional predicate A",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x13ca710",
+   "len": 72,
+   "fields": 5,
+   "masked_bytes": 20,
+   "certified_matches": 2,
+   "certified_survivors": 1,
+   "search": {
+    "at": 56,
+    "window_occurrences": 2,
+    "first_window_occurrences": 2
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:conditional item B + conditional predicate B",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x13caee0",
+   "len": 72,
+   "fields": 5,
+   "masked_bytes": 20,
+   "certified_matches": 2,
+   "certified_survivors": 1,
+   "search": {
+    "at": 56,
+    "window_occurrences": 2,
+    "first_window_occurrences": 2
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "ctor:conditional item C + conditional predicate C",
+   "kind": "constructor",
+   "section": ".text",
+   "rva": "0x13ca8f0",
+   "len": 166,
+   "fields": 9,
+   "masked_bytes": 36,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 33,
+    "window_occurrences": 1,
+    "first_window_occurrences": 294
+   },
+   "targets": [
+    "code",
+    "data",
+    "vtable"
+   ]
+  },
+  {
+   "name": "tls:context_getter",
+   "kind": "tls_getter",
+   "section": ".text",
+   "rva": "0x9b1fb0",
+   "len": 29,
+   "fields": 1,
+   "masked_bytes": 4,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 6,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "tls_index"
+   ]
+  }
+ ],
+ "vtables": [
+  {
+   "name": "char_context",
+   "rva": "0x215dfc8",
+   "lea_sites": [
+    "0x11b1dfa",
+    "0x11b2654"
+   ],
+   "slots": [
+    {
+     "offset": "0x68",
+     "anchor": "bag:controlled_character_getter + mf:controlled_character_getter",
+     "added": false
+    },
+    {
+     "offset": "0x70",
+     "anchor": "mf:local_player_getter + wallet:local_character",
+     "added": false
+    },
+    {
+     "offset": "0x118",
+     "anchor": "mf:player_by_id_getter",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "character_agent",
+   "rva": "0x2161250",
+   "lea_sites": [
+    "0x11d28a9",
+    "0x11d346d"
+   ],
+   "slots": [
+    {
+     "offset": "0xc8",
+     "anchor": "bag:character_inventory_getter",
+     "added": false
+    },
+    {
+     "offset": "0x68",
+     "anchor": "mf:is_player",
+     "added": false
+    },
+    {
+     "offset": "0x18",
+     "anchor": "mf:player_id_getter",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "inventory",
+   "rva": "0x2163228",
+   "lea_sites": [
+    "0x11ebe0f",
+    "0x11ec14e"
+   ],
+   "slots": [
+    {
+     "offset": "0x220",
+     "anchor": "bag:inventory_owner_getter",
+     "added": false
+    },
+    {
+     "offset": "0x138",
+     "anchor": "bag:bag_getter",
+     "added": false
+    },
+    {
+     "offset": "0x140",
+     "anchor": "bag:bag_size_getter",
+     "added": false
+    },
+    {
+     "offset": "0x148",
+     "anchor": "bag:bag_slot_count_getter",
+     "added": false
+    },
+    {
+     "offset": "0x1e0",
+     "anchor": "bag:free_slots_getter",
+     "added": false
+    },
+    {
+     "offset": "0x1e8",
+     "anchor": "bag:used_slots_getter",
+     "added": false
+    },
+    {
+     "offset": "0x1f0",
+     "anchor": "bag:capacity_getter",
+     "added": false
+    },
+    {
+     "offset": "0x190",
+     "anchor": "item:location3_index_getter",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "character",
+   "rva": "0x2160be0",
+   "lea_sites": [
+    "0x11d2891",
+    "0x11d345c"
+   ],
+   "slots": [
+    {
+     "offset": "0x100",
+     "anchor": "mf:combatant_cast",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "combatant",
+   "rva": "0x2161518",
+   "lea_sites": [
+    "0x11d2900",
+    "0x11d34c2"
+   ],
+   "slots": [
+    {
+     "offset": "0x38",
+     "anchor": "mf:buff_manager_getter",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "player (wallet character)",
+   "rva": "0x215e9d8",
+   "lea_sites": [
+    "0x11b9cdf",
+    "0x11ba1ef"
+   ],
+   "slots": [
+    {
+     "offset": "0x320",
+     "anchor": "mf:player_stats_getter",
+     "added": false
+    },
+    {
+     "offset": "0x250",
+     "anchor": "wallet:wallet_manager",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "player_stats",
+   "rva": "0x21691b8",
+   "lea_sites": [
+    "0x12094c1",
+    "0x120955a"
+   ],
+   "slots": [
+    {
+     "offset": "0x30",
+     "anchor": "mf:account_luck_level_getter",
+     "added": false
+    },
+    {
+     "offset": "0x260",
+     "anchor": "item:stack_quantity_getter",
+     "added": true
+    }
+   ]
+  },
+  {
+   "name": "buff_manager",
+   "rva": "0x21841a8",
+   "lea_sites": [
+    "0x12c257e",
+    "0x12c27ab"
+   ],
+   "slots": [
+    {
+     "offset": "0x18",
+     "anchor": "mf:modifier_value",
+     "added": false
+    },
+    {
+     "offset": "0x20",
+     "anchor": "mf:pushed_modifier_sum",
+     "added": false
+    },
+    {
+     "offset": "0x28",
+     "anchor": "mf:buff_iterator",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "currency_manager",
+   "rva": "0x2173178",
+   "lea_sites": [
+    "0x1271d24",
+    "0x127211f"
+   ],
+   "slots": [
+    {
+     "offset": "0x0",
+     "anchor": "wallet:balance_getter",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "buff_node",
+   "rva": "0x2184160",
+   "lea_sites": [
+    "0x12c23d6"
+   ],
+   "slots": []
+  },
+  {
+   "name": "bag_item (ItCliBag)",
+   "rva": "0x225de68",
+   "lea_sites": [
+    "0x13c973e"
+   ],
+   "slots": [
+    {
+     "offset": "0x8",
+     "anchor": "bag:item_definition_getter",
+     "added": false
+    },
+    {
+     "offset": "0x260",
+     "anchor": "item:null_stackable",
+     "added": true
+    }
+   ]
+  },
+  {
+   "name": "item_context",
+   "rva": "0x225ce50",
+   "lea_sites": [
+    "0x13c6814",
+    "0x13c6978"
+   ],
+   "slots": [
+    {
+     "offset": "0x10",
+     "anchor": "item:item_resolver",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional item A",
+   "rva": "0x225e6d0",
+   "lea_sites": [
+    "0x13ca71e"
+   ],
+   "slots": [
+    {
+     "offset": "0x8",
+     "anchor": "bag:item_definition_getter",
+     "added": false
+    },
+    {
+     "offset": "0x68",
+     "anchor": "item:item_instance_getter",
+     "added": false
+    },
+    {
+     "offset": "0x70",
+     "anchor": "item:item_location_getter",
+     "added": false
+    },
+    {
+     "offset": "0xa0",
+     "anchor": "item:final_stack_quantity_getter",
+     "added": false
+    },
+    {
+     "offset": "0x260",
+     "anchor": "item:conditional_stackable_a8",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional predicate A",
+   "rva": "0x225e9e8",
+   "lea_sites": [
+    "0x13ca741"
+   ],
+   "slots": [
+    {
+     "offset": "0x0",
+     "anchor": "item:conditional_predicate_A",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional item B",
+   "rva": "0x225eec8",
+   "lea_sites": [
+    "0x13caeee"
+   ],
+   "slots": [
+    {
+     "offset": "0x8",
+     "anchor": "bag:item_definition_getter",
+     "added": false
+    },
+    {
+     "offset": "0x68",
+     "anchor": "item:item_instance_getter",
+     "added": false
+    },
+    {
+     "offset": "0x70",
+     "anchor": "item:item_location_getter",
+     "added": false
+    },
+    {
+     "offset": "0xa0",
+     "anchor": "item:final_stack_quantity_getter",
+     "added": false
+    },
+    {
+     "offset": "0x260",
+     "anchor": "item:conditional_stackable_a8",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional predicate B",
+   "rva": "0x225f1d0",
+   "lea_sites": [
+    "0x13caf11"
+   ],
+   "slots": [
+    {
+     "offset": "0x0",
+     "anchor": "item:conditional_predicate_B",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional item C",
+   "rva": "0x225ea60",
+   "lea_sites": [
+    "0x13ca92c"
+   ],
+   "slots": [
+    {
+     "offset": "0x8",
+     "anchor": "bag:item_definition_getter",
+     "added": false
+    },
+    {
+     "offset": "0x68",
+     "anchor": "item:item_instance_getter",
+     "added": false
+    },
+    {
+     "offset": "0x70",
+     "anchor": "item:item_location_getter",
+     "added": false
+    },
+    {
+     "offset": "0xa0",
+     "anchor": "item:final_stack_quantity_getter",
+     "added": false
+    },
+    {
+     "offset": "0x260",
+     "anchor": "item:conditional_stackable_e0",
+     "added": false
+    }
+   ]
+  },
+  {
+   "name": "conditional predicate C",
+   "rva": "0x225ee08",
+   "lea_sites": [
+    "0x13ca95d"
+   ],
+   "slots": [
+    {
+     "offset": "0x20",
+     "anchor": "item:conditional_predicate_C",
+     "added": false
+    },
+    {
+     "offset": "0x28",
+     "anchor": "item:stack_quantity_getter",
+     "added": true
+    }
+   ]
+  }
+ ],
+ "callees": [
+  {
+   "rva": "0x23a470",
+   "bound": "function",
+   "offset": 0,
+   "len": 108,
+   "masked": 4
+  },
+  {
+   "rva": "0x2574f0",
+   "bound": "function",
+   "offset": 0,
+   "len": 108,
+   "masked": 4
+  },
+  {
+   "rva": "0x9db950",
+   "bound": "function",
+   "offset": 0,
+   "len": 223,
+   "masked": 8
+  },
+  {
+   "rva": "0x12ddc30",
+   "bound": "function",
+   "offset": 0,
+   "len": 301,
+   "masked": 19
+  },
+  {
+   "rva": "0x12e3c90",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 14,
+   "masked": 0
+  },
+  {
+   "rva": "0x3e4541",
+   "bound": "inside",
+   "offset": 82,
+   "len": 461,
+   "masked": 19
+  },
+  {
+   "rva": "0x1071650",
+   "bound": "function",
+   "offset": 0,
+   "len": 58,
+   "masked": 3
+  },
+  {
+   "rva": "0x10dbde0",
+   "bound": "function",
+   "offset": 0,
+   "len": 136,
+   "masked": 7
+  },
+  {
+   "rva": "0x1048020",
+   "bound": "function",
+   "offset": 0,
+   "len": 73,
+   "masked": 4
+  },
+  {
+   "rva": "0x9db7a0",
+   "bound": "function",
+   "offset": 0,
+   "len": 183,
+   "masked": 7
+  },
+  {
+   "rva": "0x9b6fd0",
+   "bound": "function",
+   "offset": 0,
+   "len": 149,
+   "masked": 17
+  },
+  {
+   "rva": "0x9b6870",
+   "bound": "function",
+   "offset": 0,
+   "len": 149,
+   "masked": 17
+  },
+  {
+   "rva": "0x110f0a0",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 8,
+   "masked": 1
+  },
+  {
+   "rva": "0x11d6ed0",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 45,
+   "masked": 0
+  },
+  {
+   "rva": "0x130c150",
+   "bound": "function",
+   "offset": 0,
+   "len": 43,
+   "masked": 0
+  },
+  {
+   "rva": "0x9cd5f0",
+   "bound": "function",
+   "offset": 0,
+   "len": 275,
+   "masked": 14
+  },
+  {
+   "rva": "0x9cce80",
+   "bound": "function",
+   "offset": 0,
+   "len": 20,
+   "masked": 1
+  },
+  {
+   "rva": "0x12e36d0",
+   "bound": "function",
+   "offset": 0,
+   "len": 50,
+   "masked": 1
+  },
+  {
+   "rva": "0x12c09b0",
+   "bound": "function",
+   "offset": 0,
+   "len": 256,
+   "masked": 17
+  },
+  {
+   "rva": "0x12c0ef0",
+   "bound": "function",
+   "offset": 0,
+   "len": 342,
+   "masked": 7
+  },
+  {
+   "rva": "0x9b7520",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 8,
+   "masked": 1
+  },
+  {
+   "rva": "0x1476320",
+   "bound": "function",
+   "offset": 0,
+   "len": 29,
+   "masked": 1
+  },
+  {
+   "rva": "0x12c1d70",
+   "bound": "function",
+   "offset": 0,
+   "len": 86,
+   "masked": 1
+  },
+  {
+   "rva": "0x13c81a2",
+   "bound": "inside",
+   "offset": 2154,
+   "len": 2328,
+   "masked": 172
+  },
+  {
+   "rva": "0x9b1010",
+   "bound": "function",
+   "offset": 0,
+   "len": 17,
+   "masked": 1
+  },
+  {
+   "rva": "0x9cce60",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 4,
+   "masked": 0
+  },
+  {
+   "rva": "0x13c4540",
+   "bound": "function",
+   "offset": 0,
+   "len": 168,
+   "masked": 6
+  },
+  {
+   "rva": "0x235de0",
+   "bound": "function",
+   "offset": 0,
+   "len": 139,
+   "masked": 1
+  }
+ ],
+ "contents": [
+  {
+   "rva": "0x1ac9488",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1ae66a0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x21618c0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1ae71f0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x217b230",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x217aba0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x217b2c0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x217b310",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1924e30",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1923648",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x19284b8",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x19284f0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2183f78",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2183fb8",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2183fc8",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2183fd8",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2183ff0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2184430",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1b68dcc",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225c930",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1ae8a08",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225e170",
+   "len": 16,
+   "pointers": [
+    0,
+    8
+   ]
+  },
+  {
+   "rva": "0x21638c0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x21649b8",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x19235b0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1922728",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225cea0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2171d48",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225e9f0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1ae8ad0",
+   "len": 16,
+   "pointers": [
+    8
+   ]
+  },
+  {
+   "rva": "0x193f920",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225ee60",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x225eeb8",
+   "len": 16,
+   "pointers": []
+  }
+ ],
+ "dropped_constructors": [
+  {
+   "name": "ctor:buff_manager #2",
+   "rva": "0x12c27a0",
+   "len": 18,
+   "certified_matches": 1,
+   "reason": "no window of 16 bytes without a field"
+  }
+ ],
+ "self_check": {
+  "mode": "relocated",
+  "anchors_at_certified_rva": 71,
+  "vtables_at_certified_rva": 18,
+  "how": {
+   "wallet:hash_lookup": "search (1 match)",
+   "mf:attribute_modifier_map": "search (1 match)",
+   "mf:magic_find_case": "search (1 match)",
+   "bag:capacity_counter_text": "search (1 match)",
+   "bag:controlled_character_getter + mf:controlled_character_getter": "search (1 match)",
+   "mf:player_by_id_getter": "search (1 match)",
+   "bag:character_inventory_getter": "search (1 match)",
+   "mf:player_id_getter": "search (1 match)",
+   "mf:is_player": "search (1 match)",
+   "bag:free_slots_getter": "search (1 match)",
+   "bag:used_slots_getter": "search (1 match)",
+   "bag:capacity_getter": "search (1 match)",
+   "wallet:balance_getter": "search (1 match)",
+   "bag:bag_getter": "search (1 match)",
+   "bag:bag_size_getter": "search (1 match)",
+   "bag:slot_validity": "search (1 match)",
+   "mf:modifier_sum": "search (1 match)",
+   "mf:modifier_formula": "search (1 match)",
+   "mf:modifier_value": "search (1 match)",
+   "mf:pushed_modifier_sum": "search (1 match)",
+   "mf:buff_iterator": "search (1 match)",
+   "mf:buff_filter": "search (1 match)",
+   "bag:item_definition_getter": "search (1 match)",
+   "bag:item_factory_type_switch": "search (1 match)",
+   "mf:hash_table + wallet:hash_table": "search (1 match)",
+   "item:location3_index_getter": "search (1 match)",
+   "item:item_resolver": "search (1 match)",
+   "item:final_stack_quantity_getter": "search (1 match)",
+   "item:stackable_at_0x98": "search (1 match)",
+   "item:stackable_at_0xd0": "search (1 match)",
+   "item:conditional_stackable_a8": "search (1 match)",
+   "item:conditional_stackable_e0": "search (1 match)",
+   "item:conditional_predicate_A": "search (1 match)",
+   "item:conditional_predicate_B": "search (1 match)",
+   "item:conditional_predicate_C": "search (1 match)",
+   "ctor:char_context": "search (1 match)",
+   "ctor:char_context #2": "search (1 match)",
+   "ctor:character_agent + character + combatant": "search (1 match)",
+   "ctor:character_agent + character + combatant #2": "search (1 match)",
+   "ctor:inventory": "search (1 match)",
+   "ctor:inventory #2": "search (1 match)",
+   "ctor:player (wallet character)": "search (1 match)",
+   "ctor:player (wallet character) #2": "search (1 match)",
+   "ctor:player_stats": "search (1 match)",
+   "ctor:player_stats #2": "search (1 match)",
+   "ctor:buff_manager": "search (1 match)",
+   "ctor:currency_manager": "search (1 match)",
+   "ctor:currency_manager #2": "search (1 match)",
+   "ctor:buff_node": "search (1 match)",
+   "ctor:item_context": "search (1 match)",
+   "ctor:item_context #2": "search (1 match)",
+   "ctor:conditional item C + conditional predicate C": "search (1 match)",
+   "tls:context_getter": "search (1 match)",
+   "mf:buff_lookup": "field +51 of mf:modifier_value",
+   "bag:item_factory_table_bag_entry": "field +31 of bag:item_factory_type_switch",
+   "char_context": "lea in ctor:char_context",
+   "character": "lea in ctor:character_agent + character + combatant",
+   "character_agent": "lea in ctor:character_agent + character + combatant",
+   "combatant": "lea in ctor:character_agent + character + combatant",
+   "inventory": "lea in ctor:inventory",
+   "player (wallet character)": "lea in ctor:player (wallet character)",
+   "player_stats": "lea in ctor:player_stats",
+   "buff_manager": "lea in ctor:buff_manager",
+   "currency_manager": "lea in ctor:currency_manager",
+   "buff_node": "lea in ctor:buff_node",
+   "item_context": "lea in ctor:item_context",
+   "conditional item C": "lea in ctor:conditional item C + conditional predicate C",
+   "conditional predicate C": "lea in ctor:conditional item C + conditional predicate C",
+   "mf:local_player_getter + wallet:local_character": "slot +0x70 of vtable char_context",
+   "bag:inventory_owner_getter": "slot +0x220 of vtable inventory",
+   "bag:bag_slot_count_getter": "slot +0x148 of vtable inventory",
+   "mf:combatant_cast": "slot +0x100 of vtable character",
+   "mf:buff_manager_getter": "slot +0x38 of vtable combatant",
+   "mf:player_stats_getter": "slot +0x320 of vtable player (wallet character)",
+   "wallet:wallet_manager": "slot +0x250 of vtable player (wallet character)",
+   "mf:account_luck_level_getter": "slot +0x30 of vtable player_stats",
+   "item:stack_quantity_getter": "slot +0x260 of vtable player_stats",
+   "item:item_instance_getter": "slot +0x68 of vtable conditional item C",
+   "item:item_location_getter": "slot +0x70 of vtable conditional item C",
+   "bag:item_factory_bag_case": "field +0 of bag:item_factory_table_bag_entry",
+   "bag:bag_item_constructor": "field +77 of bag:item_factory_bag_case",
+   "bag_item (ItCliBag)": "lea in bag:bag_item_constructor",
+   "item:null_stackable": "slot +0x260 of vtable bag_item (ItCliBag)",
+   "ctor:conditional item A + conditional predicate A": "search (2 matches), the field checks pick one",
+   "ctor:conditional item B + conditional predicate B": "search (2 matches), the field checks pick one",
+   "conditional item A": "lea in ctor:conditional item A + conditional predicate A",
+   "conditional predicate A": "lea in ctor:conditional item A + conditional predicate A",
+   "conditional item B": "lea in ctor:conditional item B + conditional predicate B",
+   "conditional predicate B": "lea in ctor:conditional item B + conditional predicate B"
+  },
+  "false_candidates": {
+   "wallet:hash_lookup": 0,
+   "mf:buff_lookup": 0,
+   "mf:attribute_modifier_map": 0,
+   "mf:magic_find_case": 0,
+   "bag:capacity_counter_text": 0,
+   "bag:controlled_character_getter + mf:controlled_character_getter": 0,
+   "mf:player_by_id_getter": 0,
+   "bag:character_inventory_getter": 0,
+   "mf:player_id_getter": 0,
+   "mf:is_player": 0,
+   "bag:free_slots_getter": 0,
+   "bag:used_slots_getter": 0,
+   "bag:capacity_getter": 0,
+   "wallet:balance_getter": 0,
+   "bag:bag_getter": 0,
+   "bag:bag_size_getter": 0,
+   "bag:slot_validity": 0,
+   "mf:modifier_sum": 0,
+   "mf:modifier_formula": 0,
+   "mf:modifier_value": 0,
+   "mf:pushed_modifier_sum": 0,
+   "mf:buff_iterator": 0,
+   "mf:buff_filter": 0,
+   "bag:item_definition_getter": 0,
+   "bag:item_factory_type_switch": 0,
+   "bag:item_factory_bag_case": 1,
+   "mf:hash_table + wallet:hash_table": 0,
+   "item:location3_index_getter": 0,
+   "item:item_resolver": 0,
+   "item:final_stack_quantity_getter": 0,
+   "item:stackable_at_0x98": 0,
+   "item:stackable_at_0xd0": 0,
+   "item:conditional_stackable_a8": 0,
+   "item:conditional_stackable_e0": 0,
+   "item:conditional_predicate_A": 0,
+   "item:conditional_predicate_B": 0,
+   "item:conditional_predicate_C": 0,
+   "ctor:char_context": 0,
+   "ctor:char_context #2": 0,
+   "ctor:character_agent + character + combatant": 0,
+   "ctor:character_agent + character + combatant #2": 0,
+   "ctor:inventory": 0,
+   "ctor:inventory #2": 0,
+   "ctor:player (wallet character)": 0,
+   "ctor:player (wallet character) #2": 0,
+   "ctor:player_stats": 0,
+   "ctor:player_stats #2": 0,
+   "ctor:buff_manager": 0,
+   "ctor:currency_manager": 0,
+   "ctor:currency_manager #2": 0,
+   "ctor:buff_node": 0,
+   "ctor:item_context": 0,
+   "ctor:item_context #2": 0,
+   "ctor:conditional item A + conditional predicate A": 0,
+   "ctor:conditional item B + conditional predicate B": 0,
+   "ctor:conditional item C + conditional predicate C": 0,
+   "tls:context_getter": 0
+  },
+  "hash_hits": 63,
+  "bytes_scanned": 39130412
+ }
+}
