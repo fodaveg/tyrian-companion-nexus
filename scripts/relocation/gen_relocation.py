@@ -682,18 +682,85 @@ def generate(exe, recert_path, cert_path, log=print):
 
     # Twins (certified_matches > 1 with a window): how many of the certified places pass every
     # field check, all anchors at their certified places. One means the field checks pick it.
+    # More than one (a template repeated whole, as the array reserve of Array.h) means no search
+    # can place it: it is not searched, and must be derived by the graph (below).
     located = {a['index']: a['rva'] for a in anchors}
     vloc = {v['index']: v['rva'] for v in vts}
     rt = runtime_table(table)
+    ambiguous = {}
     for a in anchors:
         if a['search'] and a['certified_matches'] and a['certified_matches'] > 1:
             ok = [h for h in a['certified_hits'] if check_fields(rt, pe, a['index'], h, located, vloc)[0]]
             a['certified_survivors'] = len(ok)
-            if ok and ok != [a['rva']]:
+            if len(ok) > 1 and a['rva'] in ok:
+                ambiguous[a['index']] = ok
+                a['search'] = None
+            elif ok and ok != [a['rva']]:
                 raise SystemExit('%s: the field checks pick %s' % (a['name'], ok))
         else:
             a['certified_survivors'] = None
+
+    # Every anchor the readers rely on that no search places (no window, every byte a field, or
+    # ambiguous) must be reached by the graph from the anchors a search places: a field of a
+    # reached anchor that names it, or a slot of a vtable that a lea of a reached anchor names.
+    # The resolver checks its signature where it is derived (rule 3). If nothing reaches it, no
+    # rule locates it, and the table is not written.
+    def referred_by(i):
+        return [b['name'] + ' +%d' % x['at'] for b in anchors for x in b['fields'] if x['to'][:2] == ('anchor', i)] + \
+               ['vtable %s +%#x' % (v['name'], s['offset']) for v in vts for s in v['slots'] if s['anchor'] == i]
+
+    reached, vreached = graph_closure(table, searched_start(table))
+    lost = []
+    for a in anchors:
+        if a['kind'] == 'constructor' or a['index'] in reached:
+            continue
+        if a['index'] in ambiguous:
+            why = '%d places of the certified build match it and %d of them pass every field check (%s), so no search can place it' % (
+                a['certified_matches'], len(ambiguous[a['index']]), ', '.join(hex(h) for h in ambiguous[a['index']]))
+        else:
+            why = 'it is not searched (certified matches: %s)' % a['certified_matches']
+        lost.append('%s: %s, and the graph does not reach it from the anchors a search places (referred to by: %s)' % (
+            a['name'], why, ', '.join(referred_by(a['index'])) or 'nothing'))
+    lost += ['vtable %s: the graph does not reach it from the anchors a search places' % v['name'] for v in vts if v['index'] not in vreached]
+    if lost:
+        raise SystemExit('no rule locates %d of the anchors and vtables; the table is not written:\n  %s' % (len(lost), '\n  '.join(lost)))
+    table['derived_not_searched'] = [
+        dict(name=anchors[i]['name'], rva=hex(anchors[i]['rva']), certified_matches=anchors[i]['certified_matches'],
+             certified_survivors=len(ok), passing=[hex(h) for h in ok], referred_by=referred_by(i))
+        for i, ok in sorted(ambiguous.items())]
     return table, pe
+
+
+def searched_start(table):
+    """The anchors a search can place: one match when certified, or one that the field checks
+    picked among several (twins)."""
+    return {a['index'] for a in table['anchors']
+            if a['search'] and (a['certified_matches'] == 1 or a['certified_survivors'] == 1)}
+
+
+def graph_closure(table, start):
+    """What the resolver's derivations (rules 3 and 6) reach from the anchors of start: the anchors
+    a field of a reached anchor names, the vtables a lea of a reached anchor names, and the
+    functions the slots of a reached vtable hold. (anchor indices, vtable indices)."""
+    A = table['anchors']
+    reached, vreached = set(start), set()
+    changed = True
+    while changed:
+        changed = False
+        for i in sorted(reached):
+            for x in A[i]['fields']:
+                if x['to'][0] == 'anchor' and x['to'][1] not in reached:
+                    reached.add(x['to'][1])
+                    changed = True
+                elif x['to'][0] == 'vtable' and x['to'][1] not in vreached:
+                    vreached.add(x['to'][1])
+                    changed = True
+        for j in sorted(vreached):
+            for s in table['vtables'][j]['slots']:
+                if s['anchor'] not in reached:
+                    reached.add(s['anchor'])
+                    changed = True
+    return reached, vreached
 
 
 # ------------------------------------------------------------------------------------------
@@ -1257,7 +1324,7 @@ def resolve(rt, pe, cert=None, force_search=False, stats=None):
                 passing = [h for h in found[a['index']] if check_fields(rt, pe, a['index'], h, located, vloc)[0]]
                 raise Fail(a['name'], '2', 'certified with 1 match, %d now (%d pass every field check): ambiguous, and nothing derives it' % (n, len(passing)))
             raise Fail(a['name'], '9', 'not located (search: %s, certified matches %s; no derivation reached it)' % (
-                'no window' if n is None else '%d matches' % n, a['certified_matches']))
+                'not searched' if n is None else '%d matches' % n, a['certified_matches']))
     for v in rt['vtables']:
         if v['index'] not in vloc:
             raise Fail('vtable ' + v['name'], '9', 'not located')
@@ -1329,6 +1396,7 @@ def evidence(table, inputs):
         callees=[dict(rva=hex(c['rva']), bound=c['bound'], offset=c['offset'], len=c['len'], masked=len(c['mask'])) for c in table['callees']],
         contents=[dict(rva=hex(c['rva']), len=c['len'], pointers=c['pointers']) for c in table['contents']],
         dropped_constructors=table['dropped_constructors'],
+        derived_not_searched=table['derived_not_searched'],
     )
 
 

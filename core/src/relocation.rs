@@ -6,12 +6,14 @@
 //! certificate says. [`crate::resolver`] is the same resolver in the addon; the readers go by it
 //! when a build does not hold the certificate at its fixed offsets ([`crate::executable`]).
 //!
-//! The table keeps no byte of the game, as the certificate keeps none. For each anchor (the 51
+//! The table keeps no byte of the game, as the certificate keeps none. For each anchor (the 57
 //! spans of the certificate, the constructors that install the vtables, and the context getter
 //! that reads the TLS index) it has:
 //!
 //! - where it was certified (RVA, length) and how many places of the certified build matched it
-//!   ([`Anchor::certified_matches`]): only an anchor that matched once is taken from a search;
+//!   ([`Anchor::certified_matches`]): only an anchor that matched once is taken from a search
+//!   (or one the field checks picked among its matches); one of which several matches pass
+//!   every field check is not searched, and is derived from a field or a slot that names it;
 //! - the positions of the fields that move with the code (rel32 branches, rip-relative and
 //!   image-relative displacements, jump-table entries), never their bytes, and where each one
 //!   pointed, as an identity ([`Target`]): another anchor, a vtable, a callee fingerprinted by
@@ -128,7 +130,8 @@ pub struct Anchor {
     /// `None` when every byte is a field (it is only derived).
     pub certified_matches: Option<u32>,
     /// For an anchor that matched more than once: how many of those places passed every field
-    /// check. One means the field checks pick it among the matches.
+    /// check. One means the field checks pick it among the matches; more than one, that no
+    /// search can place it (it has no [`Search`] and is only derived).
     pub certified_survivors: Option<u32>,
     pub search: Option<Search>,
     pub function: Option<Within>,
@@ -222,7 +225,7 @@ mod tests {
 
     #[test]
     fn every_span_of_the_certificate_is_an_anchor_where_it_was_certified() {
-        assert_eq!(certificate::SPANS.len(), 51);
+        assert_eq!(certificate::SPANS.len(), 57);
         for span in certificate::SPANS.iter() {
             let a = ANCHORS.iter().find(|a| a.name == span.name).unwrap_or_else(|| panic!("{}", span.name));
             assert_eq!((a.kind, a.rva, a.len), (AnchorKind::Span, rva_of(span.offset), span.len), "{}", span.name);
@@ -309,6 +312,28 @@ mod tests {
         let getter = &ANCHORS[TLS_GETTER];
         assert_eq!(getter.kind, AnchorKind::TlsGetter);
         assert!(getter.fields.iter().any(|f| f.target == Target::TlsIndex));
+    }
+
+    #[test]
+    fn what_no_search_places_is_named_by_a_field_or_a_slot() {
+        // An anchor with no search (no window free of fields, or several certified places that
+        // pass every field check, as the array reserve of Array.h) is only derived: a field of
+        // another anchor or a vtable slot must name it.
+        for (i, a) in ANCHORS.iter().enumerate() {
+            if a.search.is_some() {
+                continue;
+            }
+            let by_field =
+                ANCHORS.iter().any(|b| b.fields.iter().any(|f| matches!(f.target, Target::Anchor { anchor, .. } if anchor == i)));
+            let by_slot = VTABLES.iter().any(|v| v.slots.iter().any(|s| s.anchor == i));
+            assert!(by_field || by_slot, "{}", a.name);
+        }
+        let ambiguous: Vec<_> = ANCHORS
+            .iter()
+            .filter(|a| a.certified_survivors.is_some_and(|n| n > 1))
+            .map(|a| (a.name, a.certified_matches, a.search.is_none()))
+            .collect();
+        assert_eq!(ambiguous, [("item:array_reserve + bag:array_reserve", Some(2), true)]);
     }
 
     #[test]

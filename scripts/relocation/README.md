@@ -38,7 +38,7 @@ will.
 
 ## What the table holds, and why it holds no byte of the game
 
-Per anchor (the 51 spans of the certificate, 19 constructors that install the 18 vtables, and
+Per anchor (the 57 spans of the certificate, 19 constructors that install the 18 vtables, and
 the context getter that reads the TLS index): RVA, length, alignment, the positions and kinds of
 the fields that move with the code (the mask), where each field pointed as an identity, the
 SHA-256 of the anchor with those fields set to zero (normalized digest), how many places of the
@@ -56,7 +56,7 @@ Besides digests, positions, lengths, RVAs and counts, nothing derived from the b
 of appears in the generated files, in hex or in decimal.
 
 Limit: 13 anchors (the small getters, 3 to 14 bytes, whose raw digests the certificate already
-publishes) and 5 callees (4 to 17 bytes) have fewer than 16 bytes outside their fields; their
+publishes) and 9 callees (4 to 17 bytes) have fewer than 16 bytes outside their fields; their
 digests are of the same kind as those of the certificate.
 
 ## Rules (study, section 4), as the resolver applies them
@@ -82,13 +82,23 @@ digests are of the same kind as those of the certificate.
 
 - The window is the first field-free 16-byte window that occurs only once in the certified
   section, not the first one: first windows are often prologues (up to 2810 occurrences
-  measured); the chosen ones gave 63 hash hits in all over `.text` and `.rdata`.
+  measured); the chosen ones gave 63 hash hits in all over `.text` and `.rdata` with the table
+  of revision 1 of the certificate, 68 with that of revision 2.
 - Small anchors without a 16-byte field-free window (5 getters that are unique, and
   `bag_item_constructor`, whose longest field-free run is 13 bytes) are not searched: they are
   derived from vtable slots or from `item_factory_bag_case`, as in the study.
 - Twins: an anchor that matched several places when certified, of which exactly one passed
   every field check (the constructors of conditional items A and B, which are each other's
   twin), is taken from the search when exactly one passes now. The graph is tried first.
+- Several certified places that pass every field check (a template repeated whole: the array
+  reserve of `Array.h` of revision 2, 0x244840, whose 376 bytes and fields match at 0x1189d10
+  too): no search can place it, so it gets no window and is only derived, here by the call of
+  `inventory_slots_resize` (+52) and that of `item_array_growth` (+23), which must agree (rule
+  5), and checked by its normalized digest where they point (rule 3). Generation checks that
+  every anchor no search places (no window, every byte a field, or ambiguous) is reached by the
+  graph (fields that name an anchor, constructor leas, vtable slots) from the anchors a search
+  places, and stops naming each one it does not reach: no table is written with an anchor no
+  rule locates. `evidence.json` lists the ambiguous ones (`derived_not_searched`).
 - Constructors are only locators of vtables: their other fields must only stay in `.text` or
   `.rdata` (fingerprinting them would add about 160 callees and 70 contents the readers do not
   use), and one that is not found does not fail the resolution if its vtable is located. A
@@ -101,9 +111,11 @@ digests are of the same kind as those of the certificate.
 
 ## Measured (16 October 2026, copy `4a220846…a64d`)
 
-- Search in Python: 8.3 s over the 39,130,412 bytes of `.text` and `.rdata`, 63 hash hits,
-  1 false candidate before the digest (`item_factory_bag_case`).
-- The same scan in Rust (`rustc -O`, this machine, file in memory, 57 hashes): 210 ms
+- Search in Python: 8.3 s over the 39,130,412 bytes of `.text` and `.rdata`, 63 hash hits
+  (68 with the table of revision 2, 62 hashes), 1 false candidate before the digest
+  (`item_factory_bag_case`).
+- The same scan in Rust (`rustc -O`, this machine, file in memory, the 57 hashes of revision 1;
+  not measured again with revision 2): 210 ms
   (5.4 ns/byte); with a 256-entry table for the outgoing byte, 116 ms (3.0 ns/byte), same hits.
   Supposition, not measured: inside the hash pass of `executable.rs`, in 1 s slices on the
   player's machine, that is a fraction of a second of CPU spread over the slices.

@@ -4,7 +4,7 @@
 //! Until this module those RVAs were constants of each reader, so a reader could only run on the
 //! build they were taken from. The readers now take them from the [`Layout`] of their
 //! [`crate::inventory::BuildProfile`], and [`Layout::CERTIFIED`] is the one the certificate
-//! proves (`code-208704-r1`, [`crate::certificate`]): with it every reader reads exactly what it
+//! proves (`code-208704-r2`, [`crate::certificate`]): with it every reader reads exactly what it
 //! read with the constants. A layout resolved from a build whose code moved (the relocation plan
 //! of `docs/audit/2026-10-16-relocation-study/`, [`Layout::from_resolved`]) is another value of
 //! the same type; the readers do not change for it.
@@ -174,7 +174,7 @@ const _: () = assert!(matches!(
 const VTABLE_EXTENTS: usize = 18;
 
 impl Layout {
-    /// The layout of the certified build (`code-208704-r1`): the RVAs the recertification of
+    /// The layout of the certified build (`code-208704-r2`): the RVAs the recertification of
     /// 15 October 2026 proved (`docs/audit/2026-10-15-recertification-build-208704.json`) and
     /// the certificate checks in the file of every build. The image size and `.rdata` are the
     /// certificate's own, so the two cannot disagree.
@@ -692,10 +692,19 @@ pub(crate) mod tests {
             "modifier_formula" => l.modifier_formula,
             "magic_find_case" => l.magic_find_case,
             "attribute_modifier_map" => l.attribute_modifier_map,
+            // Ranges the certificate checks that are no field of the layout: the item factory's
+            // blocks, and (revision 2) the code that reads the four field offsets the readers
+            // rely on, which only the certificate and the relocation table hold.
             "item_factory_type_switch"
             | "item_factory_bag_case"
             | "item_factory_table_bag_entry"
-            | "bag_item_constructor" => return None,
+            | "bag_item_constructor"
+            | "inventory_location_getter"
+            | "inventory_slots_message"
+            | "inventory_slots_resize"
+            | "array_reserve"
+            | "item_array_growth"
+            | "definition_id_match" => return None,
             _ => panic!("the certificate names {name}, which the layout does not know"),
         })
     }
@@ -715,6 +724,18 @@ pub(crate) mod tests {
                 }
             }
         }
+        // Slots the certificate checks and no reader dereferences, so they may lie past the
+        // extent validate checks. A closed list, not a rule: each one says what it backs.
+        const ONLY_CERTIFIED: [&str; 1] = [
+            // Backs item +0x58 (the method that reads it); no reader dereferences this slot.
+            "vtable bag_item (ItCliBag) +0x170",
+        ];
+        for name in ONLY_CERTIFIED {
+            assert!(
+                crate::certificate::SLOTS.iter().any(|s| s.name == name),
+                "{name}: no longer a slot of the certificate, take it off the list"
+            );
+        }
         for slot in crate::certificate::SLOTS {
             let (class, at) = slot
                 .name
@@ -725,13 +746,15 @@ pub(crate) mod tests {
             let at = u64::from_str_radix(at.trim_start_matches("0x"), 16).unwrap();
             let vtable = named(l, class).unwrap();
             assert_eq!(vtable + at, rva_of(slot.offset), "{}", slot.name);
-            assert!(
-                l.vtable_extents()
-                    .iter()
-                    .any(|(rva, extent, _)| *rva == vtable && at + 8 <= *extent),
-                "{}: a slot past the extent validate checks",
-                slot.name
-            );
+            let within = l
+                .vtable_extents()
+                .iter()
+                .any(|(rva, extent, _)| *rva == vtable && at + 8 <= *extent);
+            if ONLY_CERTIFIED.contains(&slot.name) {
+                assert!(!within, "{}: inside the extent, take it off the list", slot.name);
+            } else {
+                assert!(within, "{}: a slot past the extent validate checks", slot.name);
+            }
         }
         // The 47 ranges of the certificate that are a field of the layout, three of them named
         // twice because two readers share them.

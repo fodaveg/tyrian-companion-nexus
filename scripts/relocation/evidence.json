@@ -4,8 +4,8 @@
   "exe_sha256": "4a220846c8136dac90380ad0545304d6622a84cf6b0d45a46014212125c4a64d",
   "recertification": "2026-10-15-recertification-build-208704.json",
   "recertification_sha256": "a7358ab2b7500b6a3b7df2ff20f134bbbd9443d5abb347d64596cee11589a5eb",
-  "certificate_data_sha256": "12df871d7cc4889d7a804da6088bcdb1f3eeb094c9e251311a4cbece1a4d76ff",
-  "table_sha256": "a69fc847fd4dbe81cf9de86a2ec0af86b75a859fca84bdb812ff565b37acda47"
+  "certificate_data_sha256": "5fe49ee79efebeb3811943bc4204cc3ef6e44a6d9ed5feaf31012c5e0c0e61ca",
+  "table_sha256": "d2044cd2f778c61b97303048191a401f71b84cdb246b316d6e56dee6633d425f"
  },
  "parameters": {
   "k": 16,
@@ -15,22 +15,22 @@
   "ctor_window": 48
  },
  "counts": {
-  "anchors": 71,
-  "spans": 51,
+  "anchors": 77,
+  "spans": 57,
   "constructors": 19,
   "tls_getters": 1,
-  "searched": 57,
-  "unique_searched": 53,
+  "searched": 62,
+  "unique_searched": 58,
   "vtables": 18,
-  "slots": 46,
+  "slots": 51,
   "added_slots": 3,
-  "callees": 28,
-  "contents": 33,
-  "fields": 812,
+  "callees": 34,
+  "contents": 43,
+  "fields": 859,
   "edges": {
-   "field_to_anchor": 31,
+   "field_to_anchor": 35,
    "constructor_lea": 27,
-   "vtable_slot": 46
+   "vtable_slot": 51
   }
  },
  "anchors": [
@@ -923,6 +923,125 @@
    ]
   },
   {
+   "name": "item:inventory_location_getter",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c4d80",
+   "len": 115,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 9,
+    "window_occurrences": 1,
+    "first_window_occurrences": 36
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:inventory_slots_message + bag:inventory_slots_message",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x1251410",
+   "len": 140,
+   "fields": 9,
+   "masked_bytes": 36,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 33,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:inventory_slots_resize + bag:inventory_slots_resize",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x128d680",
+   "len": 276,
+   "fields": 13,
+   "masked_bytes": 52,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee",
+    "content"
+   ]
+  },
+  {
+   "name": "item:array_reserve + bag:array_reserve",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x244840",
+   "len": 376,
+   "fields": 11,
+   "masked_bytes": 44,
+   "certified_matches": 2,
+   "certified_survivors": 2,
+   "search": null,
+   "targets": [
+    "callee",
+    "content",
+    "internal"
+   ]
+  },
+  {
+   "name": "item:item_array_growth",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c78ee",
+   "len": 53,
+   "fields": 2,
+   "masked_bytes": 8,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 0,
+    "window_occurrences": 1,
+    "first_window_occurrences": 1
+   },
+   "targets": [
+    "anchor",
+    "callee"
+   ]
+  },
+  {
+   "name": "item:definition_id_match",
+   "kind": "span",
+   "section": ".text",
+   "rva": "0x13c6a50",
+   "len": 146,
+   "fields": 6,
+   "masked_bytes": 24,
+   "certified_matches": 1,
+   "certified_survivors": null,
+   "search": {
+    "at": 8,
+    "window_occurrences": 1,
+    "first_window_occurrences": 11
+   },
+   "targets": [
+    "callee",
+    "content"
+   ]
+  },
+  {
    "name": "ctor:char_context",
    "kind": "constructor",
    "section": ".text",
@@ -1578,6 +1697,11 @@
      "added": false
     },
     {
+     "offset": "0x170",
+     "anchor": "item:inventory_location_getter",
+     "added": false
+    },
+    {
      "offset": "0x260",
      "anchor": "item:null_stackable",
      "added": true
@@ -1595,6 +1719,11 @@
     {
      "offset": "0x10",
      "anchor": "item:item_resolver",
+     "added": false
+    },
+    {
+     "offset": "0x0",
+     "anchor": "item:definition_id_match",
      "added": false
     }
    ]
@@ -1629,6 +1758,11 @@
     {
      "offset": "0x260",
      "anchor": "item:conditional_stackable_a8",
+     "added": false
+    },
+    {
+     "offset": "0x170",
+     "anchor": "item:inventory_location_getter",
      "added": false
     }
    ]
@@ -1678,6 +1812,11 @@
      "offset": "0x260",
      "anchor": "item:conditional_stackable_a8",
      "added": false
+    },
+    {
+     "offset": "0x170",
+     "anchor": "item:inventory_location_getter",
+     "added": false
     }
    ]
   },
@@ -1725,6 +1864,11 @@
     {
      "offset": "0x260",
      "anchor": "item:conditional_stackable_e0",
+     "added": false
+    },
+    {
+     "offset": "0x170",
+     "anchor": "item:inventory_location_getter",
      "added": false
     }
    ]
@@ -1945,6 +2089,48 @@
    "offset": 0,
    "len": 139,
    "masked": 1
+  },
+  {
+   "rva": "0x11b4500",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 16,
+   "masked": 0
+  },
+  {
+   "rva": "0x9b7550",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 10,
+   "masked": 1
+  },
+  {
+   "rva": "0x26dfb4",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 9,
+   "masked": 0
+  },
+  {
+   "rva": "0x26cfa0",
+   "bound": "function",
+   "offset": 0,
+   "len": 7,
+   "masked": 0
+  },
+  {
+   "rva": "0x9cd870",
+   "bound": "function",
+   "offset": 0,
+   "len": 146,
+   "masked": 9
+  },
+  {
+   "rva": "0x9b7320",
+   "bound": "leaf",
+   "offset": 0,
+   "len": 5,
+   "masked": 1
   }
  ],
  "contents": [
@@ -2117,6 +2303,56 @@
    "rva": "0x225eeb8",
    "len": 16,
    "pointers": []
+  },
+  {
+   "rva": "0x225caa0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2171560",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1937910",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x19370f0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x217aaa0",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2164708",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1922708",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x1922768",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x2163d50",
+   "len": 16,
+   "pointers": []
+  },
+  {
+   "rva": "0x21649e8",
+   "len": 16,
+   "pointers": []
   }
  ],
  "dropped_constructors": [
@@ -2128,9 +2364,25 @@
    "reason": "no window of 16 bytes without a field"
   }
  ],
+ "derived_not_searched": [
+  {
+   "name": "item:array_reserve + bag:array_reserve",
+   "rva": "0x244840",
+   "certified_matches": 2,
+   "certified_survivors": 2,
+   "passing": [
+    "0x244840",
+    "0x1189d10"
+   ],
+   "referred_by": [
+    "item:inventory_slots_resize + bag:inventory_slots_resize +52",
+    "item:item_array_growth +23"
+   ]
+  }
+ ],
  "self_check": {
   "mode": "relocated",
-  "anchors_at_certified_rva": 71,
+  "anchors_at_certified_rva": 77,
   "vtables_at_certified_rva": 18,
   "how": {
    "wallet:hash_lookup": "search (1 match)",
@@ -2168,6 +2420,11 @@
    "item:conditional_predicate_A": "search (1 match)",
    "item:conditional_predicate_B": "search (1 match)",
    "item:conditional_predicate_C": "search (1 match)",
+   "item:inventory_location_getter": "search (1 match)",
+   "item:inventory_slots_message + bag:inventory_slots_message": "search (1 match)",
+   "item:inventory_slots_resize + bag:inventory_slots_resize": "search (1 match)",
+   "item:item_array_growth": "search (1 match)",
+   "item:definition_id_match": "search (1 match)",
    "ctor:char_context": "search (1 match)",
    "ctor:char_context #2": "search (1 match)",
    "ctor:character_agent + character + combatant": "search (1 match)",
@@ -2188,6 +2445,7 @@
    "tls:context_getter": "search (1 match)",
    "mf:buff_lookup": "field +51 of mf:modifier_value",
    "bag:item_factory_table_bag_entry": "field +31 of bag:item_factory_type_switch",
+   "item:array_reserve + bag:array_reserve": "field +52 of item:inventory_slots_resize + bag:inventory_slots_resize",
    "char_context": "lea in ctor:char_context",
    "character": "lea in ctor:character_agent + character + combatant",
    "character_agent": "lea in ctor:character_agent + character + combatant",
@@ -2261,6 +2519,11 @@
    "item:conditional_predicate_A": 0,
    "item:conditional_predicate_B": 0,
    "item:conditional_predicate_C": 0,
+   "item:inventory_location_getter": 0,
+   "item:inventory_slots_message + bag:inventory_slots_message": 0,
+   "item:inventory_slots_resize + bag:inventory_slots_resize": 0,
+   "item:item_array_growth": 0,
+   "item:definition_id_match": 0,
    "ctor:char_context": 0,
    "ctor:char_context #2": 0,
    "ctor:character_agent + character + combatant": 0,
@@ -2282,7 +2545,7 @@
    "ctor:conditional item C + conditional predicate C": 0,
    "tls:context_getter": 0
   },
-  "hash_hits": 63,
+  "hash_hits": 68,
   "bytes_scanned": 39130412
  }
 }

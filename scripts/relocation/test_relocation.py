@@ -4,7 +4,8 @@
     python3 -I test_relocation.py <certified Gw2-64.exe> --tmp <directory outside the repo>
         [--recert13 docs/audit/2026-10-13-recertification-build-208574.json]
         [--table core/src/relocation_data.rs] [--certificate core/src/certificate_data.rs]
-        [--only identity,replay13,moved,negatives,leak] [--keep-moved <path outside the repo>]
+        [--recert docs/audit/2026-10-15-recertification-build-208704.json]
+        [--only identity,replay13,moved,negatives,generate,leak] [--keep-moved <path outside the repo>]
 
 Prints the literal outcome of each check and exits 1 if any did not come out as expected. The
 executables it makes (a copy with a block of .text moved, copies with one change each) are
@@ -23,6 +24,9 @@ deletes it. It prints RVAs, counts and digests, never bytes of the game.
 - negatives, each seen to fail, then seen to pass with the check that catches it broken on
   purpose: a field offset changed inside an anchor, the twin of mf:buff_lookup presented as
   the target of modifier_value's call, an anchor found at two places that both pass every check;
+- generate: the generator, run again, makes the committed table; an anchor of which several
+  certified places pass every field check (the array reserve) is not searched and something
+  derives it; with the graph derivation broken on purpose, generation stops on it;
 - leak: no 8-byte window of any range the table keeps a digest of appears in the generated
   files, in hex or in decimal.
 """
@@ -437,6 +441,32 @@ def test_negatives(rt, cert, pe, tmp, moved_path, m):
 
 
 # ------------------------------------------------------------------------------------------
+def test_generate(exe, recert, cert_path, table_path):
+    print('\n== generate: the committed table is the generator\'s, and what no search places is derived')
+    table, _ = g.generate(exe, recert, cert_path)
+    text = g.emit_rs(table)
+    committed = open(table_path).read()
+    check('the generator makes the committed table', text == committed, 'sha256 %s, committed %s' % (
+        g.sha(text.encode()), g.sha(committed.encode())))
+    d = table['derived_not_searched']
+    print('   several certified places pass every field check, so not searched: %s' % (
+        '; '.join('%s (%s), referred to by %s' % (x['name'], ', '.join(x['passing']), ', '.join(x['referred_by'])) for x in d) or 'none'))
+    check('an anchor no search can place is not searched, and something derives it',
+          all(x['referred_by'] for x in d) and all(by_name(table, x['name'])['search'] is None for x in d), '%d such anchors' % len(d))
+    # (d) The graph derivation broken on purpose: what no search places has no rule left.
+    name = 'item:array_reserve + bag:array_reserve'
+    with broken('graph_closure', lambda old: lambda t, start: (set(start), set())):
+        try:
+            g.generate(exe, recert, cert_path)
+            err = None
+        except SystemExit as e:
+            err = str(e)
+    line = next((l.strip() for l in (err or '').splitlines() if l.strip().startswith(name + ':')), None)
+    check('(d) with the graph derivation broken, generation stops on the array reserve', line is not None and 'no search can place it' in line,
+          '%s; %s' % (err.splitlines()[0], line) if err else 'generated')
+
+
+# ------------------------------------------------------------------------------------------
 def representations(w):
     out = [w.hex(), ' '.join('%02x' % c for c in w), ','.join('0x%02x' % c for c in w), ', '.join('0x%02x' % c for c in w),
            ''.join('\\x%02x' % c for c in w), ', '.join(str(c) for c in w), ','.join(str(c) for c in w), ' '.join(str(c) for c in w),
@@ -484,7 +514,8 @@ def main():
     ap.add_argument('--recert13', default=os.path.join(REPO, 'docs', 'audit', '2026-10-13-recertification-build-208574.json'))
     ap.add_argument('--table', default=g.DEFAULT_TABLE)
     ap.add_argument('--certificate', default=g.DEFAULT_CERT)
-    ap.add_argument('--only', default='identity,replay13,moved,negatives,leak')
+    ap.add_argument('--recert', default=os.path.join(REPO, 'docs', 'audit', '2026-10-15-recertification-build-208704.json'))
+    ap.add_argument('--only', default='identity,replay13,moved,negatives,generate,leak')
     ap.add_argument('--keep-moved', metavar='PATH', help='leave the moved copy at PATH (outside the repo)')
     args = ap.parse_args()
     tmp = os.path.realpath(args.tmp)
@@ -509,6 +540,8 @@ def main():
             moved = test_moved(rt, cert, pe, work)
         if 'negatives' in only:
             test_negatives(rt, cert, pe, work, *moved)
+        if 'generate' in only:
+            test_generate(args.exe, args.recert, args.certificate, args.table)
         if 'leak' in only:
             files = [args.table, g.DEFAULT_EVIDENCE, os.path.join(REPO, 'core', 'src', 'relocation.rs'), os.path.join(HERE, 'README.md')]
             test_leak(rt, pe, [p for p in files if os.path.exists(p)])
