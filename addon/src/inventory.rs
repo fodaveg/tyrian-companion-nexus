@@ -363,8 +363,11 @@ fn verify(stop: &AtomicBool, interrupted: &dyn Fn() -> bool) -> Attempt<Option<N
             Step::Decided(build) => {
                 log::info!("{}", executable::decided_line(build, hashing.hashed(), *spent));
                 match build {
-                    Build::Certified => *check = Check::Certified,
-                    Build::Other(_) => {
+                    Build::Certified(digest) => {
+                        tyrian_companion_nexus_core::certificate::set_game_build(&digest);
+                        *check = Check::Certified;
+                    }
+                    Build::Uncertified(..) | Build::BySize => {
                         *check = Check::Unstarted;
                         return Attempt::Settled(None);
                     }

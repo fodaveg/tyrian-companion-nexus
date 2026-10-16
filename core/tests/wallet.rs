@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::LazyLock;
 use tyrian_companion_nexus_core::inventory::{
-    BuildProfile, Memory, ReadError, Reader, BUILD_SHA256,
+    BuildProfile, Memory, ReadError, Reader, 
 };
+use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 use tyrian_companion_nexus_core::wallet::*;
 const BASE: u64 = 0x140000000;
@@ -131,7 +132,7 @@ impl Memory for Fixture {
     }
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BUILD_SHA256, BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, IMAGE).unwrap()
 }
 /// A certified image, a whole route and a map holding exactly `balances`.
 fn fixture(capacity: u32, balances: &[(u32, u32)]) -> Fixture {
@@ -178,7 +179,7 @@ fn read(m: Fixture) -> Result<WalletSnapshot, WalletError> {
 
 #[test]
 fn constants_guard_digests_and_key_hashes_match_the_audited_profile() {
-    assert_eq!(AUDITED["binary_sha256"].as_str(), Some(BUILD_SHA256));
+    assert_eq!(AUDITED["binary_sha256"].as_str(), Some(REFERENCE_BUILD_SHA256));
     assert_eq!(AUDITED["image_size"].as_u64(), Some(IMAGE));
     for (name, value) in [
         ("char_context_vtable", CHAR_CONTEXT_VTABLE),

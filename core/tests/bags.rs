@@ -24,8 +24,9 @@
 use std::collections::BTreeMap;
 use tyrian_companion_nexus_core::bags::*;
 use tyrian_companion_nexus_core::inventory::{
-    BuildProfile, Memory, ReadError, Reader, BUILD_SHA256,
+    BuildProfile, Memory, ReadError, Reader, 
 };
+use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
 use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
 
@@ -171,7 +172,7 @@ fn small() -> Fixture {
     fixture(&[20, 32, 32, 28], 128, 40)
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BUILD_SHA256, BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, IMAGE).unwrap()
 }
 /// Guards and one whole pass through the same budgeted reader, as the addon's first cycle does.
 fn run(m: Fixture) -> (Result<BagSlots, Uncovered>, usize) {
@@ -232,7 +233,7 @@ fn production_constants_are_the_audited_profile() {
     ] {
         assert_eq!(audited[name].as_u64(), Some(value), "{name}");
     }
-    assert_eq!(audited["binary_sha256"].as_str(), Some(BUILD_SHA256));
+    assert_eq!(audited["binary_sha256"].as_str(), Some(REFERENCE_BUILD_SHA256));
     let guards = audited["guards"].as_array().unwrap();
     assert_eq!(guards.len(), GUARDS.len());
     for (expected, guard) in guards.iter().zip(GUARDS) {

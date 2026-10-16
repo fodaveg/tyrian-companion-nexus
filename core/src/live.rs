@@ -1,7 +1,7 @@
 //! Negotiated live1 producer: one bounded snapshot in flight, durable ACK before advancing.
 //! This channel never computes causal loot. Baselines, context/owner changes and reconnects
 //! establish fresh epochs; the host owns observations and persistence.
-use crate::inventory::{InventorySnapshot, ReadError, BUILD_SHA256, PROFILE};
+use crate::inventory::{InventorySnapshot, ReadError, PROFILE};
 use crate::protocol::{is_canonical_instance, GameContext, GameState, MAX_LINE_BYTES};
 use crate::wallet::WalletSnapshot;
 use serde::{Deserialize, Serialize};
@@ -713,7 +713,7 @@ impl Frame {
             Frame::Open { epoch } => serde_json::to_writer(
                 out,
                 &OpenLine {
-                    build: BUILD_SHA256,
+                    build: crate::certificate::game_build(),
                     epoch,
                     nonce,
                     profile: PROFILE,

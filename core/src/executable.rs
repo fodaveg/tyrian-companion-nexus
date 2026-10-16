@@ -1,9 +1,11 @@
-//! Whether the game's executable is the certified build: what decides it for good, and what
-//! only means "not now".
+//! Whether the game's executable holds the certificate: what decides it for good, and what only
+//! means "not now".
 //!
-//! The readers touch a game field only after the executable was hashed and its loaded image
-//! checked. Some answers of that check depend on nothing but the file and the image: its size,
-//! its digest, its header. Those are final for as long as the process lives, whichever way
+//! The readers touch a game field only after the executable was read whole, found to hold what
+//! they rely on ([`crate::certificate`]), and its loaded image checked. Its SHA-256 is taken on
+//! the same pass and only names the build: since 16 October 2026 an update of the game that
+//! leaves that code as it was does not stop the readers. Some answers of that check depend on
+//! nothing but the file and the image: its size, its content, its header. Those are final for as long as the process lives, whichever way
 //! they go, and a "no" among them is another build: the source says so and stops. Every other
 //! way of not getting an answer is the system's doing, a file that cannot be opened or read
 //! or a copy that fails, and is tried again later.
@@ -14,7 +16,8 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::inventory::{BuildProfile, Memory, ReadError, Reader, BUILD_SHA256};
+use crate::certificate::{Certificate, Collector, CERTIFICATE, GAME};
+use crate::inventory::{BuildProfile, Memory, ReadError, Reader};
 use crate::live::RESPONSE_TIMEOUT;
 use crate::sha256::hex;
 
@@ -73,13 +76,16 @@ pub enum Step<T> {
     Failed,
 }
 
-/// Which build the file is, by its SHA-256.
+/// Whether the file holds what the readers rely on ([`crate::certificate`]), and its SHA-256.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Build {
-    Certified,
-    /// Another build. Its digest when it was decided by hashing the file, `None` when it was
-    /// decided by size alone, before a byte was read.
-    Other(Option<[u8; 32]>),
+    /// It holds the certificate. Its SHA-256 is whatever the game's update made it: it is the
+    /// build `live_open` names, not a condition.
+    Certified([u8; 32]),
+    /// It does not: its SHA-256 and the first check of the certificate that failed.
+    Uncertified([u8; 32], &'static str),
+    /// Decided by size alone, before a byte was read.
+    BySize,
 }
 
 /// The first 12 hex digits of a SHA-256: enough to tell one binary from another in a log line.
@@ -97,9 +103,9 @@ fn mib(bytes: u64) -> String {
 /// SHA-256, its size in MiB and how long the hash took. No path and no name of the file.
 pub fn decided_line(build: Build, bytes: u64, took: Duration) -> String {
     let (which, digest) = match build {
-        Build::Certified => ("certified", BUILD_SHA256[..12].to_string()),
-        Build::Other(Some(digest)) => ("other build", short_digest(&digest)),
-        Build::Other(None) => return size_line(bytes),
+        Build::Certified(digest) => (format!("certified by content ({CERTIFICATE})"), short_digest(&digest)),
+        Build::Uncertified(digest, check) => (format!("not certified, {check} differs"), short_digest(&digest)),
+        Build::BySize => return size_line(bytes),
     };
     format!("game executable: {which}, sha256 {digest}, {} MiB, hashed in {} ms", mib(bytes), took.as_millis())
 }
@@ -155,17 +161,24 @@ pub struct Hashing<F> {
     file: F,
     before: Stamp,
     hashed: u64,
+    /// The bytes the certificate names, copied as the file goes by.
+    collector: Collector,
 }
 
 impl<F: HashedFile> Hashing<F> {
     /// Starts on `file`. One of no bytes, or larger than [`MAX_BYTES`], is decided here as
     /// another build, and not a byte of it is read.
-    pub fn start(mut file: F) -> Result<Self, Step<Build>> {
+    pub fn start(file: F) -> Result<Self, Step<Build>> {
+        Self::start_with(file, &GAME)
+    }
+
+    /// [`Hashing::start`] against another certificate than the game's: the tests'.
+    pub fn start_with(mut file: F, certificate: &'static Certificate) -> Result<Self, Step<Build>> {
         let Some(before) = file.stamp() else { return Err(Step::Failed) };
         if !size_in_range(before.len) {
-            return Err(Step::Decided(Build::Other(None)));
+            return Err(Step::Decided(Build::BySize));
         }
-        Ok(Self { file, before, hashed: 0 })
+        Ok(Self { file, before, hashed: 0, collector: Collector::new(certificate) })
     }
 
     /// Hashes more of the file, until it ends or `expired` says this slice is over, which it
@@ -185,17 +198,22 @@ impl<F: HashedFile> Hashing<F> {
             if read == 0 {
                 break;
             }
+            let at = self.hashed;
             self.hashed = self.hashed.saturating_add(read as u64);
-            if self.hashed > self.before.len || !self.file.update(&buffer[..read.min(buffer.len())]) {
+            let bytes = &buffer[..read.min(buffer.len())];
+            if self.hashed > self.before.len || !self.file.update(bytes) {
                 return Step::Failed;
             }
+            self.collector.feed(at, bytes);
         }
         if self.hashed != self.before.len || self.file.stamp() != Some(self.before) {
             return Step::Failed;
         }
         match self.file.finish() {
-            Some(digest) if hex(&digest) == BUILD_SHA256 => Step::Decided(Build::Certified),
-            Some(digest) => Step::Decided(Build::Other(Some(digest))),
+            Some(digest) => Step::Decided(match self.collector.verdict() {
+                Ok(()) => Build::Certified(digest),
+                Err(check) => Build::Uncertified(digest, check),
+            }),
             None => Step::Failed,
         }
     }
@@ -212,8 +230,9 @@ pub fn size_in_range(len: u64) -> bool {
     len != 0 && len <= MAX_BYTES
 }
 
-/// The profile of the image loaded at `base`, for a process whose executable file has the
-/// certified digest: `Some` when its header is the certified build's, `None` when it is not.
+/// The profile of the image loaded at `base`, for a process whose executable file holds the
+/// certificate: `Some` when its header is the one the file says (an AMD64 PE32+ image of the
+/// certified size), `None` when it is not.
 ///
 /// The header is in memory for as long as the process lives and does not change, so a header
 /// that is not the expected one is as final as a digest that is not. Only a copy that failed
@@ -240,12 +259,16 @@ fn header<M: Memory>(reader: &mut Reader<M>, base: u64) -> Result<BuildProfile, 
         return Err(ReadError::UnsupportedBuild);
     }
     let image_size = reader.scalar(base + pe + 24 + 56, 4)?;
-    BuildProfile::checked(BUILD_SHA256, base, image_size)
+    if image_size != u64::from(crate::certificate::IMAGE_SIZE) {
+        return Err(ReadError::UnsupportedBuild);
+    }
+    BuildProfile::checked(base, image_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::certificate::synthetic::{certificate_and_file, one_byte_of_each_check};
     use crate::inventory::TLS_INDEX_RVA;
 
     const BASE: u64 = 0x7ff6_1000_0000;
@@ -276,7 +299,7 @@ mod tests {
         bytes[PE..PE + 4].copy_from_slice(b"PE\0\0");
         bytes[PE + 4..PE + 6].copy_from_slice(&0x8664u16.to_le_bytes());
         bytes[PE + 24..PE + 26].copy_from_slice(&0x20bu16.to_le_bytes());
-        bytes[PE + 80..PE + 84].copy_from_slice(&0x0300_0000u32.to_le_bytes());
+        bytes[PE + 80..PE + 84].copy_from_slice(&crate::certificate::IMAGE_SIZE.to_le_bytes());
         bytes
     }
 
@@ -305,8 +328,6 @@ mod tests {
         finish_fails: bool,
         /// A write to the file while it is being hashed, seen in its stamp at the end.
         written_meanwhile: bool,
-        /// The hash object says the certified digest, whatever went into it.
-        certified: bool,
         fed: Vec<u8>,
     }
 
@@ -324,7 +345,6 @@ mod tests {
                 stamp_fails: false,
                 finish_fails: false,
                 written_meanwhile: false,
-                certified: false,
                 fed: Vec::new(),
             }
         }
@@ -354,14 +374,7 @@ mod tests {
             if self.finish_fails {
                 return None;
             }
-            if !self.certified {
-                return Some(crate::sha256::sha256(&self.fed));
-            }
-            let mut digest = [0u8; 32];
-            for (byte, pair) in digest.iter_mut().zip(BUILD_SHA256.as_bytes().chunks_exact(2)) {
-                *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
-            }
-            Some(digest)
+            Some(crate::sha256::sha256(&self.fed))
         }
     }
 
@@ -369,12 +382,17 @@ mod tests {
         (0..len).map(|index| (index * 31 % 251) as u8).collect()
     }
 
-    /// Hashes `file` in one go and says how it ended.
+    /// Hashes `file` in one go against the synthetic certificate and says how it ended.
     fn whole(file: File) -> Step<Build> {
-        match Hashing::start(file) {
+        match Hashing::start_with(file, certificate_and_file().0) {
             Ok(mut hashing) => hashing.advance(|| false),
             Err(step) => step,
         }
+    }
+
+    /// A file that holds the synthetic certificate.
+    fn holding() -> Vec<u8> {
+        certificate_and_file().1
     }
 
     #[test]
@@ -382,9 +400,9 @@ mod tests {
         for len in [0, MAX_BYTES + 1] {
             let mut file = File::of(Vec::new());
             file.len = len;
-            // Even a hash that would say "certified": it is never asked.
-            file.certified = true;
-            assert!(matches!(Hashing::start(file), Err(Step::Decided(Build::Other(None)))), "{len}");
+            // Even a file that would hold the certificate: it is never read.
+            file.contents = holding();
+            assert!(matches!(Hashing::start(file), Err(Step::Decided(Build::BySize))), "{len}");
         }
         // The largest that is hashed is hashed.
         let mut largest = File::of(contents(10));
@@ -392,16 +410,29 @@ mod tests {
         assert!(Hashing::start(largest).is_ok());
     }
 
+    /// What decides is what the file holds, not its digest: two files with different digests
+    /// that both hold the certificate are both certified, each with its own digest, and one byte
+    /// that differs in any check is not, with the name of that check for the log.
     #[test]
-    fn the_digest_decides_which_build_it_is() {
-        // Another build carries the digest that said so, for the log.
-        assert_eq!(
-            whole(File::of(contents(12_345))),
-            Step::Decided(Build::Other(Some(crate::sha256::sha256(&contents(12_345)))))
-        );
-        let mut certified = File::of(contents(12_345));
-        certified.certified = true;
-        assert_eq!(whole(certified), Step::Decided(Build::Certified));
+    fn the_content_decides_and_the_digest_only_names_the_build() {
+        let data = holding();
+        assert_eq!(whole(File::of(data.clone())), Step::Decided(Build::Certified(crate::sha256::sha256(&data))));
+        let mut patched = data.clone();
+        patched[0x2c00] ^= 1;
+        assert_eq!(whole(File::of(patched.clone())), Step::Decided(Build::Certified(crate::sha256::sha256(&patched))));
+        assert_ne!(crate::sha256::sha256(&patched), crate::sha256::sha256(&data));
+        for (name, at) in one_byte_of_each_check() {
+            let mut changed = data.clone();
+            changed[at] ^= 0x40;
+            assert_eq!(
+                whole(File::of(changed.clone())),
+                Step::Decided(Build::Uncertified(crate::sha256::sha256(&changed), name)),
+                "byte {at:#x}"
+            );
+        }
+        // A file that is not an executable at all.
+        let other = contents(12_345);
+        assert_eq!(whole(File::of(other.clone())), Step::Decided(Build::Uncertified(crate::sha256::sha256(&other), "pe_header")));
     }
 
     /// The fault of the review: the hash had ten seconds in one go, on the thread that owes
@@ -409,8 +440,9 @@ mod tests {
     /// file goes into the hash once and in order, and a slow disk only means more slices.
     #[test]
     fn the_hash_goes_on_across_slices_from_where_it_stopped() {
-        let data = contents(40_500);
-        let mut hashing = Hashing::start(File::of(data.clone())).ok().unwrap();
+        let mut data = holding();
+        data.extend(contents(40_500 - data.len()));
+        let mut hashing = Hashing::start_with(File::of(data.clone()), certificate_and_file().0).ok().unwrap();
         let mut slices = 0;
         let outcome = loop {
             // A slice that lasts three reads, as one that ran out of time would.
@@ -427,7 +459,7 @@ mod tests {
         };
         // 41 reads of 1000 bytes and the one that finds the end: fourteen slices of three.
         assert_eq!((slices, hashing.hashed()), (14, 40_500));
-        assert_eq!(outcome, Step::Decided(Build::Other(Some(crate::sha256::sha256(&data)))));
+        assert_eq!(outcome, Step::Decided(Build::Certified(crate::sha256::sha256(&data))));
         assert_eq!(hashing.file.fed, data, "every byte once, in order");
         assert_eq!(hashing.file.reads, 42);
         // The same digest as in one go.
@@ -456,7 +488,7 @@ mod tests {
         }
         assert_eq!((hashing.hashed(), hashing.file.reads), (0, 0));
         // And it is still good for the rest.
-        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Other(Some(_)))));
+        assert!(matches!(hashing.advance(|| false), Step::Decided(Build::Uncertified(_, "pe_header"))));
     }
 
     /// The lines say which build, 12 hex digits, MiB and time; by size alone there is no digest.
@@ -467,16 +499,16 @@ mod tests {
         assert_eq!(short_digest(&digest), "ba7816bf8f01");
         let ninety_mib = 90 * 1024 * 1024 + 512 * 1024;
         assert_eq!(
-            decided_line(Build::Other(Some(digest)), ninety_mib, Duration::from_millis(4120)),
-            "game executable: other build, sha256 ba7816bf8f01, 90.5 MiB, hashed in 4120 ms"
+            decided_line(Build::Uncertified(digest, "mf:modifier_sum"), ninety_mib, Duration::from_millis(4120)),
+            "game executable: not certified, mf:modifier_sum differs, sha256 ba7816bf8f01, 90.5 MiB, hashed in 4120 ms"
         );
         assert_eq!(
-            decided_line(Build::Certified, 4_324_864, Duration::from_millis(37)),
-            format!("game executable: certified, sha256 {}, 4.1 MiB, hashed in 37 ms", &BUILD_SHA256[..12])
+            decided_line(Build::Certified(digest), 43_065_736, Duration::from_millis(370)),
+            "game executable: certified by content (code-208704-r1), sha256 ba7816bf8f01, 41.0 MiB, hashed in 370 ms"
         );
         // Decided by size: no digest and no time, whatever the caller passes.
         let by_size = "game executable: other build by size, 0.0 MiB, not hashed";
-        assert_eq!(decided_line(Build::Other(None), 0, Duration::from_secs(9)), by_size);
+        assert_eq!(decided_line(Build::BySize, 0, Duration::from_secs(9)), by_size);
         assert_eq!(size_line(MAX_BYTES + 1), "game executable: other build by size, 128.0 MiB, not hashed");
         assert_eq!(
             addon_line("0.8.8", &digest, 2 * 1024 * 1024 + 300_000, Duration::from_millis(9)),
@@ -485,8 +517,8 @@ mod tests {
         assert_eq!(failure_line("open", 3), "game executable: verification failed, first failure open, 3 so far");
     }
 
-    /// What the system fails to do is not an answer about the file: not even with a hash
-    /// object that would say "certified".
+    /// What the system fails to do is not an answer about the file: not even with a file that
+    /// holds the certificate.
     #[test]
     fn what_the_system_fails_to_do_decides_nothing() {
         let failing: [(&str, fn(&mut File)); 8] = [
@@ -500,15 +532,13 @@ mod tests {
             ("fewer bytes come out than it had", |file| file.len += 1),
         ];
         for (what, fault) in failing {
-            let mut file = File::of(contents(6_000));
-            file.certified = true;
+            let mut file = File::of(holding());
             fault(&mut file);
             assert_eq!(whole(file), Step::Failed, "{what}");
         }
         // The same file with nothing wrong is decided.
-        let mut sound = File::of(contents(6_000));
-        sound.certified = true;
-        assert_eq!(whole(sound), Step::Decided(Build::Certified));
+        let sound = holding();
+        assert_eq!(whole(File::of(sound.clone())), Step::Decided(Build::Certified(crate::sha256::sha256(&sound))));
     }
 
     #[test]
@@ -530,7 +560,7 @@ mod tests {
     /// in memory, it will be the same on every later look, and it is not this build.
     #[test]
     fn a_header_that_is_not_the_certified_one_is_decided_for_good() {
-        let broken: [(&str, fn(&mut Vec<u8>)); 7] = [
+        let broken: [(&str, fn(&mut Vec<u8>)); 8] = [
             ("no MZ", |bytes| bytes[..2].copy_from_slice(b"ZM")),
             ("a PE offset before the DOS header ends", |bytes| bytes[0x3c..0x40].copy_from_slice(&0x3fu32.to_le_bytes())),
             ("a PE offset past the first page", |bytes| bytes[0x3c..0x40].copy_from_slice(&4097u32.to_le_bytes())),
@@ -538,6 +568,7 @@ mod tests {
             ("another machine", |bytes| bytes[PE + 4..PE + 6].copy_from_slice(&0x014cu16.to_le_bytes())),
             ("a PE32 optional header", |bytes| bytes[PE + 24..PE + 26].copy_from_slice(&0x10bu16.to_le_bytes())),
             ("an image too small for the profile", |bytes| bytes[PE + 80..PE + 84].copy_from_slice(&(TLS_INDEX_RVA as u32).to_le_bytes())),
+            ("an image of another size than the certified file", |bytes| bytes[PE + 80..PE + 84].copy_from_slice(&(crate::certificate::IMAGE_SIZE + 0x1000).to_le_bytes())),
         ];
         for (what, damage) in broken {
             let mut bytes = certified();

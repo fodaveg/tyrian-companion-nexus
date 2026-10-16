@@ -92,7 +92,7 @@ impl Memory for &mut Fixture {
     }
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BUILD_SHA256, BASE, 0x2c49000).unwrap()
+    BuildProfile::checked(BASE, 0x2c49000).unwrap()
 }
 fn fixture(count: u64) -> Fixture {
     let mut m = Fixture::default();
@@ -342,22 +342,11 @@ fn stable_excluded_item_does_not_read_its_owner_definition_or_quantity() {
     assert_eq!(snapshot.unknown, 0);
 }
 #[test]
-fn wrong_build_and_invalid_ranges_cannot_read() {
-    assert!(matches!(
-        BuildProfile::checked("bad", BASE, 0x2c49000),
-        Err(ReadError::UnsupportedBuild)
-    ));
-    // One executable is certified at a time: the builds of 6 and 13 October 2026 no longer
-    // are, although the second has every audited range at the same RVA with the same bytes.
-    for previous in [
-        "27d179bfe6a92fae633b412b8be0c90f697cd08646fa66a2e04b9e794410802c",
-        "c9a6caca14393cf3278d6f3f51629e57a39820252e3ceafc140606a593606cfb",
-    ] {
-        assert!(matches!(
-            BuildProfile::checked(previous, BASE, 0x2c49000),
-            Err(ReadError::UnsupportedBuild)
-        ));
-    }
+fn invalid_ranges_cannot_read() {
+    // Which executable may be read is no longer a hash given here: since 16 October 2026 it is
+    // what the file holds, checked by `certificate` before a profile is made (its tests, and
+    // `executable`'s, are where a build that differs is refused).
+    assert!(matches!(BuildProfile::checked(0x1000, 0x2c49000), Err(ReadError::Bounds)));
     let mut r = Reader::new(fixture(570));
     assert!(r.read::<8>(1).is_err());
     assert!(r.read::<8>(u64::MAX - 1).is_err());

@@ -16,6 +16,7 @@
 
 pub mod backoff;
 pub mod bags;
+pub mod certificate;
 pub mod client;
 pub mod executable;
 pub mod exit_watch;

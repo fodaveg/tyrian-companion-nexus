@@ -34,8 +34,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use tyrian_companion_nexus_core::inventory::{
-    BuildProfile, Memory, ReadError, Reader, BUILD_SHA256,
+    BuildProfile, Memory, ReadError, Reader, 
 };
+use tyrian_companion_nexus_core::certificate::REFERENCE_BUILD_SHA256;
 use tyrian_companion_nexus_core::magic_find::*;
 use tyrian_companion_nexus_core::passive::{Guard, Uncovered};
 use tyrian_companion_nexus_core::sha256::{hex, sha256};
@@ -346,7 +347,7 @@ fn standard() -> (Fixture, (u64, u64, u64)) {
     standard_at(4)
 }
 fn profile() -> BuildProfile {
-    BuildProfile::checked(BUILD_SHA256, BASE, IMAGE).unwrap()
+    BuildProfile::checked(BASE, IMAGE).unwrap()
 }
 /// Guards and one whole pass through the same budgeted reader, as the addon's first cycle does.
 fn run(m: Fixture) -> (Result<MagicFind, Uncovered>, usize) {
@@ -1062,7 +1063,7 @@ fn production_constants_are_the_audited_profile() {
     ] {
         assert_eq!(audited[name].as_u64(), Some(value), "{name}");
     }
-    assert_eq!(audited["binary_sha256"].as_str(), Some(BUILD_SHA256));
+    assert_eq!(audited["binary_sha256"].as_str(), Some(REFERENCE_BUILD_SHA256));
     // The only formula the reader evaluates is the audited constant one.
     assert_eq!(audited["constant_formula"].as_u64(), Some(6));
     assert_eq!(with_record(record(MAGIC_FIND, 50.0)).map(|value| value.total), Ok(387.0));

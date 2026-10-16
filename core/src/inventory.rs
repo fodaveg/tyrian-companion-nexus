@@ -1,11 +1,13 @@
-//! Passive, bounded inventory interpretation for one certified GW2 build.
+//! Passive, bounded inventory interpretation for a GW2 executable that holds the certificate.
 //!
 //! Addresses here are RVAs/field offsets, never session pointers. The route and the field
 //! offsets come from the 2026-10-06 proof; the RVAs are those the static recertification of
 //! 13 October 2026 carried them to (`docs/audit/2026-10-13-recertification-build-208574.json`),
 //! which the game's build of 15 October 2026 keeps byte for byte
 //! (`docs/audit/2026-10-15-recertification-build-208704.json`). In this module and in `bags`,
-//! `wallet` and `magic_find`, every RVA and every digest belongs to that one executable.
+//! `wallet` and `magic_find`, every RVA and every digest belongs to that code, which
+//! `certificate` checks in the file of every build before a profile is made: a later build that
+//! keeps it byte for byte is read, one that changes it is not.
 //! The adapter provides exact reads; this module never dereferences or calls game code.
 //! A successful sample is a checked observation, not a causal loot event.
 //!
@@ -17,7 +19,6 @@ use crate::wallet::{WalletCoverage, WalletSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-pub const BUILD_SHA256: &str = "960c3e454847525993eb3266845ee37377511b8039635a7fbad6fd5592cb61ba";
 pub const PROFILE: &str = "owned-bags-v3";
 pub const TLS_INDEX_RVA: u64 = 0x28155c0;
 pub const MAX_POSITIONS: u32 = 640;
@@ -146,16 +147,15 @@ impl<M: Memory> Reader<M> {
     }
 }
 
-/// The hash must come from the executable itself. An unsupported hash cannot read game fields.
+/// The loaded image of an executable that holds the certificate ([`crate::certificate`]): only
+/// `executable::image_profile` makes one in the addon, after the file was certified by content.
+/// An executable that does not hold it never gets one, and so never reads a game field.
 #[derive(Debug, Clone, Copy)]
 pub struct BuildProfile {
     pub(crate) base: u64,
 }
 impl BuildProfile {
-    pub fn checked(hash: &str, base: u64, image_size: u64) -> Result<Self, ReadError> {
-        if hash != BUILD_SHA256 {
-            return Err(ReadError::UnsupportedBuild);
-        }
+    pub fn checked(base: u64, image_size: u64) -> Result<Self, ReadError> {
         if base < 0x10000
             || base & 7 != 0
             || image_size < TLS_INDEX_RVA + 4

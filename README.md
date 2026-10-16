@@ -282,14 +282,39 @@ A v3 host advertises `live_cap` after authentication. Older hosts get the existi
 heartbeat, alert acknowledgements and optional `farm1` messages only; no memory sampling
 starts without live negotiation. Presence and measurement availability remain independent.
 
-The reader validates the executable's SHA-256 and AMD64 PE profile, discovers TEB/TLS
-contexts autonomously, and checks the controlled character, inventory owner, location3
-matrix (`C8/D0/D4`), sparse instance resolver, definitions and quantity getter identities.
-No session pointer or PID is hardcoded. The currently certified executable is
-`960c3e454847525993eb3266845ee37377511b8039635a7fbad6fd5592cb61ba` (the game's update of 15
-October 2026, build 208704), profile `owned-bags-v3`. All other builds are unavailable until
-separately certified, those of 13 October (`c9a6caca…606cfb`) and 6 October (`27d179bf…0802c`)
-included: one executable is certified at a time.
+The reader checks that the executable holds what it relies on, discovers TEB/TLS contexts
+autonomously, and checks the controlled character, inventory owner, location3 matrix
+(`C8/D0/D4`), sparse instance resolver, definitions and quantity getter identities. No
+session pointer or PID is hardcoded. Profile `owned-bags-v3`.
+
+**Which builds are read: those that hold the certificate, whatever their hash** (since
+16 October 2026, certificate `code-208704-r1`, `core/src/certificate.rs`). Until then one
+SHA-256 of `Gw2-64.exe` was accepted at a time, and every update of the game stopped the
+addon until a release carried the new hash, also the updates of 15 and 16 October 2026 that
+changed none of the bytes the readers use. Now the addon checks on every load, in the file and
+as it hashes it, what each recertification used to check by hand:
+
+- the PE header: AMD64 PE32+, image base, image size, and every section's name, RVA,
+  virtual size and file offset, and the TLS directory's RVA;
+- the TLS directory's AddressOfIndex is the TLS index the context route reads;
+- the 37 code and table ranges the three profiles keep by digest, and the 14 functions the
+  inventory reader compares by address only, each by the SHA-256 of its bytes;
+- the 43 vtable slots the readers follow hold the proven functions.
+
+All of it holds: the file is certified, and `live_open.build` carries its own SHA-256. Any of
+it differs: `unsupported_build`, as before, and the log names the first check that failed
+(`game executable: not certified, mf:modifier_sum differs, sha256 …`). An update that moves or
+changes that code still needs a recertification; nothing searches for a range elsewhere or
+relocates the profile. The plugin accepts any well-formed hash in `live_open` from 0.7.6 on
+(earlier plugins only accept the hashes of 6, 13 and 15 October).
+
+The table is generated from the recertification of 15 October and from the 14 functions,
+which had no digest until then: their bytes were taken from the file of 16 October 2026
+(sha256 `4a220846…a64d`), whose 37 ranges, 43 slots, sections and TLS index are those of
+15 October byte for byte, after checking each of the 14 against the instructions the
+recertification of 15 October read in them (`docs/audit/2026-10-16-content-certificate/`).
+A copy of the installed file can be checked with
+`TC_GW2_EXE=<copy> cargo test --offline -p tyrian_companion_nexus_core --lib certificate -- --ignored`.
 
 The certificate of 15 October was carried over from the build of 13 October statically, over
 the file on disk and nothing else (`docs/audit/2026-10-15-recertification-build-208704.json`).
@@ -318,14 +343,15 @@ there is what the owner saw that same evening, on Fedora under Proton with the c
 Magic Find, once its three bounds were raised (see "Bag slots and Magic Find"), read without
 a break for the 4 minutes 20 seconds its log was watched (498, with 111 buffs of 76
 definitions in a table of 512 buckets, 59314 bytes a pass). The wallet and the bag slots
-were not looked at apart. The `live_open` frame carries the certified hash, so the plugin has
-to accept it as well: 0.6.57 is the first that accepted the one of 13 October, and 0.7.3 the
-first that accepts the one of 15 October.
+were not looked at apart. The `live_open` frame carried the certified hash, so the plugin had
+to accept it as well: 0.6.57 was the first that accepted the one of 13 October, and 0.7.3 the
+first that accepted the one of 15 October.
 
 That verification starts on the first cycle and its answer is kept for the whole load only
-when it is final, which is whenever the file or its loaded image decides it: the certified
-build, or another one, by a size that cannot be the certified build's (no bytes, or more than
-128 MiB), a hash that was computed and is not its, or a header in memory that is not its. A
+when it is final, which is whenever the file or its loaded image decides it: it holds the
+certificate, or it does not, by a size that cannot be an executable to read (no bytes, or more
+than 128 MiB), a content that differs from the certificate, or a header in memory that is not
+the one the file says. A
 "no" of those is `unsupported_build` to the host and stops the source, as it always did.
 
 The hash is done a second at a time (`executable::SLICE`), once on each pass of the thread

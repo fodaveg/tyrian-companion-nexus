@@ -217,7 +217,9 @@ pub fn options_render(ui: &Ui) {
     });
     if ui.collapsing_header("Reader diagnostics", TreeNodeFlags::empty()) {
         ui.text_wrapped(format!("Profile: {}", tyrian_companion_nexus_core::inventory::PROFILE));
-        ui.text_wrapped(format!("Supported build SHA-256: {}", tyrian_companion_nexus_core::inventory::BUILD_SHA256));
+        // The executable is read when it holds the certificate, whatever its hash: the log says
+        // which build it was and, when it was not certified, which check failed.
+        ui.text_wrapped(format!("Game executable: certified by content ({})", tyrian_companion_nexus_core::certificate::CERTIFICATE));
         ui.text_wrapped(if diagnostics.owner_verified { "Inventory owner: verified" } else { "Inventory owner: not verified" });
         ui.text_wrapped(format!("Own threads: {} / {}; positions: {} / 640", diagnostics.threads, tyrian_companion_nexus_core::inventory::MAX_OWN_THREADS, diagnostics.positions));
         ui.text_wrapped(format!("Requested bytes: {} / 131072; reads: {} / 32768", diagnostics.bytes, diagnostics.reads));
